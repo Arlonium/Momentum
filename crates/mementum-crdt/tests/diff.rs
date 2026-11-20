@@ -709,8 +709,8 @@ fn interleaved(current: &[Block], added: &[Block]) -> Vec<Block> {
 /// `diff_cost` compte ce que la différence écrit : un bloc changé sur 10 000 coûte la lecture de
 /// la page, loin de la récriture ; des blocs insérés un sur deux coûtent le parcours de la liste à
 /// chaque insertion (yrs) : quatre fois plus de blocs, plus de quatre fois plus ; des blocs retirés
-/// un sur deux, par leur identifiant, ne la parcourent pas : quatre fois plus de blocs, au plus
-/// cinq fois plus (Ruling R1281) ; des paires voisines échangées recréent un bloc sur deux, et
+/// un sur deux aussi : la validation fond chaque plage ramassée dans la liste des blocs de yrs, en
+/// décalant ce qui suit (Ruling R1284) ; des paires voisines échangées recréent un bloc sur deux, et
 /// coûtent ses insertions.
 #[test]
 fn diff_cost_counts_what_the_write_does() {
@@ -741,7 +741,7 @@ fn diff_cost_counts_what_the_write_does() {
         diff_cost(&current, &half).nanos
     };
     let (small, large) = (removed(2_000), removed(8_000));
-    assert!(large <= 5 * small, "retirés : {small} puis {large} ns");
+    assert!(large > 4 * small, "retirés : {small} puis {large} ns");
 
     let current = paragraphs(2_000, "p");
     let swapped: Vec<Block> = current
@@ -842,6 +842,221 @@ fn retouched(mut blocks: Vec<Block>, other: &[Block], edits: &[(usize, usize)]) 
         clear(&mut blocks);
     }
     blocks
+}
+
+// ------------------------------------------------------------------------------- mesure
+
+/// Une forme mesurée : la page de départ (son état, ou `None` pour une page écrite par le
+/// `PageDoc` qui la récrit, « même client »), les blocs écrits.
+struct Measured {
+    what: &'static str,
+    state: Option<Vec<u8>>,
+    mmd: String,
+    target: Vec<Block>,
+}
+
+/// p50, p95 et pire, au plus proche rang, en millisecondes.
+fn quantiles(mut ms: Vec<f64>) -> (f64, f64, f64) {
+    ms.sort_by(f64::total_cmp);
+    let at = |q: f64| ms[((q * ms.len() as f64).ceil() as usize).clamp(1, ms.len()) - 1];
+    (at(0.5), at(0.95), ms[ms.len() - 1])
+}
+
+/// Mesure (Task S2, Step 3 ; release, une fois : `cargo test --release -p mementum-crdt --test
+/// diff measure_diff_write_of_one_block_in_10000 -- --ignored --nocapture`) : l'écriture par
+/// différence d'une page de 10 000 paragraphes, un bloc changé, et les autres formes de la Task S0
+/// et de sa relecture (insérés, retirés, déplacés, la moitié, tous, l'ordre renversé, des paires
+/// voisines échangées, un bloc sur deux et dix sur onze retirés, le contenu retiré écrit par le même
+/// client), et des formes que S0 n'a pas mesurées (liste imbriquée profonde, colonnes, grand
+/// tableau, 12 000 blocs) ; contre `rewrite_blocks`, avec l'estimation de `diff_cost`. Chaque
+/// écriture mesurée est vérifiée une fois : relue comme voulu, rechargée égale.
+#[test]
+#[ignore]
+fn measure_diff_write_of_one_block_in_10000() {
+    let written_page = |mmd: &str| page_with(mmd);
+    let text = |b: &mut Block, s: &str| {
+        b.content = Content::Inline(vec![Inline::Text {
+            text: s.into(),
+            styles: Default::default(),
+        }]);
+    };
+    let ten = (0..10_000)
+        .map(|i| format!("Paragraphe numéro {i}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        + "\n";
+    let state = written_page(&ten).encode_state();
+    let mut cases = Vec::new();
+    // Les blocs écrits n'ont pas d'identifiants (un MMD sans ancres) : `keep_ids` les donne, et
+    // compte dans la durée, comme à la Task S0.
+    let mut case =
+        |what: &'static str, state: Option<Vec<u8>>, mmd: &str, edit: &dyn Fn(&mut Vec<Block>)| {
+            let mut target = parse(mmd).unwrap();
+            edit(&mut target);
+            fn clear(blocks: &mut [Block]) {
+                for b in blocks {
+                    b.id.clear();
+                    clear(&mut b.children);
+                }
+            }
+            clear(&mut target);
+            cases.push(Measured {
+                what,
+                state,
+                mmd: mmd.to_string(),
+                target,
+            });
+        };
+    let s = Some(state.clone());
+    case("un bloc changé", s.clone(), &ten, &|b| {
+        text(&mut b[5_000], "changé")
+    });
+    case("un bloc inséré", s.clone(), &ten, &|b| {
+        let mut new = b[0].clone();
+        new.id.clear();
+        text(&mut new, "inséré");
+        b.insert(5_000, new);
+    });
+    case("un bloc retiré", s.clone(), &ten, &|b| {
+        b.remove(5_000);
+    });
+    case("un bloc déplacé (100 → 9 000)", s.clone(), &ten, &|b| {
+        let moved = b.remove(100);
+        b.insert(9_000, moved);
+    });
+    case("la moitié changée", s.clone(), &ten, &|b| {
+        b.iter_mut().step_by(2).for_each(|b| text(b, "changé"))
+    });
+    case("tous changés", s.clone(), &ten, &|b| {
+        b.iter_mut().for_each(|b| text(b, "changé"))
+    });
+    case("ordre renversé", s.clone(), &ten, &|b| b.reverse());
+    case("5 000 paires voisines échangées", s.clone(), &ten, &|b| {
+        b.chunks_mut(2).for_each(|pair| pair.reverse())
+    });
+    case("un bloc sur deux retiré", s.clone(), &ten, &|b| {
+        let kept: Vec<Block> = b.iter().step_by(2).cloned().collect();
+        *b = kept;
+    });
+    case("dix sur onze retirés", s.clone(), &ten, &|b| {
+        let kept: Vec<Block> = b.iter().step_by(11).cloned().collect();
+        *b = kept;
+    });
+    case("même client, tous changés", None, &ten, &|b| {
+        b.iter_mut().for_each(|b| text(b, "changé"))
+    });
+    case("même client, ordre renversé", None, &ten, &|b| {
+        b.reverse()
+    });
+    let nested = (0..2_000)
+        .map(|i| format!("- Élément {i}\n  - Enfant {i}\n    - Petit-enfant {i}\n      - Arrière {i}\n        - Feuille {i}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    let nested_state = Some(written_page(&nested).encode_state());
+    case(
+        "liste imbriquée profonde (10 000 blocs), une feuille changée",
+        nested_state,
+        &nested,
+        &|b| {
+            text(
+                &mut b[1_000].children[0].children[0].children[0].children[0],
+                "changée",
+            )
+        },
+    );
+    let column = |side: &str| -> String {
+        let lines: Vec<String> = (0..5_000).map(|i| format!("{side} {i}")).collect();
+        format!("<column>\n{}\n</column>\n", lines.join("\n\n"))
+    };
+    let columns = format!(
+        "<columns>\n{}{}</columns>\n",
+        column("Gauche"),
+        column("Droite")
+    );
+    let columns_state = Some(written_page(&columns).encode_state());
+    case(
+        "deux colonnes de 5 000 blocs, un changé",
+        columns_state,
+        &columns,
+        &|b| text(&mut b[0].children[1].children[2_500], "changé"),
+    );
+    let table = format!(
+        "| a | b | c | d | e |\n| --- | --- | --- | --- | --- |\n{}\n",
+        (0..2_000)
+            .map(|i| format!("| a{i} | b{i} | c{i} | d{i} | e{i} |"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    let table_state = Some(written_page(&table).encode_state());
+    case(
+        "tableau de 2 000 lignes, une cellule changée",
+        table_state,
+        &table,
+        &|b| {
+            let Content::Table(t) = &mut b[0].content else {
+                panic!("un tableau")
+            };
+            t.rows[1_000][2].content = vec![Inline::Text {
+                text: "changée".into(),
+                styles: Default::default(),
+            }];
+        },
+    );
+    let twelve = (0..12_000)
+        .map(|i| format!("Paragraphe numéro {i}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        + "\n";
+    let twelve_state = Some(written_page(&twelve).encode_state());
+    case(
+        "12 000 paragraphes, un changé",
+        twelve_state,
+        &twelve,
+        &|b| text(&mut b[6_000], "changé"),
+    );
+    drop(case);
+
+    for c in &cases {
+        let fresh = || match &c.state {
+            Some(state) => PageDoc::from_updates([state.as_slice()]).unwrap(),
+            None => written_page(&c.mmd),
+        };
+        let current = fresh().read_blocks();
+        let estimate = diff_cost(&current, &c.target).nanos as f64 / 1e6;
+        // Vérifiée une fois, hors du temps.
+        let page = fresh();
+        let before = page.encode_state();
+        let written = page.write_diff(&c.target).unwrap();
+        assert!(!written.fell_back, "{}", c.what);
+        assert_eq!(shown(&page.read_blocks()), shown(&c.target), "{}", c.what);
+        assert_update_is_whole(&page, &before, &written, c.what);
+        let bytes = written.update.len();
+        let mut diff_ms = Vec::new();
+        for _ in 0..5 {
+            let page = fresh();
+            let start = std::time::Instant::now();
+            page.write_diff(&c.target).unwrap();
+            diff_ms.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+        let mut full_ms = Vec::new();
+        let mut full_bytes = 0;
+        for _ in 0..3 {
+            let page = fresh();
+            let start = std::time::Instant::now();
+            full_bytes = page.rewrite_blocks(&c.target).unwrap().len();
+            full_ms.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+        let (d50, d95, dmax) = quantiles(diff_ms);
+        let (f50, f95, _) = quantiles(full_ms);
+        println!(
+            "MESURE écriture par différence, {} : p50 {d50:.1} ms, p95 {d95:.1}, pire {dmax:.1} ; \
+             {bytes} octets ; {} blocs touchés ; diff_cost {estimate:.1} ms ; rewrite_blocks p50 \
+             {f50:.1} ms, p95 {f95:.1}, {full_bytes} octets",
+            c.what,
+            written.touched.len()
+        );
+    }
 }
 
 // ------------------------------------------------------------------ octets du vrai Yjs

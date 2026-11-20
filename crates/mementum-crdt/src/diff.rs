@@ -831,23 +831,17 @@ fn target_units(content: &[Inline], link: Option<u32>, names: &mut Interner, out
     }
 }
 
-/// Une écriture par préfixe et suffixe communs.
-struct Affix {
-    text: XmlTextRef,
-    at: u32,
-    removed: u32,
-    runs: Vec<(String, Attrs)>,
-}
-
-/// Le préfixe et le suffixe communs du contenu courant et du contenu voulu ; le milieu changé
-/// doit ne porter aucun élément en ligne, des deux côtés, et tenir dans un seul texte. `None`
-/// sinon (le contenu se récrit en entier).
-fn affix<T: ReadTxn>(txn: &T, content: &XmlElementRef, inline: &[Inline]) -> Option<Affix> {
-    let mut names = Interner::default();
-    let (old, places) = current_units(txn, content, &mut names)?;
-    let mut new = Vec::new();
-    target_units(inline, None, &mut names, &mut new);
-    let p = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+/// Le milieu changé entre les unités courantes `old` (et la place de chacune : enfant du nœud
+/// de contenu, place UTF-16 dans son texte) et les unités voulues `new` : l'enfant et la place où
+/// écrire, la longueur UTF-16 retirée, et le rang des unités écrites dans `new`. `None` si le
+/// milieu porte un élément en ligne, d'un côté ou de l'autre, ne tient pas dans un seul texte, ou
+/// n'a aucun texte voisin où s'écrire.
+fn middle(
+    old: &[Piece],
+    places: &[(usize, u32)],
+    new: &[Piece],
+) -> Option<(usize, u32, u32, std::ops::Range<usize>)> {
+    let p = old.iter().zip(new).take_while(|(a, b)| a == b).count();
     let s = old[p..]
         .iter()
         .rev()
@@ -855,10 +849,10 @@ fn affix<T: ReadTxn>(txn: &T, content: &XmlElementRef, inline: &[Inline]) -> Opt
         .take_while(|(a, b)| a == b)
         .count();
     let old_mid = &old[p..old.len() - s];
-    let new_mid = &new[p..new.len() - s];
+    let inserted = p..new.len() - s;
     if old_mid
         .iter()
-        .chain(new_mid)
+        .chain(&new[inserted.clone()])
         .any(|u| matches!(u, Piece::Element(_)))
     {
         return None;
@@ -883,12 +877,61 @@ fn affix<T: ReadTxn>(txn: &T, content: &XmlElementRef, inline: &[Inline]) -> Opt
     } else {
         return None;
     };
+    Some((child, at, old_mid.iter().map(char_len).sum(), inserted))
+}
+
+/// Le contenu en ligne `current`, tel que `write_inline` l'écrit, se récrirait-il en `target` par
+/// préfixe et suffixe communs ? Ce que [`affix`] déciderait sur la page, d'après les blocs seuls
+/// (pour `diff_cost`).
+pub(crate) fn affix_fits(current: &[Inline], target: &[Inline]) -> bool {
+    let mut names = Interner::default();
+    let (mut old, mut new) = (Vec::new(), Vec::new());
+    target_units(current, None, &mut names, &mut old);
+    target_units(target, None, &mut names, &mut new);
+    // Un texte par suite de plages, un enfant par élément en ligne.
+    let mut places = Vec::with_capacity(old.len());
+    let (mut child, mut offset, mut in_text) = (0usize, 0u32, false);
+    for piece in &old {
+        match piece {
+            Piece::Char(c, _) => {
+                in_text = true;
+                places.push((child, offset));
+                offset += c.len_utf16() as u32;
+            }
+            Piece::Element(_) => {
+                if in_text {
+                    child += 1;
+                }
+                places.push((child, 0));
+                (child, offset, in_text) = (child + 1, 0, false);
+            }
+        }
+    }
+    middle(&old, &places, &new).is_some()
+}
+
+/// Une écriture par préfixe et suffixe communs.
+struct Affix {
+    text: XmlTextRef,
+    at: u32,
+    removed: u32,
+    runs: Vec<(String, Attrs)>,
+}
+
+/// Le préfixe et le suffixe communs du contenu courant et du contenu voulu ; le milieu changé
+/// doit ne porter aucun élément en ligne, des deux côtés, et tenir dans un seul texte. `None`
+/// sinon (le contenu se récrit en entier).
+fn affix<T: ReadTxn>(txn: &T, content: &XmlElementRef, inline: &[Inline]) -> Option<Affix> {
+    let mut names = Interner::default();
+    let (old, places) = current_units(txn, content, &mut names)?;
+    let mut new = Vec::new();
+    target_units(inline, None, &mut names, &mut new);
+    let (child, at, removed, inserted) = middle(&old, &places, &new)?;
     let Some(XmlOut::Text(text)) = content.get(txn, child as u32) else {
         return None;
     };
-    let removed = old_mid.iter().map(char_len).sum();
     let mut runs: Vec<(String, u32)> = Vec::new();
-    for piece in new_mid {
+    for piece in &new[inserted] {
         let Piece::Char(c, mark) = *piece else {
             return None;
         };

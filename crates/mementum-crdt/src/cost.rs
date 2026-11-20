@@ -113,6 +113,15 @@ pub fn write_cost(blocks: &[Block]) -> WriteCost {
 /// par bloc ; arrondi vers le haut, Ruling R1282).
 const DIFF_BLOCK_PS: u128 = 4_000_000;
 
+/// Picosecondes par élément retiré à part (une suite de blocs retirés d'une liste, un contenu
+/// vidé, un nœud de contenu remplacé) et par bloc de la page : à la validation de la transaction
+/// des suppressions, yrs remplace le contenu de chaque élément retiré par une plage ramassée puis
+/// fond ces plages dans la liste des blocs de son client, en décalant ce qui les suit
+/// (`squash_left_range_compaction`). Mesuré (Ruling R1284) : un paragraphe sur deux retiré coûte
+/// 0,1 s sur 10 000 paragraphes, 0,8 s sur 20 000, 3,8 s sur 40 000, soit de 3 à 4,5 ns par paire
+/// (élément retiré, bloc de la page) ; arrondi vers le haut.
+const REMOVED_RUN_PS: u128 = 8_000;
+
 /// Coût estimé de l'écriture par différence (`PageDoc::write_diff`) de `written` sur une page
 /// dont `read_blocks` rend `current`, avant de l'écrire, en nanosecondes d'acteur en release
 /// (Rulings R1254, R1282). Les blocs se répondent comme dans l'écriture (`keep_ids`, puis les
@@ -124,18 +133,27 @@ const DIFF_BLOCK_PS: u128 = 4_000_000;
 ///   des blocs insérés un sur deux dans une longue liste coûtent le carré de sa longueur ;
 /// - chaque bloc retiré, et le contenu remplacé d'un bloc gardé, par ses éléments (les retraits se
 ///   font par identifiant, sans parcours de liste, Ruling R1281) ;
+/// - chaque élément retiré à part (une suite de blocs retirés, un contenu récrit en entier, un nœud
+///   de contenu remplacé, un groupe d'enfants retiré) par la taille de la page : la validation des
+///   suppressions fond leurs plages ramassées dans la liste des blocs de yrs, en décalant ce qui
+///   suit (Ruling R1284) ; un bloc sur deux retiré coûte ainsi le carré de la page ;
 /// - le contenu changé d'un bloc gardé comme s'il était récrit en entier (le préfixe et le suffixe
 ///   communs coûtent moins, sauf à récrire toute une page à six plages, où S0 a mesuré 35 µs par
 ///   bloc, sous les 48 µs comptés ici), et chaque prop changée pour un élément.
 ///
-/// Les poids sont ceux de [`write_cost`] ; seul celui de la lecture est propre à la différence.
+/// Les poids sont ceux de [`write_cost`] ; ceux de la lecture et des retraits sont propres à la
+/// différence.
 pub fn diff_cost(current: &[Block], written: &[Block]) -> WriteCost {
     let mut target = crate::diff::prepared(written);
     crate::kept_ids::keep_ids(current, &mut target);
     let mut tally = Tally::default();
     tally.diff_lists(current, &target);
-    let read = ((blocks_in(current) + blocks_in(&target)) as u128).saturating_mul(DIFF_BLOCK_PS);
-    tally.finish(read)
+    let page = blocks_in(current);
+    let read = ((page + blocks_in(&target)) as u128).saturating_mul(DIFF_BLOCK_PS);
+    let removed = (tally.removed_runs as u128)
+        .saturating_mul(page as u128)
+        .saturating_mul(REMOVED_RUN_PS);
+    tally.finish(read.saturating_add(removed))
 }
 
 fn blocks_in(blocks: &[Block]) -> usize {
@@ -161,6 +179,8 @@ struct Tally {
     /// Les cellules vides de tableau, comptées aussi dans `elements`.
     empty_cells: usize,
     text_items: usize,
+    /// Pour `diff_cost` : les éléments que l'écriture par différence retire à part.
+    removed_runs: usize,
 }
 
 impl Tally {
@@ -258,6 +278,10 @@ impl Tally {
         for (b, _) in current.iter().zip(&staying).filter(|(_, s)| !**s) {
             self.removing(|t| t.siblings(std::slice::from_ref(b)));
         }
+        // Une suite par bloc retiré qui suit un bloc gardé (ou ouvre la liste).
+        self.removed_runs += (0..current.len())
+            .filter(|&i| !staying[i] && (i == 0 || staying[i - 1]))
+            .count();
         let mut walks = 0u128;
         for (j, b) in target.iter().enumerate().filter(|(j, _)| !kept[*j]) {
             walks = walks.saturating_add((j as u128).saturating_mul(SIBLING_PAIR_PS));
@@ -285,10 +309,21 @@ impl Tally {
             self.content(target);
             self.removing(|t| t.content(current));
             self.elements += 1;
+            let by_affix = current.kind == target.kind
+                && matches!(
+                    (&current.content, &target.content),
+                    (Content::Inline(a), Content::Inline(b)) if crate::diff::affix_fits(a, b)
+                );
+            if !by_affix {
+                self.removed_runs += 1;
+            }
         }
         match (current.children.is_empty(), target.children.is_empty()) {
             (true, false) => self.siblings(&target.children),
-            (false, true) => self.removing(|t| t.siblings(&current.children)),
+            (false, true) => {
+                self.removing(|t| t.siblings(&current.children));
+                self.removed_runs += 1;
+            }
             (false, false) => self.diff_lists(&current.children, &target.children),
             (true, true) => {}
         }

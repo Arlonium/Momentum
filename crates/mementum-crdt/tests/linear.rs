@@ -51,28 +51,31 @@ fn mark(key: &str, value: &str) -> Any {
 /// 80 000 lettres, en release) ; écrire plage par plage reparcourrait le texte à chaque plage, et
 /// répéterait les marques.
 fn marked_runs(tag: &str, runs: usize, marked: Attrs, toggled: &str) -> PageDoc {
+    page_from(|doc| write_marked_runs(doc, tag, runs, marked, toggled))
+}
+
+/// Ce que [`marked_runs`] écrit dans le fragment de `doc`.
+fn write_marked_runs(doc: &Doc, tag: &str, runs: usize, marked: Attrs, toggled: &str) {
     let toggle = || {
         let mut attrs = Attrs::new();
         attrs.insert(toggled.into(), Any::Map(Arc::new(HashMap::new())));
         Some(Box::new(attrs))
     };
-    page_from(|doc| {
-        let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
-        let mut txn = doc.transact_mut();
-        let group = fragment.insert(&mut txn, 0, XmlElementPrelim::empty("blockGroup"));
-        let container = group.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
-        container.insert_attribute(&mut txn, "id", "bloc");
-        let element = container.push_back(&mut txn, XmlElementPrelim::empty(tag));
-        let text = element.push_back(&mut txn, XmlTextPrelim::new(""));
-        for i in (0..runs).rev() {
-            text.insert(&mut txn, 0, if i % 2 == 0 { "a" } else { "b" });
-        }
-        text.format(&mut txn, 0, runs as u32, marked);
-        let formats: Vec<Delta<Any>> = (0..runs)
-            .map(|i| Delta::Retain(1, if i % 2 == 1 { toggle() } else { None }))
-            .collect();
-        text.apply_delta(&mut txn, formats);
-    })
+    let fragment = doc.get_or_insert_xml_fragment(FRAGMENT);
+    let mut txn = doc.transact_mut();
+    let group = fragment.insert(&mut txn, 0, XmlElementPrelim::empty("blockGroup"));
+    let container = group.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+    container.insert_attribute(&mut txn, "id", "bloc");
+    let element = container.push_back(&mut txn, XmlElementPrelim::empty(tag));
+    let text = element.push_back(&mut txn, XmlTextPrelim::new(""));
+    for i in (0..runs).rev() {
+        text.insert(&mut txn, 0, if i % 2 == 0 { "a" } else { "b" });
+    }
+    text.format(&mut txn, 0, runs as u32, marked);
+    let formats: Vec<Delta<Any>> = (0..runs)
+        .map(|i| Delta::Retain(1, if i % 2 == 1 { toggle() } else { None }))
+        .collect();
+    text.apply_delta(&mut txn, formats);
 }
 
 /// Un paragraphe de `runs` plages d'une lettre, en italique une sur deux, toutes sous la marque
@@ -318,6 +321,211 @@ fn wrapped_columns_are_examined_once() {
             fifty.allocated
         );
     }
+}
+
+// ------------------------------------------------------- écriture par différence (Task S2)
+
+/// Une écriture par différence à mesurer : la page de départ (son état), les blocs écrits, et la
+/// taille de leur MMD.
+struct DiffCase {
+    state: Vec<u8>,
+    target: Vec<mementum_md::Block>,
+    mmd: usize,
+}
+
+/// La page que le serveur écrit d'un MMD, et les blocs qu'il en lit, retouchés par `edit`.
+fn diff_case(mmd: &str, edit: impl FnOnce(&mut Vec<mementum_md::Block>)) -> DiffCase {
+    let (page, _) = PageDoc::new_page();
+    page.write_blocks(&mementum_md::parse(mmd).unwrap())
+        .unwrap();
+    page_case(&page, edit)
+}
+
+fn page_case(page: &PageDoc, edit: impl FnOnce(&mut Vec<mementum_md::Block>)) -> DiffCase {
+    let mut target = page.read_blocks();
+    edit(&mut target);
+    DiffCase {
+        state: page.encode_state(),
+        mmd: render(&target, RenderOpts::default()).markdown.len(),
+        target,
+    }
+}
+
+/// `n` paragraphes, séparés comme le MMD les sépare.
+fn paragraphs_mmd(n: usize) -> String {
+    let lines: Vec<String> = (0..n).map(|i| format!("Paragraphe numéro {i}")).collect();
+    lines.join("\n\n") + "\n"
+}
+
+/// Une lettre ajoutée au premier texte du contenu de `block`, au milieu de ses plages.
+fn retouched_text(block: &mut mementum_md::Block) {
+    fn first_text(content: &mut [mementum_md::Inline]) -> Option<&mut String> {
+        let middle = content.len() / 2;
+        content[middle..].iter_mut().find_map(|i| match i {
+            mementum_md::Inline::Text { text, .. } => Some(text),
+            mementum_md::Inline::Link { children, .. } => first_text(children),
+            _ => None,
+        })
+    }
+    match &mut block.content {
+        mementum_md::Content::Inline(content) => {
+            if let Some(text) = first_text(content) {
+                text.push('x');
+            }
+        }
+        mementum_md::Content::Table(table) => {
+            let middle = table.rows.len() / 2;
+            if let Some(mementum_md::Inline::Text { text, .. }) =
+                table.rows[middle][0].content.first_mut()
+            {
+                text.push('x');
+            }
+        }
+        mementum_md::Content::None => {}
+    }
+}
+
+/// Task S2 du lot 5 (Rulings R380, R1254, R1255, R1281, R1284) : l'écriture par différence croît
+/// comme la page et les blocs écrits, quelle que soit leur forme : un bloc changé, tous, un
+/// déplacé, un bloc sur deux retiré, dix sur onze retirés (les retraits se font par identifiant,
+/// sans parcourir la liste), une feuille d'une liste imbriquée, un bloc d'une colonne, une cellule
+/// d'un grand tableau, une lettre d'un long texte sous un lien de 16 Kio ou sous une couleur (une
+/// marque se lit une fois, jamais recopiée par caractère : recopiée, le pic de mémoire dépasse sa
+/// borne). Ce qui n'y est pas, et que `diff_cost` compte : des blocs insérés ou recréés en nombre
+/// dans une même liste (des paires voisines échangées), dont yrs retrouve chaque place en
+/// reparcourant la liste depuis son début, comme pour la récriture complète ; et, au-delà des
+/// tailles de ce test (une dizaine de milliers de paragraphes en debug), des milliers de blocs
+/// retirés à part, que la validation de yrs fond un à un dans la liste des blocs de leur client
+/// (R1284 : un sur deux retiré, 0,1 s sur 10 000 paragraphes, 3,8 s sur 40 000, en release ; la
+/// récriture complète, 0,2 et 6 s). La mesure `measure_diff_write_of_one_block_in_10000`
+/// (`tests/diff.rs`) relève ces formes.
+#[test]
+fn a_diff_write_grows_like_the_page() {
+    let one = |n: usize| {
+        diff_case(&paragraphs_mmd(n), |blocks| {
+            retouched_text(&mut blocks[n / 2]);
+        })
+    };
+    let all = |n: usize| {
+        diff_case(&paragraphs_mmd(n), |blocks| {
+            blocks.iter_mut().for_each(retouched_text)
+        })
+    };
+    let moved = |n: usize| {
+        diff_case(&paragraphs_mmd(n), |blocks| {
+            let block = blocks.remove(n / 2);
+            blocks.push(block);
+        })
+    };
+    let every_other = |n: usize| {
+        diff_case(&paragraphs_mmd(n), |blocks| {
+            let kept: Vec<_> = blocks.iter().step_by(2).cloned().collect();
+            *blocks = kept;
+        })
+    };
+    let ten_of_eleven = |n: usize| {
+        diff_case(&paragraphs_mmd(n), |blocks| {
+            let kept: Vec<_> = blocks.iter().step_by(11).cloned().collect();
+            *blocks = kept;
+        })
+    };
+    let nested = |n: usize| {
+        let items: Vec<String> = (0..n)
+            .map(|i| format!("- Élément {i}\n  - Enfant {i}\n    - Petit-enfant {i}"))
+            .collect();
+        diff_case(&(items.join("\n") + "\n"), |blocks| {
+            retouched_text(&mut blocks[n / 2].children[0].children[0]);
+        })
+    };
+    let columns = |n: usize| {
+        let column = |side: &str| -> String {
+            let lines: Vec<String> = (0..n / 2).map(|i| format!("{side} {i}")).collect();
+            format!("<column>\n{}\n</column>\n", lines.join("\n\n"))
+        };
+        let mmd = format!(
+            "<columns>\n{}{}</columns>\n",
+            column("Gauche"),
+            column("Droite")
+        );
+        diff_case(&mmd, |blocks| {
+            retouched_text(&mut blocks[0].children[1].children[n / 4]);
+        })
+    };
+    let table = |n: usize| {
+        let rows: Vec<String> = (0..n).map(|i| format!("| a{i} | b{i} |")).collect();
+        let mmd = format!("| x | y |\n| --- | --- |\n{}\n", rows.join("\n"));
+        diff_case(&mmd, |blocks| retouched_text(&mut blocks[0]))
+    };
+    // Un seul bloc, seul dans sa page (une page qui garde aussi la racine d'une page neuve
+    // retomberait sur la récriture complète).
+    let alone = |n: usize, name: &str, key: &str, value: &str| {
+        let doc = Doc::new();
+        let mut marked = Attrs::new();
+        marked.insert(name.into(), mark(key, value));
+        write_marked_runs(&doc, "paragraph", n, marked, "italic");
+        let state = doc
+            .transact()
+            .encode_state_as_update_v1(&yrs::StateVector::default());
+        let page = PageDoc::from_updates([state.as_slice()]).unwrap();
+        page_case(&page, |blocks| retouched_text(&mut blocks[0]))
+    };
+    let under_link = |n: usize| alone(n, "link", "href", &"u".repeat(MAX_HREF_BYTES));
+    let under_color = |n: usize| alone(n, "textColor", "stringValue", &"c".repeat(MAX_COLOR_BYTES));
+    let forms = [
+        Form {
+            what: "un paragraphe changé",
+            build: &one as &dyn Fn(usize) -> DiffCase,
+        },
+        Form {
+            what: "tous les paragraphes changés",
+            build: &all,
+        },
+        Form {
+            what: "un paragraphe déplacé",
+            build: &moved,
+        },
+        Form {
+            what: "un paragraphe sur deux retiré",
+            build: &every_other,
+        },
+        Form {
+            what: "dix paragraphes sur onze retirés",
+            build: &ten_of_eleven,
+        },
+        Form {
+            what: "un petit-enfant d'une liste imbriquée",
+            build: &nested,
+        },
+        Form {
+            what: "un bloc d'une colonne",
+            build: &columns,
+        },
+        Form {
+            what: "une cellule d'un grand tableau",
+            build: &table,
+        },
+        Form {
+            what: "une lettre d'un long texte sous un lien de 16 Kio",
+            build: &under_link,
+        },
+        Form {
+            what: "une lettre d'un long texte sous une couleur",
+            build: &under_color,
+        },
+    ];
+    let size = |case: &DiffCase| case.state.len() + case.mmd;
+    let write = |case: &DiffCase| {
+        let page = PageDoc::from_updates([case.state.as_slice()]).unwrap();
+        let written = page.write_diff(&case.target).unwrap();
+        assert!(!written.fell_back);
+        written.update
+    };
+    let limits = Limits {
+        peak_per_byte: 96,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(&forms, size, write, Vec::len, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
 // ------------------------------------------------------------ garde des attributs (R689)
