@@ -1546,6 +1546,31 @@ test("a_lost_answer_of_a_search_is_said_as_a_reading", async () => {
   expect(await refused).toMatchObject({ status: 422, code: "invalid_query", message: "ta recherche est trop longue" });
 });
 
+test("a_lost_answer_of_an_invitation_lookup_is_said_as_a_reading", async () => {
+  // R1204 : lire ce que dit un lien d'invitation n'écrit rien (R1092) ; sa réponse perdue ne dit
+  // donc pas « ce que tu as demandé a peut-être été fait ».
+  await loadedAs("alice");
+  const SILENT = "Le serveur Mementum ne répond pas. Vérifie qu'il est lancé, puis réessaie.";
+  const failed = async (call: Promise<unknown>) =>
+    call.then(
+      () => null,
+      (error: unknown) => error as InstanceType<typeof api.ApiError>,
+    );
+  // Coupée en route, ou rendue par un mandataire sans corps de l'API.
+  const ways: ((call: Received) => void)[] = [(c) => c.fail(), (c) => c.answerLostBody(502), (c) => c.answerLostBody(504)];
+  for (const way of ways) {
+    const looking = failed(api.lookupInvitation("jeton"));
+    way(await waiting("POST", "/api/v1/invitations/lookup"));
+    const error = (await looking)!;
+    expect(error.message).toBe(SILENT);
+    expect(error.message).not.toContain("peut-être");
+  }
+  // Témoin : accepter l'invitation écrit, et sa réponse perdue dit toujours le doute.
+  const accepting = failed(api.acceptInvitation("jeton"));
+  (await waiting("POST", "/api/v1/invitations/accept")).fail();
+  expect((await accepting)!.message).toContain("peut-être été fait");
+});
+
 test("a_search_without_session_asks_to_log_in_and_a_late_refusal_sends_it_again", async () => {
   await loadedAs("alice");
   // Sous la session en cours : la connexion est demandée, la recherche ne repart pas d'elle-même.

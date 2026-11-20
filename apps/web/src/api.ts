@@ -495,11 +495,15 @@ function silence(method: string, path: string): string {
 
 /**
  * Les `POST` qui ne font que lire, par leur chemin : leur corps porte ce qui ne doit pas voyager
- * dans une adresse (la recherche, R917), et le serveur n'écrit rien pour eux. Une réponse perdue y
- * dit « le serveur ne répond pas », jamais « ce que tu as demandé a peut-être été fait » (R757).
- * Une route n'entre ici que si elle n'écrit rien, dans aucun cas.
+ * dans une adresse (la recherche, R917 ; le jeton d'une invitation, R1204), et le serveur n'écrit
+ * rien pour eux. Une réponse perdue y dit « le serveur ne répond pas », jamais « ce que tu as
+ * demandé a peut-être été fait » (R757). Une route n'entre ici que si elle n'écrit rien, dans
+ * aucun cas.
  */
-const READING_POSTS: readonly RegExp[] = [/^\/api\/v1\/spaces\/[^/]+\/search$/];
+const READING_POSTS: readonly RegExp[] = [
+  /^\/api\/v1\/spaces\/[^/]+\/search$/,
+  /^\/api\/v1\/invitations\/lookup$/,
+];
 
 /** `GET /api/v1/me` : le compte de la session et ses espaces ; sans session, `401`. */
 export async function getMe(): Promise<Me> {
