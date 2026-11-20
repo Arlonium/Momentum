@@ -24,6 +24,7 @@
 //! | `GET /api/v1/spaces/{id}/tree` | un rôle | [`Tree`] : les pages de l'espace que la personne voit, hors corbeille, avec son niveau et sa section, et la version de l'espace (`lsn`), lue avant les droits et les pages : l'arbre est au moins aussi récent qu'elle (Ruling R141) |
 //! | `GET /api/v1/spaces/{id}/trash` | un rôle | [`PageNode`]`[]` : les pages mises elles-mêmes à la corbeille, là où son niveau permet de restaurer (`edit`), la plus récente d'abord ; si une page parente y est aussi, la restauration répond `409 parent_trashed` |
 //! | `GET /api/v1/spaces/{id}/favorites` | un rôle | `Favorites` : les pages favorites du compte dans l'espace, celles qu'il voit, hors corbeille, dans l'ordre où il les a ajoutées ; une page qu'il ne voit plus, ou à la corbeille, n'y est pas, et y revient à sa place avec l'accès, ou restaurée (Ruling R254) |
+//! | `POST /api/v1/spaces/{id}/search`, corps `SearchRequest` (`q`, `after`) | un rôle, invité compris | `SearchResults` : les pages de l'espace que le compte voit, hors corbeille, qui portent tous les mots cherchés dans leur titre ou dans un même bloc, le dernier mot aussi comme début de mot ; la mieux notée d'abord, vingt par réponse, cent en tout (`after`), sans total ; chacune avec son titre de l'instant, les ancêtres que le compte voit, le bloc trouvé, un extrait et les places des mots (lot 4, Task S5, `routes/search.rs`) ; `indexing` : l'index n'est pas à jour pour une page qu'il voit. Un `POST` qui n'écrit rien : la recherche n'est dans aucune adresse ni aucun journal (Ruling R917). Le corps (4 Kio au plus, `413` au-delà) est jugé après les droits : `404` sans rôle, quel que soit le corps ; puis `400` ou `422 invalid_json` ; `422 invalid_query` au-delà de 200 caractères, de 8 mots, ou de la centième page ; `429 search_busy` (`Retry-After: 1`) pour une recherche en attente qu'une plus récente du compte a remplacée (une admise et une en attente par compte, quatre calculs de front pour l'instance, Ruling R910). La réponse d'une recherche calculée ne part jamais avant 50 ms (`SEARCH_FLOOR`, Ruling R932) ; une recherche sans aucun mot répond vide tout de suite |
 //! | `POST /api/v1/pages` | racine : `member` (un invité : `403`) ; sous-page : `edit` sur le parent | `201`, [`PageNode`] : le nœud, ses accès et son document, écrits ensemble ; `422 title_too_long` et le `404` d'un `spaceId` mal formé passent avant les droits ; `404 not_found` pour un `spaceId` mal formé, inconnu ou d'un espace où l'on n'a aucun rôle ; `409 trashed` sous un parent à la corbeille ; `422 invalid_parent`, `invalid_after`, `title_too_long` ; `422 invalid_json` sans `spaceId` à la racine, ou avec `section` sous un parent |
 //! | `GET /api/v1/pages/{id}` | `read` | [`PageNode`] |
 //! | `PATCH /api/v1/pages/{id}` | titre, place sous le même parent : `edit` ; autre parent : `full`, et `edit` sur le nouveau parent (racine : `member`) | [`PageNode`] ; seule route qui lit son corps entre le `404` et le `403` : `422 invalid_json` et `title_too_long` passent avant tout refus de niveau, `422 invalid_parent` avant celui du déplacement, `invalid_after` après lui ; `409 trashed` pour une page à la corbeille, ou sous un nouveau parent à la corbeille ; `409 cycle` ; `409 page_moved` si la page a changé de place, ou ce qu'on peut en faire, à chacune des quatre tentatives : rien n'est écrit (Ruling R91). À la racine, la page garde son accès général et qui la déplace y a `full` (Rulings R82 et R94) |
@@ -174,8 +175,10 @@
 //! ce que le store garde, jamais l'acteur d'une page, deux secondes après la dernière écriture
 //! (quinze au plus), et tout de suite pour une page créée ou dupliquée. Au démarrage, elle
 //! rattrape ce qui n'est pas indexé, sans que le serveur l'attende. Elle n'écrit que la
-//! différence, dans sa voie de la file d'écriture. L'index plein texte et les routes de
-//! recherche viennent ensuite (Tasks S4c, S5, S6).
+//! différence, dans sa voie de la file d'écriture. Elle seule tient l'index plein texte
+//! (`<données>/search/`), nourri de cette projection : la route de recherche le lit par elle
+//! (`IndexerHandle::search`), en lui donnant, à chaque recherche, l'ensemble des pages que le
+//! compte voit (`routes/search.rs`) ; l'index ne porte ni espace, ni droit, ni corbeille.
 //!
 //! **Historique** (`routes/versions.rs`, Ruling R135). L'acteur de chaque page coupe ses
 //! versions (`mementum-sync`) : l'état complet de la page, avec les comptes qui l'ont modifiée
@@ -249,6 +252,7 @@ mod indexer;
 mod inputs_cache;
 mod mmd_reads;
 mod page_writes;
+mod searches;
 pub mod types;
 
 mod routes {
@@ -262,6 +266,7 @@ mod routes {
     pub(crate) mod info;
     pub(crate) mod invitations;
     pub(crate) mod pages;
+    pub(crate) mod search;
     pub(crate) mod sharing;
     pub(crate) mod spaces;
     pub(crate) mod sync;
@@ -297,6 +302,8 @@ pub use mementum_store::Backup;
 pub use page_writes::{MAX_ACCOUNT_WRITES, MAX_PAGE_WRITES};
 pub use routes::duplicate::{MAX_DUPLICATED_BYTES, MAX_DUPLICATED_PAGES};
 pub use routes::pages::{MAX_MMD_BLOCKS, MAX_TITLE_CHARS, MMD_WRITE_BUDGET, UNTITLED};
+pub use routes::search::{MAX_SEARCH_BODY_BYTES, MAX_SEARCH_PAGES, SEARCH_FLOOR, SEARCH_PAGE_SIZE};
+pub use searches::{MAX_SEARCHES, Searches};
 pub use types::{Info, Me, PageNode, SignupMode, Tree};
 
 use auth::LoginThrottle;
@@ -356,9 +363,12 @@ pub(crate) struct AppState {
     /// Le débit des duplications, par compte : une à la fois, et un budget d'octets bâtis par
     /// minute (`duplications.rs`, Rulings R605, R606).
     duplications: Arc<duplications::Duplications>,
-    /// L'indexeur de la recherche (`indexer.rs`, lot 4) : ce qu'il sait en retard.
-    #[allow(dead_code)] // Lu par la route de recherche (Task S5).
+    /// L'indexeur de la recherche (`indexer.rs`, lot 4) : l'index plein texte, que lui seul
+    /// tient, et ce qu'il sait en retard.
     indexer: IndexerHandle,
+    /// Le débit des recherches, par compte : une admise et une en attente, quatre calculs de
+    /// front pour l'instance (`searches.rs`, Ruling R910).
+    searches: Searches,
 }
 
 /// Millisecondes Unix.
@@ -408,6 +418,9 @@ pub struct Started {
     pub router: Router,
     /// L'indexeur de la recherche, lancé en fond.
     pub indexer: IndexerHandle,
+    /// Le débit des recherches : ses compteurs. Pour les tests.
+    #[doc(hidden)]
+    pub searches: Searches,
     store: Store,
     hub: Arc<Hub>,
 }
@@ -598,8 +611,10 @@ async fn build(cfg: &Config) -> anyhow::Result<Started> {
         max_duplicated_bytes: cfg.max_duplicated_bytes,
         duplications: Arc::default(),
         indexer: indexer.clone(),
+        searches: Searches::default(),
     };
     Ok(Started {
+        searches: state.searches.clone(),
         router: router(state),
         indexer,
         store,
@@ -680,6 +695,11 @@ fn router(state: AppState) -> Router {
         .route(
             "/api/v1/spaces/{id}/favorites",
             get(routes::favorites::list),
+        )
+        .route(
+            "/api/v1/spaces/{id}/search",
+            // Une recherche tient en quelques centaines d'octets : sa borne est la sienne.
+            post(routes::search::search).layer(DefaultBodyLimit::max(MAX_SEARCH_BODY_BYTES)),
         )
         .route("/api/v1/pages", post(pages::create))
         .route(

@@ -478,6 +478,7 @@ pub(crate) mod tests {
             mmd_reads: Arc::default(),
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
             duplications: Arc::default(),
+            searches: crate::Searches::default(),
         }
     }
 

@@ -99,6 +99,68 @@ pub struct Backlink {
     pub excerpt: String,
 }
 
+/// Corps de `POST /api/v1/spaces/{id}/search` (lot 4, Task S5, Ruling R917) : la recherche est
+/// dans le corps, jamais dans l'adresse.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SearchRequest {
+    /// Ce que la personne a tapé, tel quel : 200 caractères et 8 mots au plus, sans aucune
+    /// syntaxe (un opérateur n'est que des caractères). Le dernier mot est aussi cherché comme
+    /// début de mot. Sans aucun mot, la réponse est vide.
+    pub q: String,
+    /// Le nombre de pages déjà reçues pour cette recherche : absent ou 0 pour la première
+    /// réponse, puis 20, 40, 60, 80. À partir de 100 : `422 invalid_query`.
+    #[serde(default)]
+    #[ts(optional)]
+    pub after: Option<u32>,
+}
+
+/// Les pages trouvées dans un espace (`POST /api/v1/spaces/{id}/search`) : seulement celles que
+/// le compte voit, hors corbeille, la mieux notée d'abord, vingt au plus par réponse. Aucun total
+/// (Ruling R905).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResults {
+    pub results: Vec<SearchHit>,
+    /// D'autres pages suivent : les demander avec `after` augmenté du nombre de pages reçues.
+    /// Faux à la centième page, qu'il y en ait d'autres ou non.
+    pub more: bool,
+    /// L'index n'est pas à jour pour une page que le compte voit dans cet espace (une page vient
+    /// d'être écrite, ou le serveur finit de démarrer ou de reconstruire son index) : des pages
+    /// peuvent manquer, et une réponse vide n'est pas sûre. Jamais un nombre.
+    pub indexing: bool,
+}
+
+/// Une page trouvée ([`SearchResults`]), par son titre ou par un de ses blocs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchHit {
+    pub page_id: String,
+    /// Le titre de la page à l'instant de la réponse (lu dans la base, pas dans l'index).
+    pub title: String,
+    /// Les pages et dossiers au-dessus d'elle **que le compte voit**, du plus haut au plus
+    /// proche ; vide à la racine, ou quand il ne voit pas la page parente.
+    pub path: Vec<SearchAncestor>,
+    /// Le bloc trouvé : un identifiant écrit par un client, une chaîne quelconque de cent octets
+    /// au plus, à ne mettre dans une adresse qu'échappée. `null` : la page est trouvée par son
+    /// titre, ou le bloc n'a pas d'identifiant qui puisse servir (absent, répété, trop long).
+    pub block_id: Option<String>,
+    /// Un morceau du texte du bloc trouvé, 240 caractères au plus : du texte, jamais du HTML.
+    /// Vide pour une page trouvée par son titre.
+    pub excerpt: String,
+    /// Les mots trouvés dans `excerpt` : des plages `[début, fin[` en unités UTF-16 (les places
+    /// d'une chaîne JavaScript), dans l'ordre, sans chevauchement.
+    pub marks: Vec<(u32, u32)>,
+}
+
+/// Une page ou un dossier au-dessus d'une page trouvée ([`SearchHit::path`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchAncestor {
+    pub id: String,
+    pub title: String,
+}
+
 /// Un fichier envoyé dans une page (`POST /api/v1/pages/{id}/files`, Rulings R245 à R247) : une
 /// attache de la page, qui nomme un contenu gardé sous son SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -912,6 +974,13 @@ pub enum ErrorCode {
     /// minute (Rulings R605, R606) ; le message dit lequel, et l'en-tête `Retry-After` quand
     /// revenir : rien n'est copié, et la demande n'attend pas. Statut 429.
     DuplicationBusy,
+    /// La recherche fait plus de 200 caractères ou de 8 mots, ou demande au-delà de ses cent
+    /// premières pages (Ruling R911) ; le message dit lequel. Statut 422.
+    InvalidQuery,
+    /// Une recherche plus récente du même compte a pris la place de celle-ci, qui attendait
+    /// (Ruling R910) : rien n'a été cherché pour elle, et sa réponse ne sert plus. L'en-tête
+    /// `Retry-After` dit quand réessayer. Statut 429.
+    SearchBusy,
 }
 
 /// Corps de toute réponse d'erreur.
@@ -993,6 +1062,10 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<ResolveThread>(&cfg),
         file::<Role>(&cfg),
         file::<RootSection>(&cfg),
+        file::<SearchAncestor>(&cfg),
+        file::<SearchHit>(&cfg),
+        file::<SearchRequest>(&cfg),
+        file::<SearchResults>(&cfg),
         file::<Section>(&cfg),
         file::<SetGeneral>(&cfg),
         file::<SetLevel>(&cfg),

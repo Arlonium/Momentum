@@ -337,7 +337,7 @@ async fn space_name_is_trimmed_and_bounded() {
 /// compte étranger à l'espace (l'admin de l'instance), sans session. Tableau des rôles du
 /// « Modèle des droits » : voir les membres dès `member` ; renommer, inviter, retirer dès
 /// `admin` ; changer le rôle d'un membre entre `admin` et `member` dès `admin`.
-const MATRIX: [(&str, [u16; 6]); 11] = [
+const MATRIX: [(&str, [u16; 6]); 12] = [
     ("POST /api/v1/spaces", [201, 201, 201, 201, 201, 401]),
     ("PATCH /api/v1/spaces/{id}", [200, 200, 403, 403, 404, 401]),
     (
@@ -363,6 +363,11 @@ const MATRIX: [(&str, [u16; 6]); 11] = [
     // Ses propres favoris : un rôle suffit, celui d'invité compris (Ruling R254).
     (
         "GET /api/v1/spaces/{id}/favorites",
+        [200, 200, 200, 200, 404, 401],
+    ),
+    // Chercher dans l'espace : un rôle suffit, celui d'invité compris (lot 4, Task S5).
+    (
+        "POST /api/v1/spaces/{id}/search",
         [200, 200, 200, 200, 404, 401],
     ),
     (
@@ -412,6 +417,11 @@ async fn call(
         }
         "GET /api/v1/spaces/{id}/invitations" => browser.get(&invitations_uri(space)).await,
         "GET /api/v1/spaces/{id}/favorites" => browser.get(&format!("{at}/favorites")).await,
+        "POST /api/v1/spaces/{id}/search" => {
+            browser
+                .post(&format!("{at}/search"), json!({ "q": "équipe" }))
+                .await
+        }
         "DELETE /api/v1/invitations/{invitation}" => {
             browser
                 .delete(&format!("/api/v1/invitations/{invitation}"))

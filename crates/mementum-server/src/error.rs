@@ -575,6 +575,29 @@ impl ApiError {
         error
     }
 
+    /// `422 invalid_query` : la recherche passe ses bornes (Ruling R911) ; `message` dit
+    /// laquelle, sans rien recopier de la recherche.
+    pub fn invalid_query(message: impl Into<String>) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidQuery,
+            message,
+        )
+    }
+
+    /// `429 search_busy`, avec `Retry-After: 1` : une recherche plus récente du compte a pris la
+    /// place de celle-ci, qui attendait (Ruling R910). Rien n'a été cherché pour elle.
+    pub fn search_busy() -> ApiError {
+        let mut error = ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::SearchBusy,
+            "une recherche plus récente de ton compte a pris la place de celle-ci, qui \
+             attendait : rien n'a été cherché pour elle",
+        );
+        error.retry_after = Some(1);
+        error
+    }
+
     /// `422 subtree_too_large` : la page à dupliquer et ses sous-pages sont trop nombreuses, ou
     /// trop lourdes, pour une copie (Ruling R252) ; `message` dit lequel, et quoi faire.
     pub fn subtree_too_large(message: impl Into<String>) -> ApiError {

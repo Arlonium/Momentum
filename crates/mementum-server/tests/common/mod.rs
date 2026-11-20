@@ -58,6 +58,9 @@ pub struct TestApp {
     /// L'indexeur de l'application, lancé avec elle (lot 4). Un test qui relit toute la base
     /// attend d'abord qu'il n'ait plus rien à écrire ([`mementum_server::IndexerHandle::settled`]).
     pub indexer: mementum_server::IndexerHandle,
+    /// Le débit des recherches de l'application (lot 4, Task S5) : ses compteurs, et de quoi
+    /// tenir une place ou retenir un calcul.
+    pub searches: mementum_server::Searches,
     /// La base de l'application elle-même (pas un second `Store` sur le même fichier, comme
     /// [`Team::store`]) : sa file d'écriture, ses lectures.
     pub store: Store,
@@ -172,6 +175,7 @@ impl TestApp {
             store: started.store().clone(),
             hub: started.hub().clone(),
             indexer: started.indexer.clone(),
+            searches: started.searches.clone(),
             router: started.router,
             cfg,
         }

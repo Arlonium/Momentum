@@ -443,6 +443,22 @@ async fn the_account_refusal_comes_right_after_the_401_and_writes_nothing() {
                 .body(Body::empty())
                 .unwrap(),
         ),
+        (
+            "chercher dans l'espace",
+            json_request(
+                Method::POST,
+                &format!("/api/v1/spaces/{space}/search"),
+                &json!({ "q": "commune" }),
+            ),
+        ),
+        (
+            "chercher dans un espace où elle n'est rien",
+            json_request(
+                Method::POST,
+                &format!("/api/v1/spaces/{}/search", team.zoe.space),
+                &json!({ "q": "commune" }),
+            ),
+        ),
     ];
     for (route, request) in space_routes {
         let reply = mona.send(naming(request, &olga)).await;
