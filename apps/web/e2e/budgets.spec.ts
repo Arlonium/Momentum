@@ -741,3 +741,69 @@ test.describe("arbre de 1 000 pages", () => {
     await expect(row.getByRole("link")).toHaveAttribute("aria-current", "page");
   });
 });
+
+/**
+ * Les rétroliens (lot 4, Task C3) : les pages de 1 000 blocs de la première mesure, chacune visée
+ * par 200 pages (la borne de la réponse). La liste est demandée après la première synchro, et sa
+ * réponse prend au moins 75 ms chez le serveur (R1022) : l'ouverture ne doit pas la payer. En
+ * dernier : ces 200 pages de plus dans l'arbre, et ces liens, ne touchent aucune autre mesure.
+ */
+test.describe("rétroliens", () => {
+  /** Le nombre de pages qui mènent à chaque page mesurée : la borne de la réponse du serveur. */
+  const SOURCES = 200;
+
+  test.beforeAll(async ({ playwright }) => {
+    test.setTimeout(240_000);
+    const request = await playwright.request.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      const tag = unique();
+      // Chaque source mentionne toutes les pages mesurées, dans un seul bloc.
+      const mmd = `Vers ${small
+        .map((target, i) => `<mention type="page" id="${target.id}">Mesure ${i + 1}</mention>`)
+        .join(" et ")}\n`;
+      for (let done = 0; done < SOURCES; done += CREATE_CONCURRENCY) {
+        const batch = Math.min(CREATE_CONCURRENCY, SOURCES - done);
+        await Promise.all(
+          Array.from({ length: batch }, async (_, i) => {
+            const { id } = await createPage(request, { title: `Source ${tag} ${done + i + 1}` });
+            await putMmd(request, id, mmd);
+          }),
+        );
+      }
+      // L'index suit les écritures après un temps de calme : une condition, pas une durée.
+      for (const target of small) {
+        await expect
+          .poll(
+            async () => {
+              const res = await request.get(`/api/v1/pages/${target.id}/backlinks`);
+              return ((await res.json()) as { pages: unknown[] }).pages.length;
+            },
+            { timeout: 120_000 },
+          )
+          .toBe(SOURCES);
+      }
+    } finally {
+      await request.dispose();
+    }
+    await new Promise((done) => setTimeout(done, SERVER_IDLE_CLOSE_MS + 2_000));
+  });
+
+  test("open_page_with_200_backlinks_under_300ms", async ({ browser }) => {
+    const totals: number[] = [];
+    for (const target of small) {
+      const { total, longestFrame, page: p } = await openFromTree(browser, target);
+      console.log(
+        `  ouverture 1 000 blocs, 200 rétroliens : ${Math.round(total)} ms (image la plus longue ${Math.round(longestFrame)} ms)`,
+      );
+      totals.push(total);
+      // Ce qui a été mesuré est bien une page qui montre ses 200 rétroliens, une fois ouverte.
+      await expect(
+        p.getByRole("navigation", { name: "Pages qui mènent ici" }).getByRole("listitem"),
+      ).toHaveCount(SOURCES);
+      await closeContexts();
+    }
+    const p95 = percentile(totals, 0.95);
+    console.log(`MESURE ouverture 1 000 blocs visée par 200 pages, p95 : ${Math.round(p95)} ms (budget : 300 ms)`);
+    expect(p95).toBeLessThan(300);
+  });
+});
