@@ -4,7 +4,7 @@
 //!
 //! | Route | Il faut | Réponse |
 //! |---|---|---|
-//! | `GET /api/v1/pages/{id}/backlinks` | `read` (à la corbeille aussi) | [`Backlinks`] : les pages qui y mènent, que le compte voit, de l'espace de la page, hors corbeille, dans l'ordre de leurs identifiants, deux cents au plus |
+//! | `GET /api/v1/pages/{id}/backlinks` | `read` (à la corbeille aussi) | [`Backlinks`] : les pages qui y mènent, que le compte voit, de l'espace de la page, hors corbeille, dans l'ordre de leurs identifiants, deux cents au plus ; jamais avant 75 ms ([`BACKLINKS_FLOOR`]) |
 //!
 //! **Refus**, dans l'ordre des pages : `401` sans session ; `409 account_changed` pour un autre
 //! compte nommé ; `404 not_found` pour une page que la personne ne voit pas, exactement la réponse
@@ -18,7 +18,15 @@
 //! compter les deux cents qu'elle rend : borner d'abord laisserait trois cents sources non vues
 //! cacher les vraies (`unseen_sources_never_hide_seen_ones`). La réponse ne dit ni combien de
 //! sources ont été lues, ni s'il en reste : elle est la même quelles que soient les sources non
-//! vues (`the_answer_is_the_same_whatever_unseen_sources_exist`), jusqu'à la borne du parcours.
+//! vues, **dans ses octets** (`the_answer_is_the_same_whatever_unseen_sources_exist`, jusqu'à la
+//! borne du parcours, `the_walk_stops_at_its_bound`) **et dans son temps, tant que le calcul tient
+//! sous le plancher** (Ruling R1022) : lire une source non vue coûte quelques microsecondes
+//! (2,7 µs, mesure du Step 3), si bien que la durée d'une lecture comptait les sources qu'on ne voit
+//! pas ; la réponse d'une lecture qui passe ne part donc jamais avant [`BACKLINKS_FLOOR`] (75 ms)
+//! après le début du traitement (`an_answer_never_leaves_before_the_floor`). Un refus (`401`,
+//! `409`, `404`) ne lit aucune source et ne l'attend pas. **Limite** : un parcours à la borne a
+//! coûté 64,8 ms au p95 sur le poste de développement ; sur un poste plus lent, il peut dépasser le
+//! plancher, et sa durée redit alors le nombre de sources lues (à relever en X2).
 //!
 //! **Le parcours est borné** : les sources se lisent par lots de [`BATCH`], dans l'ordre de leurs
 //! identifiants, chaque lot trié par droits, jusqu'à [`SHOWN`] sources vues ou [`WALKED`] sources
@@ -33,10 +41,13 @@
 //! dans l'ordre des identifiants de bloc (R963) ; `blockId` est `null` pour une clé de
 //! remplacement (`mementum_search::is_stand_in`), qui ne nomme pas un bloc qu'on rejoint.
 
+use std::time::Duration;
+
 use axum::Json;
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
 use mementum_acl::{Action, SpaceAccess};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use crate::AppState;
@@ -72,14 +83,36 @@ const BOUNDS: Bounds = Bounds {
     batch: BATCH,
 };
 
+/// Le temps de réponse plancher d'une lecture qui passe (Ruling R1022) : sa réponse ne part
+/// jamais avant ce délai, compté du début du traitement, que le parcours ait été long ou court.
+pub(crate) const BACKLINKS_FLOOR: Duration = Duration::from_millis(75);
+
 /// `GET /api/v1/pages/{id}/backlinks` : les pages qui mènent à la page, que le compte voit.
 pub(crate) async fn list(
     State(state): State<AppState>,
     user: AuthUser,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<Json<Backlinks>, ApiError> {
+    let started = Instant::now();
     let id = page_id(path)?;
-    Ok(Json(backlinks(&state, &user, id, BOUNDS).await?))
+    Ok(Json(answered(&state, &user, id, BOUNDS, started).await?))
+}
+
+/// [`backlinks`], dont la réponse ne part pas avant [`BACKLINKS_FLOOR`] après `started` ; un
+/// refus part tout de suite : il ne lit aucune source.
+async fn answered(
+    state: &AppState,
+    user: &AuthUser,
+    id: Uuid,
+    bounds: Bounds,
+    started: Instant,
+) -> Result<Backlinks, ApiError> {
+    let found = backlinks(state, user, id, bounds).await?;
+    #[cfg(test)]
+    tests::computed(id);
+    // Sur le moteur, sans fil bloquant : une attente, pas un calcul.
+    tokio::time::sleep_until(started + BACKLINKS_FLOOR).await;
+    Ok(found)
 }
 
 /// Les rétroliens de la page `id` pour `user`, sous `bounds`.
@@ -147,6 +180,7 @@ async fn seen_sources(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Mutex;
     use std::time::Instant;
 
     use mementum_acl::{Grant, Level, Role, Subject};
@@ -154,6 +188,41 @@ mod tests {
 
     use super::*;
     use crate::access::tests::{account, state};
+
+    /// L'horloge de tokio arrêtée (Ruling R179) : l'aide des tests de `mementum-sync`.
+    #[path = "../../../../../mementum-sync/tests/common/clock.rs"]
+    mod clock;
+
+    /// Les cibles dont une lecture a fini son calcul et attend son plancher ([`answered`]) : un
+    /// témoin sans minutage. Par cible, les tests du module tournant ensemble.
+    static COMPUTED: Mutex<Vec<Uuid>> = Mutex::new(Vec::new());
+
+    /// Noté par [`answered`], une fois le calcul fini, avant le plancher.
+    pub(super) fn computed(target: Uuid) {
+        COMPUTED.lock().unwrap().push(target);
+    }
+
+    fn was_computed(target: Uuid) -> bool {
+        COMPUTED.lock().unwrap().contains(&target)
+    }
+
+    /// Attend `ready` en temps réel (dix secondes au plus), en cédant la main : sous l'horloge
+    /// arrêtée, aucun délai de tokio ne finit. La borne peut faire échouer le test à tort sur un
+    /// poste très chargé, jamais le faire passer.
+    async fn until(what: &str, ready: impl Fn() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !ready() {
+            assert!(Instant::now() < deadline, "jamais vu : {what}");
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Cède la main assez pour que toute tâche prête ait tourné.
+    async fn settle() {
+        for _ in 0..200 {
+            tokio::task::yield_now().await;
+        }
+    }
 
     /// Un espace où Olga (propriétaire) écrit et Mona (membre) lit, et une page « Cible » que
     /// les membres lisent.
@@ -283,6 +352,87 @@ mod tests {
         }
     }
 
+    /// Ruling R1022 : la réponse d'une lecture qui passe ne part pas avant le plancher, compté du
+    /// début du traitement, que le parcours ait été long ou court : une page qu'une source mène
+    /// et une page sans aucune source, lues au même instant sous l'horloge arrêtée, ont fini leur
+    /// calcul (le témoin [`computed`]) et ne répondent ni l'une ni l'autre une milliseconde avant
+    /// le plancher ; elles répondent toutes deux au plancher.
+    #[tokio::test]
+    async fn an_answer_never_leaves_before_the_floor() {
+        let bench = Bench::new().await;
+        let alone = bench.page(true).await;
+        let source = bench.page(true).await;
+        bench.link_all(&[source]).await;
+        let clock = clock::StoppedClock::start();
+        let started = tokio::time::Instant::now();
+        let reads: Vec<_> = [bench.target, alone]
+            .into_iter()
+            .map(|target| {
+                let (state, mona) = (bench.state.clone(), bench.mona.clone());
+                tokio::spawn(async move {
+                    answered(&state, &mona, target, BOUNDS, started)
+                        .await
+                        .unwrap()
+                })
+            })
+            .collect();
+        until("les deux calculs finis", || {
+            was_computed(bench.target) && was_computed(alone)
+        })
+        .await;
+        settle().await;
+        assert!(reads.iter().all(|read| !read.is_finished()), "avant tout");
+        tokio::time::advance(BACKLINKS_FLOOR - Duration::from_millis(1)).await;
+        settle().await;
+        assert!(
+            reads.iter().all(|read| !read.is_finished()),
+            "une milliseconde avant le plancher"
+        );
+        // Le minuteur de tokio arrondit une échéance à la milliseconde suivante : `started` porte
+        // une fraction de milliseconde (vu en écrivant ce test : une seule de plus ne suffisait
+        // pas).
+        tokio::time::advance(Duration::from_millis(2)).await;
+        until("les deux réponses au plancher", || {
+            reads.iter().all(|read| read.is_finished())
+        })
+        .await;
+        let mut found = Vec::new();
+        for read in reads {
+            found.push(read.await.unwrap().pages.len());
+        }
+        assert_eq!(found, [1, 0]);
+        assert_eq!(BACKLINKS_FLOOR, Duration::from_millis(75));
+        drop(clock);
+        bench.finish().await;
+    }
+
+    /// Un refus ne lit aucune source, et part sans attendre le plancher : sous l'horloge arrêtée,
+    /// le `404` d'une page inconnue et celui d'une page que Mona ne voit pas arrivent sans que
+    /// l'horloge bouge.
+    #[tokio::test]
+    async fn a_refusal_does_not_wait_for_the_floor() {
+        let bench = Bench::new().await;
+        let hidden = bench.page(false).await;
+        let clock = clock::StoppedClock::start();
+        let started = tokio::time::Instant::now();
+        for target in [Uuid::now_v7(), hidden] {
+            let (state, mona) = (bench.state.clone(), bench.mona.clone());
+            let read =
+                tokio::spawn(async move { answered(&state, &mona, target, BOUNDS, started).await });
+            until("le refus", || read.is_finished()).await;
+            let refused = read.await.unwrap().expect_err("un refus");
+            let response = axum::response::IntoResponse::into_response(refused);
+            assert_eq!(response.status(), axum::http::StatusCode::NOT_FOUND);
+        }
+        assert_eq!(
+            tokio::time::Instant::now(),
+            started,
+            "l'horloge n'a pas bougé"
+        );
+        drop(clock);
+        bench.finish().await;
+    }
+
     /// Le cœur de la route (Review Focus 1, 4) : trois cents sources que Mona ne voit pas, aux
     /// identifiants avant ceux de trois qu'elle voit, ne cachent pas ces trois-là. C'est ce qui
     /// distingue « trier par droits, puis borner » de « borner, puis trier » : les deux cents
@@ -339,11 +489,14 @@ mod tests {
     }
 
     /// Le parcours s'arrête à sa borne (réglée bas, par lots de trois) : dix sources non vues,
-    /// puis une vue, et une borne de dix sources lues : la vue n'est pas lue, et rien ne le dit.
-    /// Témoin : à onze, elle l'est. Les lots se suivent sans répéter ni sauter une source.
+    /// puis une vue, et une borne de dix sources lues : la vue n'est pas lue, et rien ne le dit,
+    /// la réponse étant, octet pour octet, celle d'une page sans aucune source (la route ne pose
+    /// aucun en-tête à elle : ceux de l'API sont les mêmes pour toutes). Témoin : à onze, elle
+    /// l'est. Les lots se suivent sans répéter ni sauter une source.
     #[tokio::test]
     async fn the_walk_stops_at_its_bound() {
         let bench = Bench::new().await;
+        let alone = bench.page(true).await;
         let unseen = bench.pages(10, false).await;
         let seen = bench.page(true).await;
         bench.link_all(&unseen).await;
@@ -353,7 +506,15 @@ mod tests {
             walked,
             batch: 3,
         };
-        assert_eq!(bench.read(bounded(10)).await.pages, []);
+        let stopped = serde_json::to_vec(&bench.read(bounded(10)).await).unwrap();
+        let nothing = backlinks(&bench.state, &bench.mona, alone, bounded(10))
+            .await
+            .unwrap();
+        assert_eq!(
+            String::from_utf8(stopped).unwrap(),
+            String::from_utf8(serde_json::to_vec(&nothing).unwrap()).unwrap()
+        );
+        assert_eq!(nothing.pages, []);
         assert_eq!(bench.sources(bounded(11)).await, [seen]);
         assert_eq!(bench.sources(bounded(WALKED)).await, [seen]);
         assert_eq!((WALKED, BATCH), (20_000, 500));
