@@ -14,6 +14,7 @@ import {
   ownerAndMember,
   putMmd,
   signUpAccount,
+  treeRow,
   unique,
   waitSynced,
 } from "./helpers";
@@ -71,7 +72,11 @@ test("a_mention_makes_a_backlink", async ({ browser }) => {
   await expect(mona.locator(".mm-editor .mm-mention")).toHaveText([`@Cible ${tag}`]);
   await waitLinked(aliceApi, target.id, [source.id]);
 
-  // Rien ne l'a poussé à l'onglet de Tom : c'est son retour sur l'onglet qui relit.
+  // Rien ne l'a poussé à l'onglet de Tom : c'est son retour sur l'onglet qui relit. Derrière une
+  // barrière : une page créée après que le serveur a rendu le lien est arrivée dans l'arbre de Tom
+  // par le canal de l'espace ; ce qui aurait été poussé avec le lien serait arrivé avant elle.
+  const barrier = await createPage(aliceApi, { spaceId: space.id, title: `Barrière ${tag}` });
+  await expect(treeRow(tom, barrier.id)).toBeVisible();
   await expect(section(tom)).toHaveCount(0);
   const reread = tom.waitForResponse((res) => BACKLINKS.test(res.url()));
   await tom.clock.fastForward(5_500);
@@ -94,8 +99,11 @@ test("a_mention_makes_a_backlink", async ({ browser }) => {
   await expect(tom).toHaveURL(new RegExp(`/p/${source.id}`));
   await waitSynced(tom);
   expect(await tom.evaluate(() => (window as unknown as { kept?: boolean }).kept)).toBe(true);
-  expect(await tom.evaluate(() => document.activeElement?.tagName)).not.toBe("BODY");
-  // La page source ne se mène pas à elle-même, et rien n'y mène.
+  // Le bloc de la mention prend le focus une fois la page synchronisée et l'éditeur monté.
+  await expect
+    .poll(() => tom.evaluate(() => document.activeElement?.closest(".mm-editor") != null))
+    .toBe(true);
+  // La mention de la page source est là.
   await expect(tom.locator(".mm-editor .mm-mention")).toHaveText([`@Cible ${tag}`]);
 });
 
