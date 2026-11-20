@@ -1578,55 +1578,9 @@ fn opening_waits_for_a_writer_lock_taken_right_after_its_own() {
     assert_eq!(finds(&index, "mot", &pages([1])), 1);
 }
 
-/// Ruling R1200, la scène d'origine (le rouge de la CI sous Linux dans `reindex.rs`) : le
-/// verrou de l'écrivain est un `flock`, qui appartient à la description de fichier ouverte ;
-/// un processus fils qu'un autre fil lance en garde une copie de son `fork` à son `exec`, et le
-/// verrou que l'ouverture vient de rendre vit encore quand le moteur le reprend. Chaque
-/// ouverture se fait dans un dossier neuf : seule cette fenêtre-là est éprouvée, pas celle
-/// d'une réouverture qui suit une fermeture, où le premier verrou refuse sur-le-champ, à
-/// dessein. Ne tourne que sous Unix : sous Windows, le verrou n'est pas hérité.
-#[cfg(unix)]
-#[test]
-fn opening_survives_a_writer_lock_inherited_by_a_child_process() {
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-
-    let dir = TestDir::new();
-    let stop = Arc::new(AtomicBool::new(false));
-    let spawner = {
-        let stop = Arc::clone(&stop);
-        std::thread::spawn(move || {
-            let mut spawned = 0_u32;
-            while !stop.load(Ordering::Relaxed) {
-                std::process::Command::new("true")
-                    .status()
-                    .expect("lancer « true »");
-                spawned += 1;
-            }
-            spawned
-        })
-    };
-    let mut refused = None;
-    for n in 0..2_000 {
-        let at = dir.path().join(format!("index-{n}"));
-        match SearchIndex::open(&at) {
-            Ok(opened) => {
-                opened.index.close().expect("fermer");
-                std::fs::remove_dir_all(&at).expect("retirer le dossier");
-            }
-            Err(error) => {
-                refused = Some((n, error));
-                break;
-            }
-        }
-    }
-    stop.store(true, Ordering::Relaxed);
-    let spawned = spawner.join().expect("le fil qui lance des processus");
-    assert!(spawned > 0, "aucun processus lancé pendant les ouvertures");
-    if let Some((n, error)) = refused {
-        panic!("ouverture {n} refusée ({spawned} processus lancés) : {error:?}");
-    }
-}
+// La scène d'origine de R1200 (un processus fils qui hérite du verrou) est seule dans son binaire,
+// `tests/inherited_lock.rs` : elle lance des processus en boucle, et un test d'ici qui rouvre un
+// index juste après l'avoir fermé recevait alors `Busy` à tort (CI sous Linux).
 
 #[test]
 fn the_page_set_holds_what_it_was_given() {
