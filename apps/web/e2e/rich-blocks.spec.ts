@@ -383,7 +383,10 @@ test("page_link_opens_the_page_and_reads_back", async ({ browser, request }) => 
   await expect(field).toBeFocused();
   await p.keyboard.type(`Plan ${tag}`);
   await expect(picker.getByRole("option")).toHaveText([`Plan ${tag}`]);
-  expect(await getMmd(request, notes.id)).toBe("<p/>\n");
+  // Le serveur reçoit la frappe du menu « / » (« /li… ») lettre à lettre, puis son retrait : lu trop
+  // tôt, il rend encore « /li » (vu trois fois sur la CI). On attend donc qu'il ait tout reçu ; ce
+  // que cherche le sélecteur, lui, n'y arrive jamais.
+  await expect.poll(() => getMmd(request, notes.id)).toBe("<p/>\n");
   await p.keyboard.press("Enter");
   await expect(picker).toBeHidden();
 
