@@ -178,6 +178,13 @@ async fn seen_sources(
     Ok(kept)
 }
 
+/// L'horloge de tokio arrêtée (Ruling R179) : l'aide des tests de `mementum-sync`. Déclarée ici, et
+/// pas dans le module de tests : le chemin d'un module déclaré dans un module en ligne part d'un
+/// dossier `backlinks/tests/` qui n'existe pas, ce que Linux refuse.
+#[cfg(test)]
+#[path = "../../../mementum-sync/tests/common/clock.rs"]
+mod clock;
+
 #[cfg(test)]
 mod tests {
     use std::sync::Mutex;
@@ -188,10 +195,6 @@ mod tests {
 
     use super::*;
     use crate::access::tests::{account, state};
-
-    /// L'horloge de tokio arrêtée (Ruling R179) : l'aide des tests de `mementum-sync`.
-    #[path = "../../../../../mementum-sync/tests/common/clock.rs"]
-    mod clock;
 
     /// Les cibles dont une lecture a fini son calcul et attend son plancher ([`answered`]) : un
     /// témoin sans minutage. Par cible, les tests du module tournant ensemble.
@@ -363,7 +366,7 @@ mod tests {
         let alone = bench.page(true).await;
         let source = bench.page(true).await;
         bench.link_all(&[source]).await;
-        let clock = clock::StoppedClock::start();
+        let clock = super::clock::StoppedClock::start();
         let started = tokio::time::Instant::now();
         let reads: Vec<_> = [bench.target, alone]
             .into_iter()
@@ -413,7 +416,7 @@ mod tests {
     async fn a_refusal_does_not_wait_for_the_floor() {
         let bench = Bench::new().await;
         let hidden = bench.page(false).await;
-        let clock = clock::StoppedClock::start();
+        let clock = super::clock::StoppedClock::start();
         let started = tokio::time::Instant::now();
         for target in [Uuid::now_v7(), hidden] {
             let (state, mona) = (bench.state.clone(), bench.mona.clone());
