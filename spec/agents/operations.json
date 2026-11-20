@@ -1,0 +1,243 @@
+{
+  "about": "Les opérations d'édition des agents (update_page, §6.3 ; Rulings R1224, R1228 à R1232, R1235 ; Task S3 du lot 5). Chaque cas : une page (MMD ; une ancre ^p1 donne l'identifiant p1), une liste d'opérations sous la forme de l'outil update_page (spec/mcp/tools.json), et l'issue attendue : le MMD de la page écrite, sans ancres (« mmd »), ou le refus (« refused » : le rang de l'opération refusée, à partir de 0, et sa raison), qui n'écrit rien. Une ancre « alias:p1 » désigne l'alias du bloc p1 dans la page de départ. « media_guard » : une écriture par jeton, qui ne fait entrer aucun média du web (R1235). Lue par crates/mementum-crdt/tests/ops.rs (the_operations_table_holds) ; un cas neuf s'ajoute ici.",
+  "cases": [
+    {
+      "name": "str_replace dans un texte en gras",
+      "page": "Du **gras** ici. ^p1\n\nAutre. ^p2\n",
+      "operations": [{ "op": "str_replace", "old": "gras", "new": "gros" }],
+      "expect": { "mmd": "Du **gros** ici.\n\nAutre.\n" }
+    },
+    {
+      "name": "str_replace introuvable",
+      "page": "Du **gras** ici. ^p1\n",
+      "operations": [{ "op": "str_replace", "old": "absent", "new": "x" }],
+      "expect": { "refused": { "index": 0, "reason": "no_match" } }
+    },
+    {
+      "name": "str_replace trouvé deux fois",
+      "page": "Un mot, un mot. ^p1\n",
+      "operations": [{ "op": "str_replace", "old": "mot", "new": "MOT" }],
+      "expect": { "refused": { "index": 0, "reason": "ambiguous_match" } }
+    },
+    {
+      "name": "str_replace les remplace tous",
+      "page": "Un mot, un mot. ^p1\n\nEncore un mot. ^p2\n",
+      "operations": [{ "op": "str_replace", "old": "mot", "new": "MOT", "replace_all": true }],
+      "expect": { "mmd": "Un MOT, un MOT.\n\nEncore un MOT.\n" }
+    },
+    {
+      "name": "str_replace dans le bloc d'un alias",
+      "page": "Un mot ^p1\n\nUn mot ^p2\n",
+      "operations": [{ "op": "str_replace", "old": "mot", "new": "autre", "anchor": "alias:p2" }],
+      "expect": { "mmd": "Un mot\n\nUn autre\n" }
+    },
+    {
+      "name": "str_replace dans le bloc d'un identifiant entier",
+      "page": "Un mot ^p1\n\nUn mot ^p2\n",
+      "operations": [{ "op": "str_replace", "old": "mot", "new": "autre", "anchor": "p1" }],
+      "expect": { "mmd": "Un autre\n\nUn mot\n" }
+    },
+    {
+      "name": "str_replace à une ancre inconnue",
+      "page": "Un mot ^p1\n",
+      "operations": [{ "op": "str_replace", "old": "mot", "new": "autre", "anchor": "bzzzzz" }],
+      "expect": { "refused": { "index": 0, "reason": "stale_anchor" } }
+    },
+    {
+      "name": "str_replace qui garde le lien du premier caractère",
+      "page": "Voir [la spécification](https://mementum.dev) avant. ^p1\n",
+      "operations": [{ "op": "str_replace", "old": "spécification", "new": "conception" }],
+      "expect": { "mmd": "Voir [la conception](https://mementum.dev) avant.\n" }
+    },
+    {
+      "name": "insert après un bloc",
+      "page": "Un ^p1\n\nTrois ^p3\n",
+      "operations": [{ "op": "insert", "after": "alias:p1", "markdown": "Deux\n" }],
+      "expect": { "mmd": "Un\n\nDeux\n\nTrois\n" }
+    },
+    {
+      "name": "insert avant un bloc",
+      "page": "Un ^p1\n\nTrois ^p3\n",
+      "operations": [{ "op": "insert", "before": "p3", "markdown": "Deux\n" }],
+      "expect": { "mmd": "Un\n\nDeux\n\nTrois\n" }
+    },
+    {
+      "name": "insert en tête",
+      "page": "Un ^p1\n\nTrois ^p3\n",
+      "operations": [{ "op": "insert", "position": "start", "markdown": "# Titre\n" }],
+      "expect": { "mmd": "# Titre\n\nUn\n\nTrois\n" }
+    },
+    {
+      "name": "insert en fin",
+      "page": "Un ^p1\n\nTrois ^p3\n",
+      "operations": [{ "op": "insert", "position": "end", "markdown": "- Quatre\n- Cinq\n" }],
+      "expect": { "mmd": "Un\n\nTrois\n\n- Quatre\n- Cinq\n" }
+    },
+    {
+      "name": "insert parmi les enfants d'un bloc",
+      "page": "- Un ^p1\n  - Enfant ^c1\n",
+      "operations": [{ "op": "insert", "after": "c1", "markdown": "- Second enfant\n" }],
+      "expect": { "mmd": "- Un\n  - Enfant\n  - Second enfant\n" }
+    },
+    {
+      "name": "insert d'un MMD illisible",
+      "page": "Un ^p1\n",
+      "operations": [{ "op": "insert", "position": "end", "markdown": "* étoile\n" }],
+      "expect": { "refused": { "index": 0, "reason": "invalid_markdown" } }
+    },
+    {
+      "name": "insert d'un MMD vide",
+      "page": "Un ^p1\n",
+      "operations": [{ "op": "insert", "position": "end", "markdown": "" }],
+      "expect": { "refused": { "index": 0, "reason": "invalid_markdown" } }
+    },
+    {
+      "name": "insert d'un paragraphe parmi des colonnes",
+      "page": "<columns>\n<column id=\"col1\">\nGauche ^g1\n</column>\n<column id=\"col2\">\nDroite ^d1\n</column>\n</columns>\n",
+      "operations": [{ "op": "insert", "after": "col1", "markdown": "Paragraphe\n" }],
+      "expect": { "refused": { "index": 0, "reason": "invalid_structure" } }
+    },
+    {
+      "name": "insert dans une colonne",
+      "page": "<columns>\n<column id=\"col1\">\nGauche ^g1\n</column>\n<column id=\"col2\">\nDroite ^d1\n</column>\n</columns>\n",
+      "operations": [{ "op": "insert", "after": "g1", "markdown": "Sous gauche\n" }],
+      "expect": { "mmd": "<columns>\n<column>\nGauche\n\nSous gauche\n</column>\n<column>\nDroite\n</column>\n</columns>\n" }
+    },
+    {
+      "name": "delete_block",
+      "page": "Un ^p1\n\nDeux ^p2\n",
+      "operations": [{ "op": "delete_block", "anchor": "alias:p1" }],
+      "expect": { "mmd": "Deux\n" }
+    },
+    {
+      "name": "delete_block d'un bloc et de ses enfants",
+      "page": "- Un ^p1\n  - Enfant ^c1\n\nDeux ^p2\n",
+      "operations": [{ "op": "delete_block", "anchor": "p1" }],
+      "expect": { "mmd": "Deux\n" }
+    },
+    {
+      "name": "delete_block qui viderait une colonne",
+      "page": "<columns>\n<column id=\"col1\">\nGauche ^g1\n</column>\n<column id=\"col2\">\nDroite ^d1\n</column>\n</columns>\n",
+      "operations": [{ "op": "delete_block", "anchor": "g1" }],
+      "expect": { "refused": { "index": 0, "reason": "invalid_structure" } }
+    },
+    {
+      "name": "delete_block d'un lien de sous-page sans l'option",
+      "page": "Un ^p1\n\n<page id=\"pg_child01\" anchor=\"l1\">Sous-page</page>\n",
+      "operations": [{ "op": "delete_block", "anchor": "l1" }],
+      "expect": { "refused": { "index": 0, "reason": "protected_content" } }
+    },
+    {
+      "name": "delete_block d'un lien de sous-page avec l'option",
+      "page": "Un ^p1\n\n<page id=\"pg_child01\" anchor=\"l1\">Sous-page</page>\n",
+      "operations": [{ "op": "delete_block", "anchor": "l1", "allow_deleting_content": true }],
+      "expect": { "mmd": "Un\n" }
+    },
+    {
+      "name": "replace_block",
+      "page": "Un ^p1\n\nDeux ^p2\n",
+      "operations": [{ "op": "replace_block", "anchor": "alias:p1", "markdown": "# Titre\n\nUn bis\n" }],
+      "expect": { "mmd": "# Titre\n\nUn bis\n\nDeux\n" }
+    },
+    {
+      "name": "replace_block par un MMD vide",
+      "page": "Un ^p1\n\nDeux ^p2\n",
+      "operations": [{ "op": "replace_block", "anchor": "p1", "markdown": "" }],
+      "expect": { "mmd": "Deux\n" }
+    },
+    {
+      "name": "move_block après un bloc",
+      "page": "Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n",
+      "operations": [{ "op": "move_block", "anchor": "alias:p3", "after": "alias:p1" }],
+      "expect": { "mmd": "Un\n\nTrois\n\nDeux\n" }
+    },
+    {
+      "name": "move_block en tête",
+      "page": "Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n",
+      "operations": [{ "op": "move_block", "anchor": "p3", "position": "start" }],
+      "expect": { "mmd": "Trois\n\nUn\n\nDeux\n" }
+    },
+    {
+      "name": "move_block en fin, avant un bloc",
+      "page": "Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n",
+      "operations": [
+        { "op": "move_block", "anchor": "p1", "position": "end" },
+        { "op": "move_block", "anchor": "p3", "before": "p2" }
+      ],
+      "expect": { "mmd": "Trois\n\nDeux\n\nUn\n" }
+    },
+    {
+      "name": "move_block dans ses propres enfants",
+      "page": "- Un ^p1\n  - Enfant ^c1\n",
+      "operations": [{ "op": "move_block", "anchor": "p1", "after": "c1" }],
+      "expect": { "refused": { "index": 0, "reason": "invalid_move" } }
+    },
+    {
+      "name": "move_block sous un autre bloc",
+      "page": "- Un ^p1\n  - Enfant ^c1\n- Deux ^p2\n",
+      "operations": [{ "op": "move_block", "anchor": "p2", "after": "c1" }],
+      "expect": { "mmd": "- Un\n  - Enfant\n  - Deux\n" }
+    },
+    {
+      "name": "replace_page",
+      "page": "Un ^p1\n\nDeux ^p2\n",
+      "operations": [{ "op": "replace_page", "markdown": "Un\n\nDeux modifié\n\nTrois\n" }],
+      "expect": { "mmd": "Un\n\nDeux modifié\n\nTrois\n" }
+    },
+    {
+      "name": "replace_page qui nomme un alias périmé",
+      "page": "Un ^p1\n\nDeux ^p2\n",
+      "operations": [{ "op": "replace_page", "markdown": "Un ^bzzzzz\n" }],
+      "expect": { "refused": { "index": 0, "reason": "stale_anchor" } }
+    },
+    {
+      "name": "image du web refusée à un jeton",
+      "page": "Un ^p1\n",
+      "media_guard": true,
+      "operations": [{ "op": "insert", "position": "end", "markdown": "![Pixel](https://ailleurs.example/p.png)\n" }],
+      "expect": { "refused": { "index": 0, "reason": "external_media" } }
+    },
+    {
+      "name": "image du web permise hors jeton",
+      "page": "Un ^p1\n",
+      "operations": [{ "op": "insert", "position": "end", "markdown": "![Pixel](https://ailleurs.example/p.png)\n" }],
+      "expect": { "mmd": "Un\n\n![Pixel](https://ailleurs.example/p.png)\n" }
+    },
+    {
+      "name": "lien du web permis à un jeton",
+      "page": "Un ^p1\n",
+      "media_guard": true,
+      "operations": [{ "op": "str_replace", "old": "Un", "new": "Deux" }, { "op": "insert", "position": "end", "markdown": "Voir [ailleurs](https://ailleurs.example).\n" }],
+      "expect": { "mmd": "Deux\n\nVoir [ailleurs](https://ailleurs.example).\n" }
+    },
+    {
+      "name": "plusieurs opérations en un appel",
+      "page": "Un ^p1\n\nDeux ^p2\n\nTrois ^p3\n",
+      "operations": [
+        { "op": "str_replace", "old": "Deux", "new": "Second" },
+        { "op": "insert", "after": "p3", "markdown": "Quatre\n" },
+        { "op": "move_block", "anchor": "p1", "position": "end" },
+        { "op": "delete_block", "anchor": "p3" }
+      ],
+      "expect": { "mmd": "Second\n\nQuatre\n\nUn\n" }
+    },
+    {
+      "name": "une opération sur un bloc qu'une autre a retiré",
+      "page": "Un ^p1\n\nDeux ^p2\n",
+      "operations": [
+        { "op": "delete_block", "anchor": "p2" },
+        { "op": "str_replace", "old": "Deux", "new": "x", "anchor": "alias:p2" }
+      ],
+      "expect": { "refused": { "index": 1, "reason": "stale_anchor" } }
+    },
+    {
+      "name": "un MMD illisible dans la deuxième opération",
+      "page": "Un ^p1\n",
+      "operations": [
+        { "op": "insert", "position": "end", "markdown": "Deux\n" },
+        { "op": "insert", "position": "end", "markdown": "Trois\n\n\n\nQuatre\n" }
+      ],
+      "expect": { "refused": { "index": 1, "reason": "invalid_markdown" } }
+    }
+  ]
+}

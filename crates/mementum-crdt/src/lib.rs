@@ -6,6 +6,7 @@
 //! dédoublonne les blocs après des déplacements concurrents et calcule une
 //! révision canonique.
 
+pub mod anchors;
 mod attrs;
 mod blocknote;
 mod cost;
@@ -18,6 +19,7 @@ mod guard;
 pub mod hooks;
 mod kept_ids;
 mod moves;
+pub mod ops;
 mod page;
 mod revision;
 mod structure;

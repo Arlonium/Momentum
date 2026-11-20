@@ -11,7 +11,8 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use linear::{Answer, Form, Limits, grows_like_input};
-use mementum_crdt::{FRAGMENT, PageDoc};
+use mementum_crdt::anchors::{Anchors, BlockHashes, HashKey, hashes, three_way};
+use mementum_crdt::{FRAGMENT, PageDoc, ops};
 use mementum_md::{MAX_COLOR_BYTES, MAX_HREF_BYTES, RenderOpts, render};
 use yrs::types::{Attrs, Delta};
 use yrs::{
@@ -555,6 +556,302 @@ fn a_diff_write_grows_like_the_page() {
         answer: Answer::PerByte(8),
     };
     let failures = grows_like_input(&forms, size, write, Vec::len, limits);
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+// ------------------------------------------------------- opérations des agents (Task S3)
+
+/// Une liste d'opérations à planifier sur les blocs d'une page, et la taille de l'entrée : le MMD
+/// de la page et ce que les opérations portent.
+struct OpsCase {
+    blocks: Vec<mementum_md::Block>,
+    ops: Vec<ops::Operation>,
+    size: usize,
+}
+
+/// La page de `n` paragraphes `Paragraphe <i> fin`, ses blocs relus (avec leurs identifiants).
+fn paragraph_blocks(n: usize) -> Vec<mementum_md::Block> {
+    let lines: Vec<String> = (0..n).map(|i| format!("Paragraphe {i} fin")).collect();
+    let (page, _) = PageDoc::new_page();
+    page.write_blocks(&mementum_md::parse(&(lines.join("\n\n") + "\n")).unwrap())
+        .unwrap();
+    page.read_blocks()
+}
+
+fn ops_case(blocks: Vec<mementum_md::Block>, ops: Vec<ops::Operation>, carried: usize) -> OpsCase {
+    let size = render(&blocks, RenderOpts::default()).markdown.len() + carried;
+    OpsCase { blocks, ops, size }
+}
+
+/// Ce que le serveur rendrait d'un refus : son message et ses candidats.
+fn refusal_bytes(planned: &Result<usize, ops::OpRefusal>) -> usize {
+    match planned {
+        Ok(_) => 0,
+        Err(refusal) => {
+            refusal.message.len()
+                + refusal
+                    .candidates
+                    .iter()
+                    .map(|c| c.alias.len() + c.text.len())
+                    .sum::<usize>()
+        }
+    }
+}
+
+fn plan_case(case: &OpsCase) -> Result<usize, ops::OpRefusal> {
+    let key = HashKey::new();
+    let ctx = ops::PlanContext {
+        base: ops::Base::Current,
+        key: &key,
+        forbid_external_media: true,
+    };
+    ops::plan(&case.blocks, &case.ops, &ctx).map(|plan| plan.blocks().len())
+}
+
+/// Task S3 du lot 5 (R380, R641) : cent opérations sur une page croissent comme la page. Chacune
+/// se résout sur les blocs lus une fois (un index des ancres, le texte de chaque bloc gardé), sans
+/// relire la page par bloc cherché : un `str_replace` sans ancre parcourt les textes une fois, une
+/// ancre se résout dans l'index, une insertion en tête ne recopie que la liste de ses frères.
+#[test]
+fn a_hundred_operations_on_10000_blocks() {
+    // Au moins quatre blocs entre deux blocs visés, quelle que soit la taille : 400 de plus.
+    let size_of = |n: usize| n + 400;
+    let spread = |m: usize| (0..100).map(move |k| k * (m / 100));
+    let replaced = |n: usize| {
+        let blocks = paragraph_blocks(size_of(n));
+        let ops: Vec<ops::Operation> = spread(size_of(n))
+            .map(|i| ops::Operation::StrReplace {
+                old: format!("Paragraphe {i} fin"),
+                new: format!("Changé {i} fin"),
+                anchor: None,
+                replace_all: false,
+            })
+            .collect();
+        ops_case(blocks, ops, 100 * 40)
+    };
+    let anchored = |n: usize| {
+        let blocks = paragraph_blocks(size_of(n));
+        let anchors = Anchors::of(&blocks);
+        let ops: Vec<ops::Operation> = spread(size_of(n))
+            .map(|i| ops::Operation::StrReplace {
+                old: "fin".into(),
+                new: "suite".into(),
+                anchor: Some(anchors.alias(&blocks[i].id).unwrap().to_string()),
+                replace_all: false,
+            })
+            .collect();
+        ops_case(blocks, ops, 100 * 20)
+    };
+    let mixed = |n: usize| {
+        let blocks = paragraph_blocks(size_of(n));
+        let anchors = Anchors::of(&blocks);
+        let alias = |i: usize| anchors.alias(&blocks[i].id).unwrap().to_string();
+        let ops: Vec<ops::Operation> = spread(size_of(n))
+            .enumerate()
+            .map(|(k, i)| match k % 4 {
+                0 => ops::Operation::Insert {
+                    at: ops::Place::After(alias(i)),
+                    blocks: mementum_md::parse("Inséré\n").unwrap(),
+                },
+                1 => ops::Operation::DeleteBlock {
+                    anchor: alias(i),
+                    allow_deleting_content: false,
+                },
+                // Avant le bloc d'avant : aucun autre ne le vise.
+                2 => ops::Operation::MoveBlock {
+                    anchor: alias(i),
+                    to: ops::Place::Before(alias(i - 1)),
+                },
+                _ => ops::Operation::ReplaceBlock {
+                    anchor: alias(i),
+                    blocks: mementum_md::parse("Remplacé\n\nEt encore\n").unwrap(),
+                    allow_deleting_content: false,
+                },
+            })
+            .collect();
+        ops_case(blocks, ops, 100 * 40)
+    };
+    let at_the_head = |n: usize| {
+        let blocks = paragraph_blocks(size_of(n));
+        let ops: Vec<ops::Operation> = (0..100)
+            .map(|_| ops::Operation::Insert {
+                at: ops::Place::Start,
+                blocks: mementum_md::parse("En tête\n").unwrap(),
+            })
+            .collect();
+        ops_case(blocks, ops, 100 * 10)
+    };
+    let forms = [
+        Form {
+            what: "cent str_replace sans ancre",
+            build: &replaced as &dyn Fn(usize) -> OpsCase,
+        },
+        Form {
+            what: "cent str_replace à une ancre",
+            build: &anchored,
+        },
+        Form {
+            what: "cent opérations mêlées, par alias",
+            build: &mixed,
+        },
+        Form {
+            what: "cent insertions en tête",
+            build: &at_the_head,
+        },
+    ];
+    let limits = Limits {
+        peak_per_byte: 96,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(
+        &forms,
+        |case: &OpsCase| case.size,
+        |case: &OpsCase| {
+            let planned = plan_case(case);
+            assert!(planned.is_ok(), "{:?}", planned.err());
+            planned
+        },
+        refusal_bytes,
+        limits,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// Un `old` de 2 000 caractères, trouvé une fois ou introuvable (le refus cherche alors, dans
+/// chaque bloc, le plus long début de `old` : R1230), croît comme la page ; un bloc plus court que
+/// `old` n'y coûte que sa longueur.
+#[test]
+fn an_old_text_of_2000_characters() {
+    let long: String = (0..2_000)
+        .map(|i| (b'a' + (i % 23) as u8) as char)
+        .collect();
+    let found = |n: usize| {
+        let mut blocks = paragraph_blocks(n);
+        set_text(&mut blocks[n / 2], &format!("Avant {long} après"));
+        let ops = vec![ops::Operation::StrReplace {
+            old: long.clone(),
+            new: "court".into(),
+            anchor: None,
+            replace_all: false,
+        }];
+        ops_case(blocks, ops, long.len())
+    };
+    let missing = |n: usize| {
+        let mut blocks = paragraph_blocks(n);
+        // Le début de `old` dans un bloc sur dix, la moitié de `old` dans un seul.
+        for (i, block) in blocks
+            .iter_mut()
+            .enumerate()
+            .filter(|(i, _)| i % 10 == 0 || *i == n / 2)
+        {
+            let head: String = long
+                .chars()
+                .take(if i == n / 2 { 1_000 } else { 40 })
+                .collect();
+            set_text(block, &format!("Bloc {i} : {head}"));
+        }
+        let ops = vec![ops::Operation::StrReplace {
+            old: format!("{long}!"),
+            new: "court".into(),
+            anchor: None,
+            replace_all: false,
+        }];
+        ops_case(blocks, ops, long.len())
+    };
+    let forms = [
+        Form {
+            what: "un old de 2 000 caractères trouvé",
+            build: &found as &dyn Fn(usize) -> OpsCase,
+        },
+        Form {
+            what: "un old de 2 000 caractères introuvable",
+            build: &missing,
+        },
+    ];
+    let limits = Limits {
+        peak_per_byte: 96,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(
+        &forms,
+        |case: &OpsCase| case.size,
+        plan_case,
+        refusal_bytes,
+        limits,
+    );
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+fn set_text(block: &mut mementum_md::Block, text: &str) {
+    block.content = mementum_md::Content::Inline(vec![mementum_md::Inline::Text {
+        text: text.into(),
+        styles: Default::default(),
+    }]);
+}
+
+/// La fusion à trois de `replace_page` (R1231) : sa page de départ (ses empreintes), les blocs de
+/// l'agent, la page d'aujourd'hui.
+struct MergeCase {
+    base: BlockHashes,
+    written: Vec<mementum_md::Block>,
+    now: Vec<mementum_md::Block>,
+    key: HashKey,
+    size: usize,
+}
+
+/// La fusion à trois croît comme la page : un index par côté, une passe par bloc.
+#[test]
+fn a_three_way_merge_grows_like_the_page() {
+    let merge = |n: usize| {
+        let base_blocks = paragraph_blocks(n);
+        let key = HashKey::new();
+        let base = hashes(&base_blocks, &key);
+        // Un autre change un bloc sur dix, l'agent un autre sur dix, et en retire un sur dix.
+        let mut now = base_blocks.clone();
+        for block in now.iter_mut().step_by(10) {
+            retouched_text(block);
+        }
+        let mut written: Vec<mementum_md::Block> = Vec::new();
+        for (i, block) in base_blocks.iter().enumerate() {
+            match i % 10 {
+                5 => {
+                    let mut b = block.clone();
+                    retouched_text(&mut b);
+                    written.push(b);
+                }
+                7 => {}
+                _ => written.push(block.clone()),
+            }
+        }
+        let size = render(&now, RenderOpts::default()).markdown.len()
+            + render(&written, RenderOpts::default()).markdown.len();
+        MergeCase {
+            base,
+            written,
+            now,
+            key,
+            size,
+        }
+    };
+    let forms = [Form {
+        what: "une page dont l'agent et un autre ont changé chacun un bloc sur dix",
+        build: &merge as &dyn Fn(usize) -> MergeCase,
+    }];
+    let limits = Limits {
+        peak_per_byte: 96,
+        answer: Answer::PerByte(8),
+    };
+    let failures = grows_like_input(
+        &forms,
+        |case: &MergeCase| case.size,
+        |case: &MergeCase| {
+            three_way(&case.base, &case.written, &case.now, &case.key)
+                .expect("aucun bloc changé des deux côtés")
+                .len()
+        },
+        |_| 0,
+        limits,
+    );
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
