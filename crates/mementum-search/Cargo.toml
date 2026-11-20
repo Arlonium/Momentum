@@ -1,6 +1,6 @@
 [package]
 name = "mementum-search"
-description = "Recherche de Mementum : projection d'une page en lignes d'index, lecture d'une requête"
+description = "Recherche de Mementum : projection d'une page en lignes d'index, lecture d'une requête, index plein texte"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -9,11 +9,25 @@ publish = false
 
 [dependencies]
 mementum-md.workspace = true
-# Empreinte d'une ligne d'index : ce qui n'a pas changé n'est pas récrit (Ruling R919).
+# Empreinte d'une ligne d'index : ce qui n'a pas changé n'est pas récrit (Ruling R919) ; clé de
+# départage d'une entrée de l'index plein texte (Ruling R922).
 sha2.workspace = true
+tantivy.workspace = true
 unicode-normalization.workspace = true
 uuid.workspace = true
 
+[features]
+# Pour les tests seulement : les témoins de l'index plein texte (une note à statistiques
+# d'ensemble, un départage par adresse d'entrée), qui prouvent que les tests de R916 et de R922
+# voient ce qu'ils gardent, et la fusion de tous les segments à la demande.
+test-hooks = []
+
 [dev-dependencies]
+# Les tests de l'index posent ses témoins (fonction `test-hooks`).
+mementum-search = { path = ".", features = ["test-hooks"] }
 # Les tables de cas de `spec/search/` et le registre des blocs.
 serde_json.workspace = true
+# Mémoire du processus (mesures de l'index, `#[ignore]`).
+sysinfo.workspace = true
+# `TestDir` (inclus par son chemin depuis `mementum-store`, Ruling R344).
+tempfile.workspace = true
