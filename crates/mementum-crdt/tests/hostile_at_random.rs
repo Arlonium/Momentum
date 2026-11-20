@@ -330,6 +330,49 @@ impl Served {
         Some(txn.encode_update_v1())
     }
 
+    /// Le serveur récrit la page par différence (`PageDoc::write_diff`, Task S2 du lot 5 ;
+    /// relecture de S2, I4) : les blocs qu'il en lit, retouchés. C'est la première écriture du
+    /// serveur qui modifie sur place ce que des clients ont écrit, et elle ne passe pas par la
+    /// lecture de la page : sa mise à jour est donnée aux deux yrs à la suite de l'état d'avant
+    /// (`twins::written_alike`), puis écrite au journal comme l'écrirait l'acteur ; après une
+    /// erreur, la page est rechargée. Elle est tracée comme une mise à jour reçue.
+    fn diff_write(&mut self, rng: &mut Rng) -> Result<bool, String> {
+        // Une suppression en attente peut nommer les horloges à venir du client de cette page : une
+        // entrée relue du journal (un journal d'avant R198) que lit la page même qui a créé la page.
+        // L'écriture du serveur prendrait ces horloges, et la page relue de son état les
+        // supprimerait (vu par cet essai : graines 533, 923, 981, 1007 de la voie du journal, par
+        // l'écriture par différence comme par la récriture complète). L'acteur qui écrit a chargé la
+        // page de son journal, sous un client tiré au hasard, qu'aucune entrée ne nomme, et aucune
+        // mise à jour de client ne laisse plus de suppression en attente (R198) : la page est
+        // rechargée avant d'écrire, comme l'acteur (relecture de S2, R1299).
+        if self.page.has_pending_deletions() {
+            self.page = self.reloaded();
+        }
+        let mut blocks = self.page.read_blocks();
+        retouch(&mut blocks, rng);
+        let state = self.page.encode_state();
+        match self.page.write_diff(&blocks) {
+            Ok(written) if written.update == [0, 0] => Ok(false),
+            Ok(written) => {
+                trace(&written.update);
+                if self.watched {
+                    twins::written_alike(
+                        "une écriture par différence",
+                        &mut self.compared,
+                        &state,
+                        &written.update,
+                    );
+                }
+                self.journal.push(written.update);
+                Ok(true)
+            }
+            Err(error) => {
+                self.page = self.reloaded();
+                Err(error.to_string())
+            }
+        }
+    }
+
     /// Ce que relit le chargement d'une page compactée à un point quelconque de la scène :
     /// l'instantané, puis la fin du journal. Elle se charge, et elle est la page vivante (constat C5
     /// de la re-relecture 8, Rulings R858, R865).
@@ -832,8 +875,64 @@ struct Tally {
     compared: twins::Compared,
 }
 
+/// Retouche les blocs d'une page pour une écriture par différence : un paragraphe ajouté, un
+/// texte allongé, un bloc retiré, le dernier remonté en tête, le gras d'une plage basculé, une
+/// mention en tête d'un contenu (qui le fait récrire en entier).
+fn retouch(blocks: &mut Vec<mementum_md::Block>, rng: &mut Rng) {
+    use mementum_md::{Content, Inline};
+    fn first_text(blocks: &mut [mementum_md::Block]) -> Option<&mut Vec<Inline>> {
+        blocks.iter_mut().find_map(|b| match &mut b.content {
+            Content::Inline(content) => Some(content),
+            _ => None,
+        })
+    }
+    let n = blocks.len();
+    match rng.below(6) {
+        0 => blocks.push(
+            mementum_md::parse("Écrit par le serveur\n")
+                .unwrap()
+                .remove(0),
+        ),
+        1 => {
+            if let Some(content) = first_text(blocks) {
+                content.push(Inline::Text {
+                    text: "plus".into(),
+                    styles: Default::default(),
+                });
+            }
+        }
+        2 if n > 1 => {
+            blocks.remove(rng.below(n as u64) as usize);
+        }
+        3 if n > 1 => {
+            let last = blocks.pop().unwrap();
+            blocks.insert(0, last);
+        }
+        4 => {
+            if let Some(Inline::Text { styles, .. }) = first_text(blocks)
+                .and_then(|c| c.iter_mut().find(|i| matches!(i, Inline::Text { .. })))
+            {
+                styles.bold = !styles.bold;
+            }
+        }
+        _ => {
+            if let Some(content) = first_text(blocks) {
+                content.insert(
+                    0,
+                    Inline::Mention {
+                        kind: "page".into(),
+                        id: "pg_x".into(),
+                        label: "x".into(),
+                    },
+                );
+            }
+        }
+    }
+}
+
 fn case(seed: u64, stored: bool, tally: &mut Tally) {
     let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ u64::from(stored));
+    let mut writes = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1FF ^ u64::from(stored));
     let mut served = Served::new(stored);
     // Comparer les deux yrs coûte quatre fois le cas lui-même : dans le passage ordinaire de la
     // suite, un cas sur quatre ; dans un essai élargi (`MEMENTUM_FUZZ_SEEDS`), tous.
@@ -878,6 +977,15 @@ fn case(seed: u64, stored: bool, tally: &mut Tally) {
             }
         } else if let Some(update) = served.honest(&mut rng)
             && let Err(why) = served.receive(&update)
+        {
+            let key: String = why.chars().take(110).collect();
+            *tally.honest_refused.entry(key).or_default() += 1;
+        }
+        // Une écriture du serveur par différence, un pas sur quatre (relecture de S2, I4). Tirée
+        // d'un générateur à elle : les pas hostiles et honnêtes de chaque graine restent ceux
+        // d'avant, tant qu'aucune écriture ne les a précédés.
+        if writes.chance(25)
+            && let Err(why) = served.diff_write(&mut writes)
         {
             let key: String = why.chars().take(110).collect();
             *tally.honest_refused.entry(key).or_default() += 1;

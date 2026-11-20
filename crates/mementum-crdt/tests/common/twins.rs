@@ -161,6 +161,23 @@ pub struct Compared {
     pub retried: u64,
 }
 
+/// Compare les deux yrs sur une écriture du serveur qui ne passe pas par la lecture de la page
+/// (l'écriture par différence, `PageDoc::write_diff`, relecture de S2, I4) : `update` donnée à la
+/// suite de `state`, l'état de la page d'avant.
+#[allow(dead_code)] // seul `hostile_at_random.rs` s'en sert
+pub fn written_alike(what: &str, compared: &mut Compared, state: &[u8], update: &[u8]) {
+    match replayed_alike(false, &PAGE, &[state.to_vec(), update.to_vec()]) {
+        Ok(steady) => {
+            compared.updates += 1;
+            compared.retried += u64::from(!steady);
+        }
+        Err(why) => panic!(
+            "{what} : le yrs corrigé n'est pas celui d'origine, {why} ; état {state:?}, écriture \
+             {update:?}"
+        ),
+    }
+}
+
 /// Mène `run`, et compare les deux yrs sur chaque mise à jour que les pages de ce fil ont gardée
 /// pendant ce temps. Rend ce que rend `run`, et ajoute à `compared` ; panique à la première
 /// différence.
