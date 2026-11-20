@@ -94,6 +94,14 @@ const BATCH: usize = 500;
 /// Pages en retard lues dans la base pour répondre à [`IndexerHandle::behind`].
 const BEHIND_LIMIT: usize = 1_000;
 
+/// Ce que la base a rendu des pages en retard d'un espace est gardé ce temps-là, en temps réel :
+/// la lecture parcourt toute l'outbox de l'instance (100 ms pour cent mille pages), et chaque
+/// recherche la demandait (Ruling R1055).
+const LATE_KEPT: Duration = Duration::from_secs(1);
+
+/// Les pages en retard d'un espace telles que la base les a rendues, et quand.
+type Late = (std::time::Instant, Arc<Vec<Uuid>>);
+
 /// Le premier délai avant de réessayer après une erreur de la base, doublé à chaque échec.
 const RETRY_FIRST: Duration = Duration::from_secs(1);
 
@@ -243,6 +251,10 @@ struct Queues {
     retry: HashMap<Uuid, Retry>,
     /// La page en cours d'indexation.
     running: Option<Uuid>,
+    /// Les pages dont l'indexation vient de finir, et quand : dites en retard [`LATE_KEPT`]
+    /// encore, le temps que les pages en retard gardées soient relues (Ruling R1055). Elles ne
+    /// comptent pas dans [`Queues::is_empty`] : l'indexeur n'a plus rien à en faire.
+    done: HashMap<Uuid, std::time::Instant>,
     /// À qui le tour, quand une page en attente de calme et une page prête sont dues ensemble.
     ready_turn: bool,
 }
@@ -332,11 +344,17 @@ impl Queues {
 
     /// Une page que `seen` voit est en retard.
     fn any(&self, seen: impl Fn(Uuid) -> bool) -> bool {
+        let just_done = self
+            .done
+            .iter()
+            .filter(|(_, at)| at.elapsed() < LATE_KEPT)
+            .map(|(page, _)| page);
         self.waiting
             .keys()
             .chain(&self.ready)
             .chain(self.retry.keys())
             .chain(&self.running)
+            .chain(just_done)
             .any(|page| seen(*page))
     }
 }
@@ -410,6 +428,12 @@ struct Shared {
     refuse_writes: AtomicU32,
     write_refusals: AtomicU64,
     retry_delay: Mutex<Option<Duration>>,
+    /// Les pages en retard d'un espace, telles que la base les a rendues, et quand : gardées
+    /// [`LATE_KEPT`] ([`IndexerHandle::behind`], Ruling R1055). Le verrou est tenu pendant la
+    /// lecture : une lecture à la fois pour l'instance.
+    late: tokio::sync::Mutex<HashMap<Uuid, Late>>,
+    /// Les lectures de la base faites par [`IndexerHandle::behind`], pour les tests.
+    behind_reads: AtomicU64,
 }
 
 impl Shared {
@@ -523,6 +547,8 @@ fn with_text(store: Store, hub: Arc<Hub>, cfg: IndexerConfig, text: Option<Text>
         refuse_writes: AtomicU32::new(0),
         write_refusals: AtomicU64::new(0),
         retry_delay: Mutex::default(),
+        late: tokio::sync::Mutex::default(),
+        behind_reads: AtomicU64::new(0),
         store,
         hub,
         cfg,
@@ -568,15 +594,55 @@ impl IndexerHandle {
         if self.shared.starting.load(Ordering::SeqCst) || self.shared.text_unsure() {
             return Ok(true);
         }
+        // Au repos, l'indexeur sait qu'il n'y a rien en retard, sans lire la base (Ruling R1055) :
+        // son dernier tour n'avait ni page en file, ni marqueur à lire, ni ligne d'outbox à
+        // valider, et tout ce qui en ajoute le réveille (le hub pour une page écrite, l'annonce
+        // du store pour un titre, une création, une suppression). Entre l'écriture et ce réveil,
+        // la réponse est « à jour » à tort : le temps qu'une tâche prête soit servie.
+        if self.shared.spawned.load(Ordering::SeqCst) && self.shared.rounds.borrow().idle {
+            return Ok(false);
+        }
         if self.shared.queues().any(&seen) {
             return Ok(true);
         }
-        let late = self
-            .shared
-            .store
-            .behind_in_space(space_id, BEHIND_LIMIT)
-            .await?;
-        Ok(late.len() >= BEHIND_LIMIT || late.into_iter().any(seen))
+        let late = self.late_in(space_id).await?;
+        Ok(late.len() >= BEHIND_LIMIT || late.iter().any(|page| seen(*page)))
+    }
+
+    /// Les pages en retard de l'espace d'après la base ([`BEHIND_LIMIT`] au plus), lues une fois
+    /// puis gardées [`LATE_KEPT`] : chaque appelant y applique son propre filtre. Une lecture à
+    /// la fois pour l'instance (le verrou est tenu pendant elle). Une poignée sans tâche de
+    /// fond (les tests) lit à chaque fois.
+    async fn late_in(&self, space_id: Uuid) -> Result<Arc<Vec<Uuid>>, StoreError> {
+        let read = || async {
+            self.shared.behind_reads.fetch_add(1, Ordering::SeqCst);
+            let late = self
+                .shared
+                .store
+                .behind_in_space(space_id, BEHIND_LIMIT)
+                .await?;
+            Ok::<_, StoreError>(Arc::new(late))
+        };
+        if !self.shared.spawned.load(Ordering::SeqCst) {
+            return read().await;
+        }
+        let mut kept = self.shared.late.lock().await;
+        if let Some((at, late)) = kept.get(&space_id)
+            && at.elapsed() < LATE_KEPT
+        {
+            return Ok(late.clone());
+        }
+        let late = read().await?;
+        let now = std::time::Instant::now();
+        kept.retain(|_, (at, _)| now.duration_since(*at) < LATE_KEPT);
+        kept.insert(space_id, (now, late.clone()));
+        Ok(late)
+    }
+
+    /// Combien de fois [`IndexerHandle::behind`] a lu la base. Pour les tests.
+    #[doc(hidden)]
+    pub fn behind_reads(&self) -> u64 {
+        self.shared.behind_reads.load(Ordering::SeqCst)
     }
 
     /// Cherche dans l'index plein texte, parmi les pages de `allowed` seulement
@@ -1695,6 +1761,13 @@ fn finished(
         (Ok(Outcome::Done), _) => {
             queues.running = None;
             queues.retry.remove(&page);
+            // Ses lignes d'outbox ne sont peut-être pas dans les pages en retard gardées
+            // ([`LATE_KEPT`]) : elle reste dite en retard ce temps-là (Ruling R1055).
+            let now = std::time::Instant::now();
+            queues
+                .done
+                .retain(|_, at| now.duration_since(*at) < LATE_KEPT);
+            queues.done.insert(page, now);
             return None;
         }
         // Même la page notée illisible, la base refuse, ou le renoncement a paniqué : la page

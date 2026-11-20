@@ -854,13 +854,24 @@ async fn behind_says_late_at_its_bound_whoever_looks() {
     // Figé, pas arrêté : un indexeur arrêté a lâché l'index, et dit tout en retard (R1025).
     t.indexer.freeze();
     let other = Store::open(&t.db_path()).await.unwrap();
-    for i in 0..999 {
+    for i in 0..998 {
         stored(&other, olga.space, &format!("Page {i}"), None).await;
     }
+    // La 999e est créée par l'application : au repos, l'indexeur ne lit pas la base (R1055), et
+    // seule une annonce de son store lui dit qu'il ne l'est plus.
+    new_page(&olga, "Réveil").await;
+    until("l'indexeur sait une page en retard", async || {
+        t.indexer.behind(olga.space, |_| true).await.unwrap()
+    })
+    .await;
     assert!(!t.indexer.behind(olga.space, |_| false).await.unwrap());
     stored(&other, olga.space, "La millième", None).await;
     other.close().await;
-    assert!(t.indexer.behind(olga.space, |_| false).await.unwrap());
+    // Ce que la base a rendu est gardé une seconde : la borne se lit à la lecture suivante.
+    until("la borne atteinte", async || {
+        t.indexer.behind(olga.space, |_| false).await.unwrap()
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------------------------

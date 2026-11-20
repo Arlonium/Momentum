@@ -501,12 +501,22 @@ async fn indexing_says_nothing_of_unseen_pages() {
     for who in [&team.mona, &team.gina] {
         assert_eq!(found(who, team.space, "zzzrien").await, nothing());
     }
-    team.page(None, "Tardive", &[members(Level::Read)]).await;
-    let mona = found(&team.mona, team.space, "zzzrien").await;
-    assert_eq!(
-        mona,
-        json!({ "results": [], "more": false, "indexing": true })
-    );
+    // Créée par l'application : l'indexeur, au repos, ne l'apprend que par son annonce (R1055),
+    // et la dit en retard dès son tour suivant.
+    team.olga
+        .post(json!({
+            "spaceId": team.space.to_string(), "section": "space", "title": "Tardive",
+        }))
+        .await
+        .assert_status(StatusCode::CREATED);
+    let late = json!({ "results": [], "more": false, "indexing": true });
+    let deadline = std::time::Instant::now() + REAL_WAIT;
+    while found(&team.mona, team.space, "zzzrien").await != late {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "jamais dite en retard"
+        );
+    }
     assert_eq!(found(&team.gina, team.space, "zzzrien").await, nothing());
 }
 
@@ -1195,6 +1205,86 @@ async fn the_allowed_set_is_built_under_the_guard_off_the_engine() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Ce que `indexing` coûte (R1055).
+
+/// L'indexeur au repos, une recherche ne lit pas dans la base ce qui est en retard : il le sait.
+#[tokio::test]
+async fn an_idle_indexer_is_not_asked_the_database_what_is_late() {
+    let t = app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Note gerboise", &[members(Level::Read)])
+        .await;
+    t.indexer.settled().await;
+    let reads = t.indexer.behind_reads();
+    for who in [&team.olga, &team.mona, &team.gina] {
+        assert_eq!(found(who, team.space, "zzzrien").await, nothing());
+    }
+    assert_eq!(
+        pages_found(&team.mona, team.space, "gerboise").await,
+        [page]
+    );
+    assert!(!t.indexer.behind(team.space, |_| true).await.unwrap());
+    assert_eq!(t.indexer.behind_reads(), reads, "aucune lecture au repos");
+}
+
+/// L'indexeur pas au repos (figé, une page renommée attend l'index plein texte), les pages en
+/// retard d'un espace sont lues dans la base une fois, puis gardées une seconde : soixante
+/// demandes de suite n'en font pas une lecture de plus, et le filtre de chaque appelant
+/// s'applique à ce qui est gardé. La seconde passée, elles sont relues, une fois.
+#[tokio::test]
+async fn late_pages_are_read_from_the_database_once_a_second_at_most() {
+    let t = app().await;
+    let team = Team::new(&t).await;
+    let page = team
+        .page(None, "Premier nom", &[members(Level::Full)])
+        .await;
+    let other = team.page(None, "Autre", &[members(Level::Read)]).await;
+    t.indexer.settled().await;
+    t.indexer.freeze();
+    team.olga
+        .patched(&page.to_string(), json!({ "title": "Second nom" }))
+        .await;
+    let behind =
+        async |seen: &dyn Fn(Uuid) -> bool| t.indexer.behind(team.space, seen).await.unwrap();
+    let deadline = std::time::Instant::now() + REAL_WAIT;
+    // Tant que l'indexeur se croit au repos (l'annonce du renommage n'est pas encore lue), rien
+    // n'est lu. Un filtre qui ne voit rien passe ce que l'indexeur tient en mémoire, et va à la
+    // base.
+    while t.indexer.behind_reads() == 0 {
+        assert!(std::time::Instant::now() < deadline, "jamais lues");
+        assert!(!behind(&|_| false).await);
+        tokio::task::yield_now().await;
+    }
+    let reads = t.indexer.behind_reads();
+    assert_eq!(reads, 1);
+    for _ in 0..20 {
+        assert!(behind(&|id| id == page).await);
+        assert!(!behind(&|_| false).await);
+        assert!(!behind(&|id| id == Uuid::nil()).await);
+    }
+    assert_eq!(t.indexer.behind_reads(), reads, "gardées, pas relues");
+    // Mona la voit en retard par la route, sans lecture de plus.
+    assert_eq!(
+        found(&team.mona, team.space, "zzzrien").await["indexing"],
+        true
+    );
+    assert_eq!(t.indexer.behind_reads(), reads);
+
+    while t.indexer.behind_reads() == reads {
+        assert!(std::time::Instant::now() < deadline, "jamais relues");
+        assert!(!behind(&|_| false).await);
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(t.indexer.behind_reads(), reads + 1);
+    // Plus d'une seconde après leur indexation, les deux pages ne sont plus tenues en mémoire :
+    // ce qui suit se lit dans ce qui est gardé, filtré pour chaque appelant.
+    assert!(behind(&|id| id == page).await, "la page renommée");
+    assert!(!behind(&|id| id == other).await, "pas l'autre");
+    assert_eq!(t.indexer.behind_reads(), reads + 1);
+}
+
+// ---------------------------------------------------------------------------------------------
 // Plancher (R932), sous l'horloge arrêtée.
 
 /// Avance l'horloge arrêtée au-delà du plancher : le minuteur de tokio arrondit une échéance à
@@ -1220,20 +1310,21 @@ async fn an_answer_never_leaves_before_the_floor() {
         pages_found(&team.olga, team.space, "licorne").await,
         [hidden]
     );
-    let computed = t.searches.computed();
+    let ready = t.searches.answers_ready();
 
     let clock = StoppedClock::start();
     let asked = [
         asking(&t, &team.mona, team.space, "licorne"),
         asking(&t, &team.tom, team.space, "zzzrien"),
     ];
-    until("les deux calculs finis", || {
-        t.searches.computed() == computed + 2
+    // La barrière : les deux réponses sont prêtes, il ne leur reste que le plancher.
+    until("les deux réponses prêtes", || {
+        t.searches.answers_ready() == ready + 2
     })
     .await;
-    settle().await;
     assert!(asked.iter().all(|a| !a.is_finished()), "avant tout");
     tokio::time::advance(SEARCH_FLOOR - Duration::from_millis(1)).await;
+    // Un minuteur échu à tort réveillerait sa tâche : lui laisser le temps de tourner.
     settle().await;
     assert!(
         asked.iter().all(|a| !a.is_finished()),
@@ -1262,10 +1353,12 @@ async fn the_account_keeps_its_place_until_the_answer_leaves() {
     t.indexer.settled().await;
     let clock = StoppedClock::start();
     let first = asking(&t, &team.mona, team.space, "un");
-    until("le premier calcul fini", || t.searches.computed() == 1).await;
+    until("la première réponse prête", || {
+        t.searches.answers_ready() == 1
+    })
+    .await;
     let second = asking(&t, &team.mona, team.space, "deux");
-    until("la seconde attend", || t.searches.counts() == (0, 1)).await;
-    settle().await;
+    until("la seconde attend", || t.searches.counts() == (1, 1)).await;
     assert_eq!(
         t.searches.started(),
         1,
@@ -1274,8 +1367,10 @@ async fn the_account_keeps_its_place_until_the_answer_leaves() {
     assert!(!first.is_finished());
     pass_the_floor().await;
     until("la première réponse", || first.is_finished()).await;
-    until("le second calcul fini", || t.searches.computed() == 2).await;
-    settle().await;
+    until("la seconde réponse prête", || {
+        t.searches.answers_ready() == 2
+    })
+    .await;
     assert!(!second.is_finished(), "la seconde a son plancher à elle");
     pass_the_floor().await;
     assert_eq!(second.await.unwrap().0, StatusCode::OK);
@@ -1283,10 +1378,12 @@ async fn the_account_keeps_its_place_until_the_answer_leaves() {
     drop(clock);
 }
 
-/// L'attente du plancher ne tient aucune place de l'instance : une seule est libre, Mona a fini
-/// son calcul et attend son plancher ; Tom calcule pendant ce temps, sans que l'horloge bouge.
-#[tokio::test]
-async fn the_floor_holds_no_place_of_the_instance() {
+/// R1054 : la place de l'instance est tenue, elle aussi, jusqu'au départ de la réponse. Une seule
+/// est libre ; Mona a fini son calcul et attend son plancher ; Tom, un autre compte, n'entre pas
+/// (sans cela, l'heure où son calcul commence dirait la durée de celui de Mona). Il entre une
+/// fois le plancher de Mona passé. `abandoned` : Mona abandonne sa requête pendant l'attente, et
+/// rien ne change.
+async fn the_instance_place_waits_for_the_floor(abandoned: bool) {
     let t = app().await;
     let team = Team::new(&t).await;
     t.indexer.settled().await;
@@ -1294,21 +1391,46 @@ async fn the_floor_holds_no_place_of_the_instance() {
     let clock = StoppedClock::start();
     let start = tokio::time::Instant::now();
     let mona = asking(&t, &team.mona, team.space, "un");
-    until("le calcul de Mona fini", || t.searches.computed() == 1).await;
+    until("la réponse de Mona prête", || {
+        t.searches.answers_ready() == 1
+    })
+    .await;
+    if abandoned {
+        mona.abort();
+        settle().await;
+    }
     let tom = asking(&t, &team.tom, team.space, "deux");
-    until("le calcul de Tom fini", || t.searches.computed() == 2).await;
+    until("Tom attend", || t.searches.counts() == (MAX_SEARCHES, 1)).await;
+    settle().await;
+    assert_eq!(t.searches.started(), 1, "Tom n'a pas commencé");
     assert_eq!(
         tokio::time::Instant::now(),
         start,
         "l'horloge n'a pas bougé"
     );
-    settle().await;
-    assert!(!mona.is_finished() && !tom.is_finished());
     pass_the_floor().await;
-    assert_eq!(mona.await.unwrap().0, StatusCode::OK);
+    until("la réponse de Tom prête", || {
+        t.searches.answers_ready() == 2
+    })
+    .await;
+    assert_eq!(t.searches.started(), 2);
+    if !abandoned {
+        assert_eq!(mona.await.unwrap().0, StatusCode::OK);
+    }
+    pass_the_floor().await;
     assert_eq!(tom.await.unwrap().0, StatusCode::OK);
     drop(clock);
     drop(held);
+}
+
+#[tokio::test]
+async fn the_instance_keeps_its_place_until_the_answer_leaves() {
+    the_instance_place_waits_for_the_floor(false).await;
+}
+
+#[tokio::test]
+async fn an_abandoned_search_keeps_the_place_of_the_instance_until_the_floor() {
+    the_instance_place_waits_for_the_floor(true).await;
 }
 
 /// Une recherche sans mot, un refus et un `429` ne lisent pas l'index et n'attendent pas le
@@ -1328,6 +1450,8 @@ async fn an_empty_query_and_a_refusal_do_not_wait_for_the_floor() {
     search(&team.mona, team.space, &"a".repeat(201))
         .await
         .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_query");
+    // Ni la recherche vide, ni l'étranger, ni la recherche trop longue n'ont rien calculé.
+    assert_eq!((t.searches.started(), t.searches.sets_built()), (0, 0));
     let first = asking(&t, &team.mona, team.space, "un");
     until("le premier calcul", || t.searches.started() == 1).await;
     let second = asking(&t, &team.mona, team.space, "deux");
@@ -1341,10 +1465,16 @@ async fn an_empty_query_and_a_refusal_do_not_wait_for_the_floor() {
     );
 
     drop(gate);
-    until("le premier calcul fini", || t.searches.computed() == 1).await;
+    until("la première réponse prête", || {
+        t.searches.answers_ready() == 1
+    })
+    .await;
     pass_the_floor().await;
     assert_eq!(first.await.unwrap().0, StatusCode::OK);
-    until("le dernier calcul fini", || t.searches.computed() == 2).await;
+    until("la dernière réponse prête", || {
+        t.searches.answers_ready() == 2
+    })
+    .await;
     pass_the_floor().await;
     assert_eq!(third.await.unwrap().0, StatusCode::OK);
     drop(clock);

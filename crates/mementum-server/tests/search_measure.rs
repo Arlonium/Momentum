@@ -302,6 +302,35 @@ async fn measure_search_on_10000_pages() {
         ));
     }
 
+    // Ce qu'une recherche en paie, par l'indexeur (R1055) : il n'est plus au repos (une page
+    // vient d'être créée par l'application, qu'il ne peut pas indexer, figé), et garde une
+    // seconde ce que la base a rendu.
+    mona.post(
+        "/api/v1/pages",
+        json!({ "spaceId": space.to_string(), "title": "Neuve" }),
+    )
+    .await
+    .assert_status(StatusCode::CREATED);
+    while !t.indexer.behind(space, |_| true).await.unwrap() {
+        tokio::task::yield_now().await;
+    }
+    for (name, of) in [("leur espace", space), ("un autre espace", other_space)] {
+        let reads = t.indexer.behind_reads();
+        let mut times = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            t.indexer.behind(of, |_| false).await.unwrap();
+            times.push(started.elapsed());
+        }
+        let worst = times.iter().max().unwrap().as_secs_f64() * 1e3;
+        let (p50, p95) = percentiles(times);
+        said.push(format!(
+            "« en retard ? » demandé à l'indexeur pour {name}, {ROUNDS} fois de suite : p50 \
+             {p50:.3} ms, p95 {p95:.3} ms, la plus longue {worst:.2} ms, {} lectures de la base",
+            t.indexer.behind_reads() - reads
+        ));
+    }
+
     println!(
         "MESURE measure_search_on_10000_pages : {pages} pages de {blocks} blocs ({:.1} Mio de \
          texte), index reconstruit en {:.1} s ;\n  {}",
