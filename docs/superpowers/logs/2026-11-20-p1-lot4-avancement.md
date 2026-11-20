@@ -28,7 +28,7 @@
 | C3 | « Pages qui mènent ici » sous la page, branché sur C2 | `20739cc`, `97cad4f`, `dc01e63`, `9e45623`, `a331330`, `96e1460`, `f5c234d` ; `463667d` | R1115 à R1129, R1134 à R1137 |
 | X1 | les droits de la recherche et des rétroliens, de bout en bout, dans Chromium | `1bea008`, `eef1526`, `272bc1f`, `7bd23d1` ; `f9d74d8` | R1140 à R1148 |
 | X2 | les budgets : mesures, budgets de la recherche au §5.10, mesures bornées dans la CI | `30553a3`, `0a858a0`, `eb2466d`, `1d4ca0b`, `ca3d782`, `c5131ea` ; `6f5ae38` | R1160 à R1174 |
-| D | cette documentation, la recette, la conception, le README, `docs/REPRISE.md` | atelier `lot4-d`, non poussé | aucun |
+| D | cette documentation, la recette, la conception, le README, `docs/REPRISE.md` | atelier `lot4-d`, non poussé | R1190 à R1194 |
 
 Il n'y a pas de commit de fusion : de `97d3847` à `6f5ae38`, `main` compte 104 commits, tous linéaires : chaque atelier a été reporté sur `main` sans fusion. La colonne « clôture » donne le commit qui porte au registre la relecture de la tâche (ou, pour S4a, X1 et X2, son registre et ses pièges).
 
