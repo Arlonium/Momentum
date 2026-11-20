@@ -12,6 +12,7 @@ import {
   apiServer,
   BASE_URL,
   defaultStorageState,
+  E2E_INDEX_AFTER_MS,
   E2E_MAX_FILE_MB,
   E2E_VERSION_EVERY_SECS,
   env,
@@ -39,8 +40,15 @@ export default defineConfig({
   webServer: [
     // Une version de page après une seconde d'écritures (R135), au lieu de dix minutes : les
     // e2e de l'historique en voient une sans attendre. Pas les budgets (Ruling R144). Un fichier
-    // d'un Mio au plus (R247) : un e2e voit un fichier trop gros refusé.
-    apiServer({ release: false, versionEverySecs: E2E_VERSION_EVERY_SECS, maxFileMb: E2E_MAX_FILE_MB }),
+    // d'un Mio au plus (R247) : un e2e voit un fichier trop gros refusé. Une page indexée après
+    // 200 ms de calme (R906), au lieu de deux secondes : un e2e de la recherche trouve vite ce qu'il
+    // vient d'écrire.
+    apiServer({
+      release: false,
+      versionEverySecs: E2E_VERSION_EVERY_SECS,
+      maxFileMb: E2E_MAX_FILE_MB,
+      indexAfterMs: E2E_INDEX_AFTER_MS,
+    }),
     {
       command: `node node_modules/vite/bin/vite.js --port ${WEB_PORT} --strictPort`,
       cwd: WEB,

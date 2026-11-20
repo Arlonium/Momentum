@@ -129,6 +129,15 @@ export function SearchDialog({ space, nodes, query, onQuery, onClose }: Props) {
   useEffect(() => {
     const before = document.activeElement;
     const opener = before instanceof HTMLElement && before !== document.body ? before : null;
+    // Ouverte depuis le texte d'une page : la sélection de l'éditeur, que le navigateur retire quand
+    // le focus passe au champ, et qu'un `focus()` ne rend pas (il pose le curseur au début du
+    // texte : la frappe suivante irait en tête de la page). Une plage du DOM suit ce qui s'écrit
+    // autour d'elle pendant que la fenêtre est ouverte.
+    const selected = document.getSelection();
+    const range =
+      opener !== null && selected !== null && selected.rangeCount > 0
+        ? selected.getRangeAt(0).cloneRange()
+        : null;
     const dialog = ref.current;
     if (dialog && !dialog.open) dialog.showModal();
     fieldRef.current?.focus();
@@ -141,6 +150,13 @@ export function SearchDialog({ space, nodes, query, onQuery, onClose }: Props) {
         ? opener
         : document.querySelector<HTMLElement>("[data-search-entry]");
       back?.focus({ preventScroll: true });
+      // Dans ce qui avait le focus seulement, et si le texte visé y est encore.
+      if (back === null || back !== opener || range === null) return;
+      const { startContainer, endContainer } = range;
+      if (startContainer === opener || !opener.contains(startContainer) || !opener.contains(endContainer)) return;
+      const selection = document.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
     };
   }, []);
 

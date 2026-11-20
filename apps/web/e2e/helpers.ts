@@ -28,6 +28,7 @@ import type {
   PageAccess,
   PageNode,
   PendingInvitation,
+  SearchResults,
   SignUp,
   SpaceInfo,
   Tree,
@@ -85,6 +86,36 @@ export async function putMmd(request: APIRequestContext, id: string, mmd: string
     headers: { "content-type": "text/markdown" },
   });
   expect(res.status(), await res.text()).toBe(204);
+}
+
+/**
+ * Ce que le serveur trouve pour `query` dans l'espace, avec la session de `api` (`POST
+ * /api/v1/spaces/{id}/search`, lot 4). Chaque recherche calculée dure au moins 50 ms (R932), et un
+ * compte n'en a qu'une admise et une en attente (R910) : les enchaîner, jamais de front.
+ */
+export async function searchIn(api: APIRequestContext, spaceId: string, query: string): Promise<SearchResults> {
+  const res = await api.post(`/api/v1/spaces/${spaceId}/search`, { data: { q: query } });
+  expect(res.status(), await res.text()).toBe(200);
+  return (await res.json()) as SearchResults;
+}
+
+/**
+ * Attend que la page `pageId` soit trouvée par `query` dans l'espace : l'index suit une écriture
+ * après un temps de calme (`E2E_INDEX_AFTER_MS`), jamais tout de suite. Une condition, pas une
+ * durée : une recherche, sa réponse attendue, puis la suivante, jusqu'au résultat.
+ */
+export async function waitFindable(
+  api: APIRequestContext,
+  spaceId: string,
+  query: string,
+  pageId: string,
+): Promise<void> {
+  await expect
+    .poll(async () => (await searchIn(api, spaceId, query)).results.some((hit) => hit.pageId === pageId), {
+      message: `la page ${pageId} n'est toujours pas trouvée par « ${query} »`,
+      timeout: 30_000,
+    })
+    .toBe(true);
 }
 
 /** Les versions de la page, la plus récente d'abord (`GET …/versions`). */

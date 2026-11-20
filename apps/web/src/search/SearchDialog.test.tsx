@@ -432,6 +432,40 @@ test("escape_closes_and_gives_the_focus_back", async () => {
   expect(document.activeElement).toBe(entry);
 });
 
+test("the_selection_of_the_editor_is_given_back_with_the_focus", async () => {
+  // Ouverte depuis le texte d'une page : le curseur y était au milieu d'un mot.
+  const editor = document.createElement("div");
+  editor.setAttribute("contenteditable", "true");
+  editor.tabIndex = 0;
+  const text = document.createTextNode("le chat dort");
+  editor.append(text);
+  document.body.append(editor);
+  editor.focus();
+  const selection = document.getSelection()!;
+  selection.setBaseAndExtent(text, 5, text, 5);
+  await show();
+  // Le focus passé au champ, le navigateur retire la sélection du texte ; rendu à l'éditeur par
+  // `focus()`, il la poserait à son début.
+  selection.removeAllRanges();
+  await act(async () => root.render(null));
+  expect(document.activeElement).toBe(editor);
+  expect([selection.anchorNode, selection.anchorOffset, selection.isCollapsed]).toEqual([text, 5, true]);
+  // Une sélection étendue de même, et elle suit ce qu'un autre écrit avant elle pendant ce temps.
+  selection.setBaseAndExtent(text, 3, text, 7);
+  await show();
+  selection.removeAllRanges();
+  text.insertData(0, "et ");
+  await act(async () => root.render(null));
+  expect(String(selection)).toBe("chat");
+  // Le texte parti entre-temps : le focus revient, sans sélection forcée dans ce qui n'est plus là.
+  selection.setBaseAndExtent(text, 3, text, 7);
+  await show();
+  selection.removeAllRanges();
+  text.remove();
+  await act(async () => root.render(null));
+  expect(document.activeElement).toBe(editor);
+});
+
 test("opened_with_nothing_focused_the_focus_goes_back_to_the_sidebar_entry", async () => {
   const entry = document.createElement("button");
   entry.setAttribute("data-search-entry", "");

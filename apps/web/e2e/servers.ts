@@ -134,6 +134,14 @@ export const E2E_VERSION_EVERY_SECS = 1;
  */
 export const E2E_MAX_FILE_MB = 1;
 
+/**
+ * Le calme attendu sur une page avant de l'indexer, sur le serveur de la suite ordinaire, en
+ * millisecondes (`MEMENTUM_INDEX_AFTER_MS`, lot 4, R906) : au lieu de deux secondes, pour qu'un e2e
+ * de la recherche trouve vite ce qu'il vient d'écrire. Il l'attend quand même par une condition
+ * (`waitFindable`, `e2e/helpers.ts`), jamais par une durée.
+ */
+export const E2E_INDEX_AFTER_MS = 200;
+
 type ApiServerOptions = {
   /** Compilé en release (les budgets, Ruling R38) plutôt qu'en debug. */
   release: boolean;
@@ -148,6 +156,11 @@ type ApiServerOptions = {
    * défaut du serveur (100 Mio), celui des budgets.
    */
   maxFileMb?: number;
+  /**
+   * Le calme attendu sur une page avant de l'indexer (`MEMENTUM_INDEX_AFTER_MS`, R906), en
+   * millisecondes. Absent : le réglage par défaut du serveur (deux secondes), celui des budgets.
+   */
+  indexAfterMs?: number;
 };
 
 /**
@@ -155,7 +168,7 @@ type ApiServerOptions = {
  * debug pour la suite ordinaire, en release pour les budgets (`release`, Ruling R38).
  * Inscriptions ouvertes (`MEMENTUM_SIGNUP=open`) : chaque test crée ses comptes.
  */
-export function apiServer({ release, versionEverySecs, maxFileMb }: ApiServerOptions): WebServer {
+export function apiServer({ release, versionEverySecs, maxFileMb, indexAfterMs }: ApiServerOptions): WebServer {
   const dataDir = join(prepareServers(), "data");
   return {
     // La première compilation (en release surtout) peut être longue : délai généreux.
@@ -173,6 +186,7 @@ export function apiServer({ release, versionEverySecs, maxFileMb }: ApiServerOpt
         ? {}
         : { MEMENTUM_VERSION_EVERY_SECS: String(versionEverySecs) }),
       ...(maxFileMb === undefined ? {} : { MEMENTUM_MAX_FILE_MB: String(maxFileMb) }),
+      ...(indexAfterMs === undefined ? {} : { MEMENTUM_INDEX_AFTER_MS: String(indexAfterMs) }),
     },
   };
 }
