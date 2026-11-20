@@ -1,5 +1,5 @@
 {
-  "about": "La lecture d'une requête de recherche (plan du lot 4, R911, R926, R930 ; crates/mementum-search/src/query.rs). Une requête est coupée en mots (tout caractère qui n'est ni une lettre ni un chiffre sépare), chaque mot plié (minuscules, accents latins retirés, ligatures ouvertes) ; aucune syntaxe : un opérateur n'est que des caractères. « terms » : les mots cherchés entiers ; « prefix » : le dernier mot, cherché comme mot entier ou comme début de mot, s'il a au moins deux caractères une fois plié (sinon il est cherché entier, avec les autres). « refused » : la requête passe une borne (200 caractères : too_long ; 8 mots : too_many_terms). Écrit à la main ; lu par crates/mementum-search/tests/query.rs.",
+  "about": "La lecture d'une requête de recherche (plan du lot 4, R911, R926, R930 ; crates/mementum-search/src/query.rs). Une requête est coupée en mots (tout caractère qui n'est ni une lettre ni un chiffre sépare), chaque mot plié (minuscules, accents latins retirés, ligatures ouvertes) ; aucune syntaxe : un opérateur n'est que des caractères. « terms » : les mots cherchés entiers ; « prefix » : le dernier mot, cherché comme mot entier ou comme début de mot, s'il a au moins deux caractères une fois plié (sinon il est cherché entier, avec les autres). Avant le dernier mot, un mot d'une seule lettre n'est ni cherché ni compté (une élision : « l' », « d' ») ; un chiffre seul reste un mot ; un mot répété n'est cherché qu'une fois (R949). Un mot plié en rien n'est pas un mot. Seuls les accents des lettres latines sont retirés : les signes des autres écritures restent (R947). « refused » : la requête passe une borne (200 caractères : too_long ; 8 mots : too_many_terms). Écrit à la main ; lu par crates/mementum-search/tests/query.rs.",
   "cases": [
     { "why": "un mot : c'est le dernier, cherché entier ou comme début", "q": "plan", "terms": [], "prefix": "plan" },
     { "why": "trois mots", "q": "plan du budget", "terms": ["plan", "du"], "prefix": "budget" },
@@ -8,7 +8,18 @@
     { "why": "les majuscules accentuées aussi", "q": "ÉLÈVE À", "terms": ["eleve", "a"], "prefix": null },
     { "why": "les ligatures sont ouvertes", "q": "œuvre Cæsar straße", "terms": ["oeuvre", "caesar"], "prefix": "strasse" },
     { "why": "les espaces de bord et les suites d'espaces ne comptent pas", "q": "  plan \t du\n budget  ", "terms": ["plan", "du"], "prefix": "budget" },
-    { "why": "la ponctuation sépare", "q": "l'élève, c'est-à-dire: lui!", "terms": ["l", "eleve", "c", "est", "a", "dire"], "prefix": "lui" },
+    { "why": "la ponctuation sépare", "q": "l'élève, c'est-à-dire: lui!", "terms": ["eleve", "est", "dire"], "prefix": "lui" },
+    { "why": "une élision n'est pas un mot cherché", "q": "l'anniversaire d'Anne", "terms": ["anniversaire"], "prefix": "anne" },
+    { "why": "un chiffre seul reste un mot cherché", "q": "lot 4 plan", "terms": ["lot", "4"], "prefix": "plan" },
+    { "why": "une lettre seule en dernier reste cherchée entière", "q": "l'option b", "terms": ["option", "b"], "prefix": null },
+    { "why": "un mot répété n'est cherché qu'une fois, à sa première place", "q": "plan budget Plan BUDGET lot", "terms": ["plan", "budget"], "prefix": "lot" },
+    { "why": "le dernier mot reste le dernier, même déjà tapé", "q": "plan plan", "terms": ["plan"], "prefix": "plan" },
+    { "why": "ni les lettres seules ni les répétitions ne comptent dans les huit mots", "q": "l a b c un un un un un un un un deux", "terms": ["un"], "prefix": "deux" },
+    { "why": "du hindi : les signes des voyelles restent dans leurs mots", "q": "की किताब", "terms": ["की"], "prefix": "किताब" },
+    { "why": "de l'arabe aux voyelles écrites : elles restent", "q": "كِتَاب", "terms": [], "prefix": "كِتَاب" },
+    { "why": "un signe de voyelle resté seul est un mot, jamais un terme vide", "q": "plan ा", "terms": ["plan", "ा"], "prefix": null },
+    { "why": "le sigma final se lit comme un sigma", "q": "οδος", "terms": [], "prefix": "οδοσ" },
+    { "why": "en majuscules, le même mot", "q": "ΟΔΟΣ", "terms": [], "prefix": "οδοσ" },
     { "why": "un trait de soulignement sépare", "q": "snake_case", "terms": ["snake"], "prefix": "case" },
     { "why": "les chiffres sont des mots", "q": "lot 42", "terms": ["lot"], "prefix": "42" },
     { "why": "un dernier mot d'un caractère n'est pas un début : il est cherché entier", "q": "lot 4", "terms": ["lot", "4"], "prefix": null },
@@ -20,7 +31,7 @@
     { "why": "un tiret n'exclut rien", "q": "plan -budget +lot", "terms": ["plan", "budget"], "prefix": "lot" },
     { "why": "un nom de champ n'est qu'un mot", "q": "title:plan text:budget", "terms": ["title", "plan", "text"], "prefix": "budget" },
     { "why": "un tilde et un accent circonflexe ne règlent rien", "q": "plan~2 budget^3", "terms": ["plan", "2", "budget", "3"], "prefix": null },
-    { "why": "des parenthèses, des crochets, une barre oblique, une expression rationnelle", "q": "(plan) [a TO z] /bud.*/", "terms": ["plan", "a", "to", "z"], "prefix": "bud" },
+    { "why": "des parenthèses, des crochets, une barre oblique, une expression rationnelle", "q": "(plan) [a TO z] /bud.*/", "terms": ["plan", "to"], "prefix": "bud" },
     { "why": "une barre oblique inverse n'échappe rien", "q": "plan\\ budget\\*", "terms": ["plan"], "prefix": "budget" },
     { "why": "du grec : minuscules, accents gardés", "q": "Ελλάδα", "terms": [], "prefix": "ελλάδα" },
     { "why": "du chinois : une suite sans espace est un seul mot (limite L-p)", "q": "搜索引擎 文档", "terms": ["搜索引擎"], "prefix": "文档" },
@@ -30,6 +41,6 @@
     { "why": "un emoji seul n'est pas un mot", "q": "🚀", "terms": [], "prefix": null },
     { "why": "huit mots : la borne", "q": "un deux trois quatre cinq six sept huit", "terms": ["un", "deux", "trois", "quatre", "cinq", "six", "sept"], "prefix": "huit" },
     { "why": "neuf mots", "q": "un deux trois quatre cinq six sept huit neuf", "refused": "too_many_terms" },
-    { "why": "neuf mots faits par la ponctuation", "q": "a-b-c-d-e-f-g-h-i", "refused": "too_many_terms" }
+    { "why": "neuf mots faits par la ponctuation", "q": "aa-bb-cc-dd-ee-ff-gg-hh-ii", "refused": "too_many_terms" }
   ]
 }

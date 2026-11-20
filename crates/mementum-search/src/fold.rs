@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 
-use unicode_normalization::char::{decompose_canonical, is_combining_mark};
+use unicode_normalization::char::decompose_canonical;
 use unicode_normalization::{IsNormalized, UnicodeNormalization, is_nfc_quick};
 
 /// Longueur maximale, en octets, d'un mot indexé, tel qu'écrit (avant [`fold`]) : un mot plus long
@@ -59,10 +59,26 @@ pub fn words(text: &str) -> impl Iterator<Item = Word<'_>> {
     })
 }
 
+/// Les accents combinants que portent les lettres latines (U+0300 à U+036F) : les seuls que le
+/// pliage retire (Ruling R947). Les signes des autres écritures (une voyelle du hindi, de l'arabe,
+/// du thaï) sont des lettres de leurs mots : retirés, des mots différents se confondraient.
+fn is_latin_accent(c: char) -> bool {
+    ('\u{300}'..='\u{36F}').contains(&c)
+}
+
 /// Un mot plié : en minuscules, les accents des lettres latines retirés, les ligatures ouvertes
 /// (« ŒUVRE » se lit « oeuvre », « Straße » « strasse »). Hors de l'alphabet latin, seules les
-/// minuscules jouent : ni le grec, ni le cyrillique ne perdent leurs accents, et une syllabe
-/// coréenne n'est pas défaite.
+/// minuscules jouent, et le sigma final du grec, lu comme un sigma (« ΟΔΟΣ » trouve « οδος ») :
+/// ni le grec, ni le cyrillique ne perdent leurs accents, une syllabe coréenne n'est pas défaite,
+/// et les signes des autres écritures restent.
+///
+/// Deux choses à savoir pour qui s'en sert :
+/// - **un mot peut se plier en rien** (un accent combinant resté seul, que Unicode tient pour une
+///   lettre, comme U+0345) : un mot plié vide n'est pas un mot, il s'écarte ([`indexed_words`] et
+///   la lecture d'une requête le font) ;
+/// - **un mot plié peut être plus long, en octets, que le mot écrit** (« ß » donne « ss », « Ⱥ »,
+///   deux octets, donne « ⱥ », trois) : un mot de [`MAX_WORD_BYTES`] octets peut en faire 60 une
+///   fois plié. La borne se juge sur le mot écrit, jamais sur le mot plié.
 pub fn fold(word: &str) -> String {
     let mut folded = String::with_capacity(word.len());
     for upper in word.chars() {
@@ -77,21 +93,34 @@ pub fn fold(word: &str) -> String {
                 'ħ' => folded.push('h'),
                 'ı' => folded.push('i'),
                 'þ' => folded.push_str("th"),
+                'ς' => folded.push('σ'),
                 // Latin-1, latin étendu A et B, latin étendu additionnel (le vietnamien) : la
                 // lettre sans ses accents.
                 '\u{C0}'..='\u{24F}' | '\u{1E00}'..='\u{1EFF}' => {
                     decompose_canonical(c, |part| {
-                        if !is_combining_mark(part) {
+                        if !is_latin_accent(part) {
                             folded.push(part);
                         }
                     });
                 }
-                // Un accent combinant que les minuscules ont fait paraître (« İ » donne « i » et
-                // un point combinant).
-                c if is_combining_mark(c) => {}
+                // Un accent latin resté seul : celui que les minuscules font paraître (« İ »
+                // donne « i » et un point combinant), ou celui que NFC n'a pas pu composer.
+                c if is_latin_accent(c) => {}
                 c => folded.push(c),
             }
         }
     }
     folded
+}
+
+/// Les mots d'un texte que l'index garde, chacun avec sa forme pliée : ceux de [`words`], hors
+/// les mots de plus de [`MAX_WORD_BYTES`] octets tels qu'écrits (Ruling R926) et ceux qui se
+/// plient en rien (Ruling R947). C'est ce que l'analyseur de l'index plein texte rend, mot pour
+/// mot ; la place d'un mot est celle du mot écrit, dans le texte donné (supposé en NFC, comme
+/// pour [`words`]). Un mot plié peut dépasser [`MAX_WORD_BYTES`] octets ([`fold`]).
+pub fn indexed_words(text: &str) -> impl Iterator<Item = (Word<'_>, String)> {
+    words(text)
+        .filter(|word| word.raw.len() <= MAX_WORD_BYTES)
+        .map(|word| (word, fold(word.raw)))
+        .filter(|(_, folded)| !folded.is_empty())
 }

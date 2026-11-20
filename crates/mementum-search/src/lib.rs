@@ -7,16 +7,19 @@
 //!   syntaxe ;
 //! - [`nfc`], [`words`], [`fold`] : la seule façon de couper un texte en mots et de plier un mot
 //!   (casse, accents). Le texte indexé et la requête passent par les mêmes fonctions : un mot plié
-//!   autrement d'un côté que de l'autre ne se trouverait plus.
+//!   autrement d'un côté que de l'autre ne se trouverait plus. [`indexed_words`] rend les mots
+//!   qu'un index garde d'un texte, déjà pliés.
+//!
+//! [`PROJECTION_VERSION`] avance à tout changement de ce que ces fonctions rendent.
 
 mod fold;
 mod project;
 mod query;
 
-pub use fold::{MAX_WORD_BYTES, Word, fold, nfc, words};
+pub use fold::{MAX_WORD_BYTES, Word, fold, indexed_words, nfc, words};
 pub use project::{
     IndexedBlock, MAX_BLOCK_ID_BYTES, MAX_BLOCK_TEXT_BYTES, MAX_PAGE_LINKS, MAX_PAGE_TEXT_BYTES,
-    Projection, Rule, is_stand_in, page_link, project, rule,
+    PROJECTION_VERSION, Projection, Rule, is_stand_in, kind_named, page_link, project, rule,
 };
 pub use query::{
     MAX_QUERY_CHARS, MAX_QUERY_TERMS, MIN_PREFIX_CHARS, Query, QueryRefusal, read_query,

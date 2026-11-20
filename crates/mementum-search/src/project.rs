@@ -87,6 +87,23 @@ pub fn rule(kind: &str) -> Option<Rule> {
     entry(kind).map(|(_, rule)| *rule)
 }
 
+/// La version de la projection et du pliage des mots. **À incrémenter à tout changement de ce
+/// qu'une page donne à l'index** : une règle de [`RULES`], une borne, la clé de remplacement, la
+/// règle d'un lien ([`page_link`]), l'empreinte, la séparation des morceaux d'un texte, et tout
+/// changement de [`crate::nfc`], [`crate::words`] ou [`crate::fold`] (un mot plié autrement ne
+/// trouve plus ce qui a été indexé avant). L'indexeur la garde avec ce qu'il a indexé
+/// (`search_state`, Task S4b) : une instance indexée sous une autre version est reprojetée et son
+/// index plein texte reconstruit, sans quoi les lignes dont l'empreinte n'a pas changé gardent
+/// l'ancienne forme pour toujours.
+pub const PROJECTION_VERSION: u32 = 1;
+
+/// Le nom du registre que ce type écrit : le `kind` d'une [`IndexedBlock`] refait d'une ligne
+/// relue de la base (`blocks_index.type`). `None` pour un type que la table ne connaît pas (une
+/// ligne écrite sous une autre version de la projection : elle est à reprojeter).
+pub fn kind_named(kind: &str) -> Option<&'static str> {
+    entry(kind).map(|(name, _)| *name)
+}
+
 /// Une ligne d'index : ce qui se cherche d'un bloc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IndexedBlock {
@@ -195,6 +212,20 @@ fn repeated_ids(blocks: &[Block]) -> HashSet<&str> {
     repeated
 }
 
+/// Ce qui sépare le prochain morceau de texte de ce qui est déjà lu.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+enum Gap {
+    /// Rien : deux plages d'un même texte, coupé par ses marques.
+    #[default]
+    None,
+    /// Une espace si deux mots se toucheraient (une lettre ou un chiffre de chaque côté) : autour
+    /// d'une mention et d'une formule, qui ne sont pas la suite du mot voisin (Ruling R948). La
+    /// ponctuation reste collée.
+    Words,
+    /// Une espace, toujours : entre deux cellules, entre deux props.
+    Always,
+}
+
 /// Ce qui se lit d'un bloc : son texte, dans la place qui reste, et les pages qu'il vise.
 struct Reader<'a> {
     text: String,
@@ -202,20 +233,33 @@ struct Reader<'a> {
     room: usize,
     /// Du texte a été laissé.
     cut: bool,
-    /// Une espace est due avant le prochain texte.
-    gap: bool,
+    /// La séparation due avant le prochain texte.
+    gap: Gap,
     links: Vec<Uuid>,
     origin: Option<&'a str>,
 }
 
 impl Reader<'_> {
+    /// Demande une séparation avant le prochain texte, sans affaiblir celle déjà due.
+    fn part(&mut self, gap: Gap) {
+        self.gap = self.gap.max(gap);
+    }
+
     /// Ajoute du texte, coupé entre deux caractères à la borne. Après une coupe, plus rien
     /// n'entre : le texte gardé est un début du texte du bloc.
     fn push(&mut self, piece: &str) {
         if piece.is_empty() || self.cut {
             return;
         }
-        if std::mem::take(&mut self.gap) && !self.text.is_empty() {
+        let due = match std::mem::take(&mut self.gap) {
+            Gap::None => false,
+            Gap::Words => {
+                self.text.ends_with(char::is_alphanumeric)
+                    && piece.starts_with(char::is_alphanumeric)
+            }
+            Gap::Always => !self.text.is_empty(),
+        };
+        if due {
             self.push(" ");
         }
         let free = self.room - self.text.len();
@@ -241,9 +285,15 @@ impl Reader<'_> {
                     if kind == "page" {
                         self.links.extend(hyphenated(id));
                     }
+                    self.part(Gap::Words);
                     self.push(label);
+                    self.part(Gap::Words);
                 }
-                Inline::Math { latex } => self.push(latex),
+                Inline::Math { latex } => {
+                    self.part(Gap::Words);
+                    self.push(latex);
+                    self.part(Gap::Words);
+                }
                 Inline::HardBreak => self.push(" "),
             }
         }
@@ -251,7 +301,7 @@ impl Reader<'_> {
 
     fn prop(&mut self, block: &Block, name: &str) {
         if let Some(PropValue::Str(value)) = block.props.get(name) {
-            self.gap = true;
+            self.part(Gap::Always);
             self.push(value);
         }
     }
@@ -261,7 +311,7 @@ impl Reader<'_> {
             (Rule::Inline, Content::Inline(content)) => self.inlines(content),
             (Rule::Table, Content::Table(table)) => {
                 for cell in table.rows.iter().flatten() {
-                    self.gap = true;
+                    self.part(Gap::Always);
                     self.inlines(&cell.content);
                 }
             }
@@ -318,7 +368,7 @@ pub fn project(blocks: &[Block], origin: Option<&str>) -> Projection {
             text: String::new(),
             room: MAX_BLOCK_TEXT_BYTES.min(text_room),
             cut: false,
-            gap: false,
+            gap: Gap::None,
             links: Vec::new(),
             origin,
         };

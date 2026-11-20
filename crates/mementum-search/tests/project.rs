@@ -5,7 +5,7 @@ use std::collections::HashSet;
 use mementum_md::{Block, Cell, Content, Inline, PropValue, Props, Styles, Table};
 use mementum_search::{
     IndexedBlock, MAX_BLOCK_ID_BYTES, MAX_BLOCK_TEXT_BYTES, MAX_PAGE_LINKS, MAX_PAGE_TEXT_BYTES,
-    Rule, is_stand_in, page_link, project, rule,
+    PROJECTION_VERSION, Rule, is_stand_in, kind_named, page_link, project, rule,
 };
 use serde_json::Value;
 use uuid::Uuid;
@@ -989,4 +989,100 @@ fn the_hash_changes_with_the_text_the_type_and_the_links_and_with_nothing_else()
         hash(heading_level),
         hash(inline("a", "heading", vec![plain("Voir le plan")]))
     );
+}
+
+/// R948 : une mention ou une formule collée au texte ne se fond pas avec lui. Une espace les
+/// sépare là où deux mots se toucheraient, et là seulement : la ponctuation reste collée.
+#[test]
+fn a_mention_or_a_formula_stuck_to_the_text_is_kept_apart() {
+    let math = |latex: &str| Inline::Math {
+        latex: latex.to_string(),
+    };
+    let row = only(&[inline(
+        "a",
+        "paragraph",
+        vec![
+            plain("voir"),
+            mention("user", OTHER, "Léa"),
+            plain("et"),
+            math("x^2"),
+            plain("fin"),
+        ],
+    )]);
+    assert_eq!(row.text, "voir Léa et x^2 fin");
+    // Deux mentions, deux formules qui se suivent.
+    let row = only(&[inline(
+        "a",
+        "paragraph",
+        vec![
+            mention("user", OTHER, "Léa"),
+            mention("page", PLAN, "Plan"),
+            math("a"),
+            math("b"),
+        ],
+    )]);
+    assert_eq!(row.text, "Léa Plan a b");
+    // Rien n'est ajouté là où une espace ou une ponctuation sépare déjà, ni au bord.
+    let row = only(&[inline(
+        "a",
+        "paragraph",
+        vec![
+            mention("user", OTHER, "Léa"),
+            plain(", puis "),
+            math("x"),
+            plain(". ("),
+            mention("page", PLAN, "Plan"),
+            plain(")"),
+        ],
+    )]);
+    assert_eq!(row.text, "Léa, puis x. (Plan)");
+    // Un libellé vide ne laisse pas d'espace de plus, et deux textes voisins restent collés (ce
+    // sont les morceaux d'un même texte, coupé par ses marques).
+    let row = only(&[inline(
+        "a",
+        "paragraph",
+        vec![
+            plain("avant "),
+            mention("page", PLAN, ""),
+            plain("après"),
+            plain("coup"),
+        ],
+    )]);
+    assert_eq!(row.text, "avant aprèscoup");
+    // Dans une cellule aussi.
+    let cell = Cell {
+        content: vec![plain("total"), math("n"), plain("lignes")],
+        props: Props::new(),
+    };
+    let table = block(
+        "t",
+        "table",
+        Content::Table(Table {
+            header_rows: 1,
+            header_cols: 0,
+            column_widths: vec![None],
+            rows: vec![vec![cell]],
+        }),
+    );
+    assert_eq!(only(&[table]).text, "total n lignes");
+}
+
+/// Le type d'une ligne relue de la base se refait par `kind_named` ; la version de la projection
+/// dit quand tout est à reprojeter.
+#[test]
+fn a_kind_read_back_is_a_name_of_the_table() {
+    let registry: Value =
+        serde_json::from_str(include_str!("../../../spec/schema/blocks.json")).unwrap();
+    for spec in registry["blocks"].as_array().unwrap() {
+        let name = spec["name"].as_str().unwrap();
+        assert_eq!(kind_named(name), Some(name));
+    }
+    for other in ["", "future_widget", "Paragraph", "paragraph "] {
+        assert_eq!(kind_named(other), None, "{other:?}");
+    }
+    // Le type d'une ligne projetée se relit tel quel.
+    let row = only(&[para("a", "texte")]);
+    let stored: String = row.kind.to_string();
+    assert_eq!(kind_named(&stored), Some(row.kind));
+    assert_eq!(PROJECTION_VERSION, 1);
 }
