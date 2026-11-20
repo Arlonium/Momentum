@@ -211,6 +211,11 @@ for (const [form, mmd] of CRASHING) {
     await putMmd(request, page.id, `$$\n\\frac{a}{b} + \\sqrt{2}\n$$\n\n${mmd}`);
     const opened = await openWatchingCrash(browser, page.id);
     const { p } = opened;
+    // Le dernier bloc de la page d'abord, qui existe toujours : une formule n'est mise en forme
+    // qu'à portée de l'écran (400 px), et `.mm-tex-why` n'existe qu'une fois qu'elle l'est. Au
+    // fond de la liste, elle était à 54 px de ne jamais y venir, et l'attente durait jusqu'au
+    // délai du test (Ruling R1203).
+    await p.locator(".mm-editor .bn-block-content").last().scrollIntoViewIfNeeded();
     await p.locator(".mm-editor .mm-tex-why").scrollIntoViewIfNeeded();
     await expect(p.locator(".mm-editor .mm-tex-why")).toHaveText("Formule trop imbriquée pour être affichée ici.");
     await expect(p.locator(".mm-editor .mm-equation").first().locator(".katex")).toBeVisible();
