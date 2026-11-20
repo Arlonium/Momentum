@@ -30,6 +30,9 @@ export type SearchKeyEvent = {
   getModifierState(modifier: string): boolean;
 };
 
+/** La touche du raccourci, telle que le clavier la nomme : « ⌘ » sur un Mac, « Ctrl » ailleurs. */
+export const MOD = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform ?? "") ? "⌘" : "Ctrl";
+
 /** Le code de touche de « K ». */
 const KEY_K = 75;
 

@@ -221,7 +221,8 @@ a:hover {
   cursor: default;
 }
 
-/* Tête : le sélecteur d'espace et « Nouvelle page », collés au haut de la barre. */
+/* Tête : le sélecteur d'espace et « Nouvelle page », puis « Rechercher » sur sa propre ligne,
+   collés au haut de la barre. */
 
 .mm-side-head {
   position: sticky;
@@ -229,6 +230,7 @@ a:hover {
   z-index: 2;
   flex: none;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   margin: 0 -8px;
@@ -236,9 +238,48 @@ a:hover {
   background: var(--mm-sidebar-bg);
 }
 
+/* Une base nulle : avec le retour à la ligne de la tête, un long nom d'espace ne pousse pas
+   « Nouvelle page » sur la ligne suivante. */
 .mm-switcher {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+/* « Rechercher » : toute la largeur, sous le sélecteur ; son raccourci à droite. */
+.mm-side-search {
+  flex: 1 0 100%;
+  min-width: 0;
+}
+
+.mm-side-search svg {
+  flex: none;
+  color: var(--mm-text-secondary);
+}
+
+.mm-side-search-label {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+.mm-side-search-keys {
+  flex: none;
+  display: flex;
+  gap: 3px;
+}
+
+/* Une touche du clavier, écrite : dans « Rechercher » et au pied de la fenêtre de recherche. */
+.mm-side-search-keys kbd,
+.mm-search-keys kbd {
+  min-width: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--mm-border);
+  border-radius: 4px;
+  background: var(--mm-background);
+  color: var(--mm-text-secondary);
+  font-family: var(--mm-font);
+  font-size: 11px;
+  line-height: 16px;
+  text-align: center;
 }
 
 .mm-switcher-button {
@@ -3716,4 +3757,203 @@ button.mm-reaction:hover {
 .mm-file-notes p {
   margin: 0;
   overflow-wrap: anywhere;
+}
+
+/* Fenêtre de recherche (lot 4, Task C1). Tenue par son bord haut : elle grandit vers le bas quand
+   des résultats arrivent, sans que le champ ni les lignes déjà montrées bougent sous le pointeur
+   (une fenêtre centrée remonterait à chaque ligne ajoutée). Le champ et le pied restent en place,
+   la liste défile entre les deux. */
+
+.mm-dialog.mm-search {
+  width: min(640px, calc(100vw - 32px));
+  max-height: min(620px, calc(100vh - 12vh - 24px));
+  margin: 12vh auto auto;
+  padding: 0;
+  overflow: hidden;
+}
+
+.mm-search[open] {
+  display: flex;
+  flex-direction: column;
+}
+
+.mm-search-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--mm-popover-divider);
+  color: var(--mm-text-secondary);
+}
+
+.mm-search-head svg {
+  flex: none;
+}
+
+.mm-search-field {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--mm-text-strong);
+  font: inherit;
+  font-size: 16px;
+}
+
+.mm-search-field::placeholder {
+  color: var(--mm-placeholder);
+}
+
+.mm-search-results {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 8px;
+}
+
+/* Le champ n'a pas de contour (il a presque toujours le focus) : sa tête le montre, d'un trait. */
+.mm-search-head:has(.mm-search-field:focus-visible) {
+  box-shadow: inset 0 -2px 0 var(--mm-accent);
+}
+
+.mm-search .mm-search-heading {
+  margin: 4px 10px 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--mm-text-secondary);
+}
+
+.mm-search .mm-search-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-search-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 7px 10px;
+  border-radius: 6px;
+  color: var(--mm-text);
+  text-decoration: none;
+  scroll-margin: 6px;
+}
+
+.mm-search-row svg {
+  flex: none;
+  margin-top: 3px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-search-row:hover {
+  background: var(--mm-surface);
+  color: var(--mm-text);
+}
+
+.mm-search-row[aria-selected="true"] {
+  background: var(--mm-sidebar-active);
+}
+
+.mm-search-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.mm-search-line {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+
+/* Les titres, les fils d'Ariane et les extraits viennent d'autres comptes : du texte isolé. */
+.mm-search-title,
+.mm-search-ancestor,
+.mm-search-excerpt {
+  unicode-bidi: isolate;
+}
+
+.mm-search-title {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-weight: 500;
+  color: var(--mm-text-strong);
+}
+
+.mm-search-path {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 12px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-search-ancestor + .mm-search-ancestor::before {
+  content: " / ";
+}
+
+/* Deux lignes au plus : un extrait fait jusqu'à 240 caractères. */
+.mm-search-excerpt {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  font-size: 13px;
+  line-height: 1.45;
+  color: var(--mm-text-secondary);
+}
+
+/* Deux classes : la règle tient quelle que soit la feuille chargée après celle-ci (R763). */
+.mm-search .mm-search-mark {
+  padding: 0 1px;
+  border-radius: 2px;
+  background: var(--mm-accent-soft);
+  color: var(--mm-text-strong);
+  font-weight: 600;
+}
+
+.mm-search .mm-search-more {
+  margin: 6px 10px 4px;
+}
+
+.mm-search-more[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.mm-search .mm-search-status {
+  margin: 0;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-search .mm-search-error {
+  color: var(--mm-danger);
+}
+
+.mm-search .mm-search-keys {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 16px;
+  margin: 0;
+  padding: 8px 18px;
+  border-top: 1px solid var(--mm-popover-divider);
+  background: var(--mm-sidebar-bg);
+  font-size: 12px;
+  color: var(--mm-text-secondary);
 }

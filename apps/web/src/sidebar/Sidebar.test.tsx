@@ -1,7 +1,7 @@
 // La barre latérale et ses favoris (R254) : « Favoris » est sa première section, absente quand
 // elle est vide ; elle ne montre que les pages de l'arbre, et ne bouge pas sous le pointeur quand
 // une relecture la change (R411), sauf pour ce qu'on y fait soi-même.
-import type { Me, PageNode } from "@mementum/protocol";
+import type { Me, PageNode, SpaceInfo } from "@mementum/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
@@ -51,6 +51,9 @@ async function show(
     toggles = new Map(),
     notice = null,
     info = null,
+    onSearch,
+    onSearchIntent,
+    space: shownSpace = me.spaces[0],
   }: {
     nodes?: PageNode[];
     onFavorite?: (id: string) => void;
@@ -58,13 +61,16 @@ async function show(
     toggles?: ReadonlyMap<string, number>;
     notice?: string | null;
     info?: string | null;
+    onSearch?: () => void;
+    onSearchIntent?: () => void;
+    space?: SpaceInfo | null;
   } = {},
 ) {
   await act(async () =>
     root.render(
       <SessionContext.Provider value={{ me, refresh: async () => {} }}>
         <Sidebar
-          space={me.spaces[0]}
+          space={shownSpace}
           nodes={nodes}
           activeId={null}
           settingsOpen={false}
@@ -79,6 +85,8 @@ async function show(
           onRetry={() => {}}
           favorites={{ pages: favorites, loaded, toggles }}
           onFavorite={onFavorite}
+          onSearch={onSearch}
+          onSearchIntent={onSearchIntent}
         />
       </SessionContext.Provider>,
     ),
@@ -295,4 +303,42 @@ test("a_ready_copy_is_said_in_the_footer_as_news_not_as_a_refusal", async () => 
     "La page n'a pas pu être dupliquée. Page introuvable",
   );
   expect(host.querySelector('.mm-side-footer [role="status"]')).toBeNull();
+});
+
+// « Rechercher » (lot 4, Task C1) : sous le sélecteur d'espace, dans la tête collée de la barre.
+
+const searchEntry = () => host.querySelector<HTMLButtonElement>("[data-search-entry]");
+
+test("the_search_entry_is_under_the_space_switcher_with_its_shortcut_written", async () => {
+  const onSearch = vi.fn();
+  const onSearchIntent = vi.fn();
+  await show([], { onSearch, onSearchIntent });
+  const entry = searchEntry()!;
+  // Dans la tête, après le sélecteur d'espace : elle ne défile pas avec les arbres.
+  const head = host.querySelector(".mm-side-head")!;
+  expect(head.contains(entry)).toBe(true);
+  const switcher = head.querySelector(".mm-switcher")!;
+  expect(switcher.compareDocumentPosition(entry) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // Son nom, et son raccourci, écrit et dit.
+  expect(entry.querySelector(".mm-side-search-label")?.textContent).toBe("Rechercher");
+  expect([...entry.querySelectorAll("kbd")].map((k) => k.textContent)).toEqual(["Ctrl", "K"]);
+  expect(entry.getAttribute("aria-keyshortcuts")).toBe("Control+K");
+  expect(entry.getAttribute("aria-haspopup")).toBe("dialog");
+  // Survolée ou au focus, elle prévient (le code de la fenêtre est demandé) ; cliquée, elle ouvre.
+  await act(async () => {
+    entry.dispatchEvent(new MouseEvent("pointerover", { bubbles: true }));
+  });
+  expect(onSearchIntent).toHaveBeenCalledTimes(1);
+  await act(async () => entry.focus());
+  expect(onSearchIntent).toHaveBeenCalledTimes(2);
+  expect(onSearch).not.toHaveBeenCalled();
+  await act(async () => entry.click());
+  expect(onSearch).toHaveBeenCalledTimes(1);
+});
+
+test("without_a_space_or_without_search_there_is_no_search_entry", async () => {
+  await show([]);
+  expect(searchEntry()).toBeNull();
+  await show([], { onSearch: () => {}, space: null });
+  expect(searchEntry()).toBeNull();
 });

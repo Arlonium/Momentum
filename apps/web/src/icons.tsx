@@ -294,3 +294,11 @@ export const DownloadIcon = ({ size = 16 }: { size?: number }) => (
     <path d="M5 19.5h14" />
   </Icon>
 );
+
+/** « Rechercher » : la loupe, dans la barre latérale et dans le champ de la fenêtre de recherche. */
+export const SearchIcon = ({ size = 16 }: { size?: number }) => (
+  <Icon size={size}>
+    <circle cx="11" cy="11" r="6.5" />
+    <path d="M16 16l4.5 4.5" />
+  </Icon>
+);

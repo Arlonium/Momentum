@@ -1,5 +1,6 @@
 // La barre latérale. En tête, collés à son bord haut : le sélecteur d'espace (avec le menu du
-// compte, Ruling R80) et « Nouvelle page ». Puis, qui défilent dessous : « Favoris », les pages
+// compte, Ruling R80) et « Nouvelle page », puis, dessous, « Rechercher », avec son raccourci écrit
+// (lot 4, décision L5 : la fenêtre de recherche de l'espace, `search/SearchHost.tsx`). Puis, qui défilent dessous : « Favoris », les pages
 // favorites du compte dans l'espace (R254, absente quand elle est vide), les sections de
 // l'espace, chacune avec son arbre de pages, et « Récents », les pages que le compte a ouvertes
 // dans l'espace, gardées dans le navigateur (R255, sous les sections depuis R296 ; absente quand
@@ -16,8 +17,9 @@
 // « Corbeille ».
 import type { PageNode, SpaceInfo } from "@mementum/protocol";
 import { useEffect, useLayoutEffect, useMemo, useState } from "react";
-import { ComposeIcon, TrashIcon } from "../icons";
+import { ComposeIcon, SearchIcon, TrashIcon } from "../icons";
 import { trashPath } from "../router";
+import { MOD } from "../search/shortcut";
 import { useSession } from "../session/session";
 import { useRecentPages } from "../space/recents";
 import { favoritePages } from "../space/useFavorites";
@@ -64,6 +66,10 @@ type Props = {
   onDuplicate?: (id: string) => void;
   /** Une duplication est en route : « Dupliquer » est grisé. */
   duplicating?: boolean;
+  /** Ouvre la recherche de l'espace ; absent : pas d'entrée « Rechercher ». */
+  onSearch?: () => void;
+  /** L'entrée « Rechercher » est survolée ou prend le focus : le code de la fenêtre peut être demandé. */
+  onSearchIntent?: () => void;
 };
 
 
@@ -85,6 +91,8 @@ export function Sidebar({
   onFavorite,
   onDuplicate,
   duplicating,
+  onSearch,
+  onSearchIntent,
 }: Props) {
   // La barre latérale défile ; sa tête et son pied restent collés à ses bords, par-dessus les
   // arbres, qui en tiennent compte pour montrer la page active (`treeWindow.ts`).
@@ -192,6 +200,27 @@ export function Sidebar({
             onClick={firstClick(() => onCreate({ section: "private" }))}
           >
             <ComposeIcon />
+          </button>
+        )}
+        {space && onSearch && (
+          // Sous le sélecteur, sur toute la largeur. C'est aussi là que le focus revient quand la
+          // fenêtre se ferme et que ce qui l'avait n'est plus là (`data-search-entry`).
+          <button
+            type="button"
+            className="mm-side-action mm-side-search"
+            data-search-entry=""
+            aria-haspopup="dialog"
+            aria-keyshortcuts={MOD === "Ctrl" ? "Control+K" : "Meta+K"}
+            onPointerEnter={onSearchIntent}
+            onFocus={onSearchIntent}
+            onClick={onSearch}
+          >
+            <SearchIcon />
+            <span className="mm-side-search-label">Rechercher</span>
+            <span className="mm-side-search-keys">
+              <kbd>{MOD}</kbd>
+              <kbd>K</kbd>
+            </span>
           </button>
         )}
       </div>

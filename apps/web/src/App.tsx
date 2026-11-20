@@ -13,7 +13,9 @@
 //   ouverte devient quand ses droits changent ailleurs ;
 // - `useFavorites` : les favoris du compte dans l'espace affiché, lus après chaque lecture de
 //   l'arbre (R254) ;
-// - `usePublishedTree` : les pages de l'arbre, pour l'éditeur (liens de page, sélecteur, R251).
+// - `usePublishedTree` : les pages de l'arbre, pour l'éditeur (liens de page, sélecteur, R251) ;
+// - `useSearchWindow` : la recherche de l'espace affiché (lot 4), son raccourci et sa fenêtre,
+//   chargée à la demande.
 import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
@@ -22,6 +24,7 @@ import { ancestorsOf } from "./page/ancestors";
 import { PageView } from "./page/PageView";
 import { useOpenPage } from "./page/useOpenPage";
 import { parseRoute, useLinkInterception, usePathname } from "./router";
+import { useSearchWindow } from "./search/SearchHost";
 import { useSession } from "./session/session";
 import { useAfterLogin } from "./session/useAfterLogin";
 import { useRetryAfterLogin } from "./session/useRetryAfterLogin";
@@ -149,6 +152,10 @@ export function App() {
   const trashFromTree = useCallback((id: string) => void trash(id), [trash]);
   const moveFromTree = useCallback((id: string, drop: Drop) => void move(id, drop), [move]);
   const duplicateFromMenu = useCallback((id: string) => void duplicate(id), [duplicate]);
+
+  // La recherche de l'espace affiché (lot 4, décision L2) : « Rechercher » dans la barre latérale,
+  // Ctrl+K de partout. Rien d'elle n'est chargé ni demandé tant qu'elle n'est pas ouverte.
+  const search = useSearchWindow(space, nodes);
 
   const { stale } = schema;
   const settingsOf = route.name === "spaceSettings" ? route.spaceId : null;
@@ -314,9 +321,12 @@ export function App() {
         onFavorite={favorite}
         onDuplicate={duplicateFromMenu}
         duplicating={actions.duplicating}
+        onSearch={search.open}
+        onSearchIntent={search.preload}
       />
       <main className="mm-main">{content}</main>
       {creatingSpace && <CreateSpaceDialog onClose={() => setCreatingSpace(false)} />}
+      {search.window}
     </div>
   );
 }
