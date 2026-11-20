@@ -9,7 +9,7 @@ Si tu arrives sans rien savoir du projet, commence par [`docs/REPRISE.md`](docs/
 1. Lis [`README.md`](README.md) : état du projet, décisions, ordre de lecture.
 2. Lis la conception : [`docs/specs/2026-11-09-mementum-design.md`](docs/specs/2026-11-09-mementum-design.md). C'est **la référence**. En cas de conflit, la conception l'emporte sur les plans et sur le code.
 3. Lis [`spike/RESULTS.md`](spike/RESULTS.md) : ce que la phase 0 a mesuré, confirmé ou corrigé.
-4. Pour comprendre une décision prise pendant la phase 0, cherche « Ruling » dans [`docs/superpowers/logs/2026-11-09-phase0-ledger.md`](docs/superpowers/logs/2026-11-09-phase0-ledger.md). Celles de la phase 1 sont dans les registres de ses lots, numérotées à la suite : R1 à R44 au [lot 1](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md), R45 à R128 au [lot 2](docs/superpowers/logs/2026-11-10-p1-lot2-ledger.md), R129 et plus au [lot 3](docs/superpowers/logs/2026-11-12-p1-lot3-ledger.md), R900 et plus au [lot 4](docs/superpowers/logs/2026-11-19-p1-lot4-ledger.md) (R900 à R920 sont écrits dans son [plan](docs/superpowers/plans/2026-11-19-p1-lot4-recherche.md) ; R890 à R899 restent à la clôture du lot 3).
+4. Pour comprendre une décision prise pendant la phase 0, cherche « Ruling » dans [`docs/superpowers/logs/2026-11-09-phase0-ledger.md`](docs/superpowers/logs/2026-11-09-phase0-ledger.md). Celles de la phase 1 sont dans les registres de ses lots, numérotées à la suite : R1 à R44 au [lot 1](docs/superpowers/logs/2026-11-09-p1-lot1-ledger.md), R45 à R128 au [lot 2](docs/superpowers/logs/2026-11-10-p1-lot2-ledger.md), R129 et plus au [lot 3](docs/superpowers/logs/2026-11-12-p1-lot3-ledger.md), R900 et plus au [lot 4](docs/superpowers/logs/2026-11-19-p1-lot4-ledger.md) (R900 à R920 sont écrits dans son [plan](docs/superpowers/plans/2026-11-19-p1-lot4-recherche.md), R921 et plus dans son registre ; R890 à R899 restent à la clôture du lot 3).
 
 ## Règles
 
@@ -337,7 +337,7 @@ Décisions au registre du lot 3, « Relecture finale, piste S », « Garde des a
 
 ## Pièges rencontrés au lot 4
 
-Plan : [`docs/superpowers/plans/2026-11-19-p1-lot4-recherche.md`](docs/superpowers/plans/2026-11-19-p1-lot4-recherche.md) ; registre : [`docs/superpowers/logs/2026-11-19-p1-lot4-ledger.md`](docs/superpowers/logs/2026-11-19-p1-lot4-ledger.md), à partir de R921. Chaque tâche ajoute ses pièges dans un sous-titre à elle.
+Plan : [`docs/superpowers/plans/2026-11-19-p1-lot4-recherche.md`](docs/superpowers/plans/2026-11-19-p1-lot4-recherche.md) ; registre : [`docs/superpowers/logs/2026-11-19-p1-lot4-ledger.md`](docs/superpowers/logs/2026-11-19-p1-lot4-ledger.md), à partir de R921 ; avancement : [`docs/superpowers/logs/2026-11-20-p1-lot4-avancement.md`](docs/superpowers/logs/2026-11-20-p1-lot4-avancement.md) ; la recette du propriétaire se déroule avec [`docs/recette/2026-11-20-p1-lot4-recette.md`](docs/recette/2026-11-20-p1-lot4-recette.md). Chaque tâche ajoute ses pièges dans un sous-titre à elle.
 
 ### Task S1 : les tables de l'index (`crates/mementum-store`)
 
