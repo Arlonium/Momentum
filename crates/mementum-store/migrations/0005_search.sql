@@ -22,7 +22,10 @@
 -- client.
 --
 -- `page_links` dit qu'un bloc mène à une page (rétroliens) ; `target_id` est un UUID lu, sans clé
--- étrangère : la page visée peut être d'un autre espace, ou ne plus exister.
+-- étrangère : la page visée peut être d'un autre espace, ou ne plus exister. `space_id` est
+-- l'espace de la page qui mène (celui de `node_id`, qu'une page ne quitte jamais), recopié pour
+-- que les rétroliens d'une page se lisent dans son espace seul (Task S6, R1015) : des liens posés
+-- en masse depuis un autre espace vers l'UUID d'une page ne sont même pas lus.
 --
 -- `search_state` dit où en est la projection de chaque page : le `seq` de la page que
 -- `blocks_index` reflète, `-1` pour une page jamais indexée (le marqueur d'une page créée ou
@@ -53,10 +56,12 @@ CREATE TABLE page_links (
     node_id   TEXT NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,
     block_id  TEXT NOT NULL,
     target_id TEXT NOT NULL,
+    space_id  TEXT NOT NULL,
     PRIMARY KEY (node_id, block_id, target_id)
 ) WITHOUT ROWID;
--- Les sources d'un rétrolien, dans l'ordre des identifiants, sans lire la table.
-CREATE INDEX page_links_by_target ON page_links (target_id, node_id, block_id);
+-- Les sources d'un rétrolien, de l'espace de la cible, dans l'ordre des identifiants, sans lire
+-- la table ; et le premier bloc de chaque source qui y mène, par la même clé.
+CREATE INDEX page_links_by_target ON page_links (target_id, space_id, node_id, block_id);
 
 CREATE TABLE search_state (
     node_id     TEXT PRIMARY KEY NOT NULL REFERENCES nodes(id) ON DELETE CASCADE,

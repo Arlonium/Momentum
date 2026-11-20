@@ -105,6 +105,8 @@ pub use members::{Expected, Member};
 pub use nodes::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, Updated};
 pub use position::position_between;
 pub use queue::{attribute_writes_to, writer, writes_by};
+#[cfg(feature = "test-hooks")]
+pub use search::BacklinkSteps;
 pub use search::{
     Backlink, Feed, FeedLine, FeedStart, FeedTokens, IndexRow, Indexed, IndexedBlock,
     MAX_INDEX_TX_BYTES, StalePages,

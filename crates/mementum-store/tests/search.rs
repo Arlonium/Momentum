@@ -939,7 +939,10 @@ async fn stale_pages_takes_no_write_turn() {
             .backlink_sources(node, f.space.id, None, 10)
             .await
             .unwrap();
-        store.backlink_excerpts(node, &[node], 10).await.unwrap();
+        store
+            .backlink_excerpts(node, f.space.id, &[node], 10)
+            .await
+            .unwrap();
         // Rien à passer à l'index plein texte, rien à défaire : aucun tour non plus.
         assert!(matches!(
             store.begin_feed(10).await.unwrap(),
@@ -1512,7 +1515,7 @@ async fn backlink_excerpts_are_cut_by_the_database() {
 
     let found = f
         .store
-        .backlink_excerpts(target, &[long, short, none], 240)
+        .backlink_excerpts(target, f.space.id, &[long, short, none], 240)
         .await
         .unwrap();
     assert_eq!(found.len(), 2);
@@ -1522,4 +1525,103 @@ async fn backlink_excerpts_are_cut_by_the_database() {
         .collect();
     assert_eq!(by_page[&long], ("a-long".to_string(), "é".repeat(240)));
     assert_eq!(by_page[&short], ("s".to_string(), "salut".to_string()));
+}
+
+/// `n` pages neuves de `space`, pas encore indexées.
+async fn new_pages(f: &Fixture, space: &mementum_store::Space, n: usize) -> Vec<Uuid> {
+    let mut pages = Vec::with_capacity(n);
+    for i in 0..n {
+        let node = page(space, None, None, &format!("Source {i}"));
+        pages.push(f.store.create_node(node).await.unwrap().id);
+    }
+    pages
+}
+
+/// Chacune de ces pages mène à `target` par un bloc.
+async fn link_to(f: &Fixture, sources: &[Uuid], target: Uuid) {
+    for &source in sources {
+        index(&f.store, source, 1, &[linking("a", "vers la cible", &[target])]).await;
+    }
+}
+
+/// Task S6 (relecture de S1, m3) : des liens posés en masse depuis un autre espace vers l'UUID
+/// d'une page ne sont **même pas lus** quand on lit ses rétroliens, ni par les sources ni par les
+/// extraits. Leur coût se compte en pas de la machine virtuelle de SQLite
+/// (`Store::backlink_read_steps`) : il ne bouge pas quand une page d'un autre espace qui mène à la
+/// cible devient cent, aux identifiants avant et après la seule source. Témoin : cinquante pages
+/// du même espace le font
+/// grandir, et elles sont rendues. Avec la requête de S1 (tous les liens vers la cible lus par
+/// l'index, l'espace jugé à la jointure sur `nodes`), les liens d'ailleurs étaient lus, puis
+/// écartés.
+#[tokio::test]
+async fn sources_of_another_space_are_not_even_read() {
+    let f = fresh().await;
+    let target = new_page(&f, "Cible").await;
+    let elsewhere = f.store.create_space("Ailleurs", None).await.unwrap();
+    // Des identifiants avant celui de la source, et d'autres après.
+    let before = new_pages(&f, &elsewhere, 50).await;
+    let seen = new_page(&f, "Vue").await;
+    let after = new_pages(&f, &elsewhere, 50).await;
+    assert!(before.iter().all(|id| *id < seen) && after.iter().all(|id| *id > seen));
+    // Un lien d'ailleurs dès le départ : la dernière recherche dans l'index s'arrête alors sur une
+    // entrée hors de la plage, et non au bout de l'index, ce qui coûte un pas de plus, une fois,
+    // quel que soit le nombre de liens d'ailleurs (vu en écrivant ce test).
+    link_to(&f, &[seen, after[0]], target).await;
+    let read = async || {
+        f.store
+            .backlink_read_steps(target, f.space.id, 500, 240)
+            .await
+            .unwrap()
+    };
+    let (sources, found, alone) = read().await;
+    assert_eq!(sources, [seen]);
+    assert_eq!(found.len(), 1);
+
+    link_to(&f, &before, target).await;
+    link_to(&f, &after[1..], target).await;
+    let (sources, found, crowded) = read().await;
+    assert_eq!(sources, [seen]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(crowded, alone, "des liens d'un autre espace ont été lus");
+
+    // Témoin : le compte voit ce qui est lu.
+    let nearby = new_pages(&f, &f.space, 50).await;
+    link_to(&f, &nearby, target).await;
+    let (sources, found, here) = read().await;
+    assert_eq!(sources.len(), 51);
+    assert_eq!(found.len(), 51);
+    assert!(here.sources > alone.sources, "{here:?} / {alone:?}");
+    assert!(here.excerpts > alone.excerpts, "{here:?} / {alone:?}");
+}
+
+/// Task S6 : une page qui mène trois cents fois à la cible (un lien par bloc) coûte aux deux
+/// lectures d'un rétrolien ce que coûte une page qui y mène une fois : les sources se lisent une
+/// par page (on saute de l'une à la suivante dans l'index), l'extrait par le premier bloc de chaque
+/// page, sans lire les autres. Sans cela, dix mille liens par page (la borne de la projection)
+/// faisaient lire à chaque appel dix mille entrées par source.
+#[tokio::test]
+async fn a_source_linking_many_times_is_read_once() {
+    let f = fresh().await;
+    let target = new_page(&f, "Cible").await;
+    let source = new_page(&f, "Source").await;
+    let first = linking("a", "le premier", &[target]);
+    index(&f.store, source, 1, std::slice::from_ref(&first)).await;
+    let read = async || {
+        f.store
+            .backlink_read_steps(target, f.space.id, 500, 240)
+            .await
+            .unwrap()
+    };
+    let (sources, found, once) = read().await;
+    assert_eq!(sources, [source]);
+    assert_eq!(found[0].block_id, "a");
+
+    let mut rows = vec![first];
+    rows.extend((0..300).map(|i| linking(&format!("b{i:03}"), "encore", &[target])));
+    index(&f.store, source, 2, &rows).await;
+    let (sources, found, many) = read().await;
+    assert_eq!(sources, [source]);
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].block_id, "a");
+    assert_eq!(many, once, "les liens d'une même source ont été lus un à un");
 }

@@ -438,7 +438,7 @@ async fn migration_keeps_lot1_pages() {
         ("nodes_parent_key", &["parent_id"]),
         (
             "page_links_by_target",
-            &["target_id", "node_id", "block_id"],
+            &["target_id", "space_id", "node_id", "block_id"],
         ),
         ("search_outbox_taken", &["token"]),
         ("search_state_never", &["node_id"]),
@@ -1100,8 +1100,8 @@ async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
     for faulty in [
         "INSERT INTO blocks_index (node_id, block_id, type, text, hash) \
          VALUES ('nœud-inconnu', 'b', 'paragraph', 'x', x'00')",
-        "INSERT INTO page_links (node_id, block_id, target_id) \
-         VALUES ('nœud-inconnu', 'b', 'cible')",
+        "INSERT INTO page_links (node_id, block_id, target_id, space_id) \
+         VALUES ('nœud-inconnu', 'b', 'cible', 'espace')",
         "INSERT INTO search_state (node_id, indexed_seq) VALUES ('nœud-inconnu', -1)",
     ] {
         assert!(refused_by_foreign_key(&db, faulty).await, "{faulty}");

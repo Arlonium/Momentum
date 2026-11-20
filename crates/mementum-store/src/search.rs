@@ -396,10 +396,12 @@ fn slices<'c, 'r, 'a>(changes: &'c [Change<'r, 'a>], bound: usize) -> Vec<&'c [C
     out
 }
 
-/// Écrit une tranche de changements de la page, et l'outbox de chaque bloc touché.
+/// Écrit une tranche de changements de la page, de l'espace `space_id`, et l'outbox de chaque
+/// bloc touché.
 async fn write_slice(
     tx: &mut Transaction<'_, Sqlite>,
     node_id: &str,
+    space_id: &str,
     slice: &[Change<'_, '_>],
 ) -> Result<(), StoreError> {
     let touched: Vec<&str> = slice.iter().map(Change::block_id).collect();
@@ -461,14 +463,18 @@ async fn write_slice(
     for chunk in links.chunks(ROWS_PER_STATEMENT) {
         // `OR IGNORE` : un bloc qui mène deux fois à la même page n'a qu'une ligne.
         let sql = repeated(
-            "INSERT OR IGNORE INTO page_links (node_id, block_id, target_id) VALUES ",
-            "(?, ?, ?)",
+            "INSERT OR IGNORE INTO page_links (node_id, block_id, target_id, space_id) VALUES ",
+            "(?, ?, ?, ?)",
             chunk.len(),
             "",
         );
         let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
         for (block, target) in chunk {
-            query = query.bind(node_id).bind(*block).bind(target.as_str());
+            query = query
+                .bind(node_id)
+                .bind(*block)
+                .bind(target.as_str())
+                .bind(space_id);
         }
         query
             .execute(&mut **tx)
@@ -526,19 +532,32 @@ fn sql_limit(limit: usize) -> i64 {
 }
 
 /// Les sources d'un rétrolien ([`Store::backlink_sources`]). En constante, pour que le plan de la
-/// requête se vérifie (elle lit l'index `page_links_by_target`, jamais toute la table). `DISTINCT`
-/// avant `LIMIT` : la borne compte des pages, pas des liens.
-const BACKLINK_SOURCES: &str = "SELECT DISTINCT l.node_id FROM page_links l \
-     JOIN nodes n ON n.id = l.node_id \
-     WHERE l.target_id = ?1 AND l.node_id > ?2 AND l.node_id != ?1 AND n.space_id = ?3 \
-     ORDER BY l.node_id LIMIT ?4";
+/// requête se vérifie : elle ne lit que l'index `page_links_by_target`, dans la plage de la cible
+/// **et de son espace** (Task S6, R1015 : les liens d'un autre espace ne sont même pas lus), et y
+/// saute d'une source à la suivante (R1016) : chaque pas de la récursion cherche la première
+/// source après la précédente, si bien qu'une source qui porte dix mille liens vers la cible se lit
+/// une fois, pas dix mille. La récursion fait au plus `?4 + 1` pas : la cible elle-même, si elle
+/// mène à soi, en prend un, et n'est pas rendue ; la borne compte des pages, pas des liens.
+const BACKLINK_SOURCES: &str = "WITH RECURSIVE walk(id, n) AS ( \
+         SELECT ?2, 0 \
+         UNION ALL \
+         SELECT (SELECT node_id FROM page_links \
+                 WHERE target_id = ?1 AND space_id = ?3 AND node_id > walk.id \
+                 ORDER BY node_id LIMIT 1), n + 1 \
+         FROM walk WHERE walk.id IS NOT NULL AND n <= ?4 \
+     ) \
+     SELECT id FROM walk WHERE n > 0 AND id IS NOT NULL AND id != ?1 ORDER BY id LIMIT ?4";
 
 /// Les extraits des rétroliens ([`Store::backlink_excerpts`]) : le premier bloc de chaque source
-/// qui mène à la cible, dans l'ordre des clés, son texte coupé par la base.
+/// qui mène à la cible, dans l'ordre des clés, lu par la même clé de l'index (la cible, son
+/// espace, la source : un seul pas, quel que soit le nombre de ses liens, R1016), et son texte
+/// coupé par la base.
 const BACKLINK_EXCERPTS: &str = "SELECT f.node_id, f.block_id, substr(b.text, 1, ?3) \
-     FROM (SELECT node_id, MIN(block_id) AS block_id FROM page_links \
-           WHERE target_id = ?1 AND node_id IN (SELECT value FROM json_each(?2)) \
-           GROUP BY node_id) f \
+     FROM (SELECT j.value AS node_id, \
+                  (SELECT l.block_id FROM page_links l \
+                   WHERE l.target_id = ?1 AND l.space_id = ?4 AND l.node_id = j.value \
+                   ORDER BY l.block_id LIMIT 1) AS block_id \
+           FROM json_each(?2) j) f \
      JOIN blocks_index b ON b.node_id = f.node_id AND b.block_id = f.block_id \
      ORDER BY f.node_id";
 
@@ -692,6 +711,15 @@ impl Store {
         let _indexing = self.index_lock().await;
         // Lu sans tour, dans une vue cohérente : ce qu'il y a à écrire.
         let mut read = self.pool.begin().await?;
+        // L'espace de la page, recopié sur ses liens (Task S6) : une page n'en change jamais.
+        let Some(space) =
+            sqlx::query_scalar::<_, String>("SELECT space_id FROM nodes WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&mut *read)
+                .await?
+        else {
+            return Err(StoreError::NotFound);
+        };
         let state = read_state(&mut *read, &id).await?;
         let kept: HashMap<String, Vec<u8>> =
             sqlx::query("SELECT block_id, hash FROM blocks_index WHERE node_id = ?")
@@ -736,7 +764,7 @@ impl Store {
             if now.is_some_and(|now| seq < now.indexed_seq) {
                 return Ok(Indexed { changed });
             }
-            write_slice(&mut tx, &id, slice).await?;
+            write_slice(&mut tx, &id, &space, slice).await?;
             if i + 1 == slices.len() {
                 write_state(&mut tx, &id, done).await?;
             }
@@ -1107,45 +1135,122 @@ impl Store {
         after: Option<Uuid>,
         limit: usize,
     ) -> Result<Vec<Uuid>, StoreError> {
-        let rows = sqlx::query(BACKLINK_SOURCES)
-            .bind(target_id.to_string())
-            .bind(after.map(|id| id.to_string()).unwrap_or_default())
-            .bind(space_id.to_string())
-            .bind(sql_limit(limit))
-            .fetch_all(&self.pool)
-            .await?;
-        uuids(&rows)
+        read_sources(&self.pool, target_id, space_id, after, limit).await
     }
 
-    /// Pour chacune de ces sources qui mène à `target_id`, le premier de ses blocs qui y mène,
-    /// dans l'ordre des clés (Ruling R963), et son texte coupé par la base à `chars` caractères :
-    /// jamais un texte de 64 Kio ramené pour en garder quelques-uns. Une source qui n'y mène pas
-    /// n'est pas rendue. Par identifiant de page, sans tour.
+    /// Pour chacune de ces sources de l'espace `space_id` (celui de la cible) qui mène à
+    /// `target_id`, le premier de ses blocs qui y mène, dans l'ordre des clés (Ruling R963), et
+    /// son texte coupé par la base à `chars` caractères : jamais un texte de 64 Kio ramené pour en
+    /// garder quelques-uns. Une source qui n'y mène pas n'est pas rendue. Par identifiant de page,
+    /// sans tour.
     pub async fn backlink_excerpts(
         &self,
         target_id: Uuid,
+        space_id: Uuid,
         sources: &[Uuid],
         chars: usize,
     ) -> Result<Vec<Backlink>, StoreError> {
-        if sources.is_empty() {
-            return Ok(Vec::new());
-        }
-        sqlx::query(BACKLINK_EXCERPTS)
-            .bind(target_id.to_string())
-            .bind(json_ids(sources))
-            .bind(sql_limit(chars))
-            .fetch_all(&self.pool)
-            .await?
-            .iter()
-            .map(|r| {
-                Ok(Backlink {
-                    node_id: parse_uuid(&r.get::<String, _>(0))?,
-                    block_id: r.get(1),
-                    excerpt: r.get(2),
-                })
-            })
-            .collect()
+        read_excerpts(&self.pool, target_id, space_id, sources, chars).await
     }
+
+    /// Les deux lectures d'un rétrolien ([`Store::backlink_sources`] depuis le début, au plus
+    /// `limit`, puis [`Store::backlink_excerpts`] de ce qu'elle rend), sur une même connexion,
+    /// avec ce qu'elles coûtent à SQLite : le nombre de pas de sa machine virtuelle, compté par un
+    /// gestionnaire de progression appelé à chaque pas. Les requêtes sont préparées avant d'être
+    /// comptées. Ce compte ne dépend que du chemin suivi dans les index : une ligne qui n'est pas
+    /// lue n'y paraît pas. Pour les tests seulement (fonction `test-hooks`, Task S6).
+    #[cfg(feature = "test-hooks")]
+    pub async fn backlink_read_steps(
+        &self,
+        target_id: Uuid,
+        space_id: Uuid,
+        limit: usize,
+        chars: usize,
+    ) -> Result<(Vec<Uuid>, Vec<Backlink>, BacklinkSteps), StoreError> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+
+        let mut conn = self.pool.acquire().await?;
+        // Préparées une fois, hors du compte.
+        let sources = read_sources(&mut *conn, target_id, space_id, None, limit).await?;
+        read_excerpts(&mut *conn, target_id, space_id, &sources, chars).await?;
+        let steps = Arc::new(AtomicU64::new(0));
+        let counter = Arc::clone(&steps);
+        conn.lock_handle().await?.set_progress_handler(1, move || {
+            counter.fetch_add(1, Ordering::Relaxed);
+            true
+        });
+        let counted = async {
+            let sources = read_sources(&mut *conn, target_id, space_id, None, limit).await?;
+            let source_steps = steps.swap(0, Ordering::Relaxed);
+            let found = read_excerpts(&mut *conn, target_id, space_id, &sources, chars).await?;
+            let excerpt_steps = steps.swap(0, Ordering::Relaxed);
+            let counts = BacklinkSteps {
+                sources: source_steps,
+                excerpts: excerpt_steps,
+            };
+            Ok::<_, StoreError>((sources, found, counts))
+        }
+        .await;
+        conn.lock_handle().await?.remove_progress_handler();
+        counted
+    }
+}
+
+/// Ce que coûtent à SQLite les deux lectures d'un rétrolien, en pas de sa machine virtuelle
+/// ([`Store::backlink_read_steps`]). Pour les tests seulement.
+#[cfg(feature = "test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BacklinkSteps {
+    pub sources: u64,
+    pub excerpts: u64,
+}
+
+/// [`Store::backlink_sources`], sur `executor`.
+async fn read_sources<'e>(
+    executor: impl SqliteExecutor<'e>,
+    target_id: Uuid,
+    space_id: Uuid,
+    after: Option<Uuid>,
+    limit: usize,
+) -> Result<Vec<Uuid>, StoreError> {
+    let rows = sqlx::query(BACKLINK_SOURCES)
+        .bind(target_id.to_string())
+        .bind(after.map(|id| id.to_string()).unwrap_or_default())
+        .bind(space_id.to_string())
+        .bind(sql_limit(limit))
+        .fetch_all(executor)
+        .await?;
+    uuids(&rows)
+}
+
+/// [`Store::backlink_excerpts`], sur `executor`.
+async fn read_excerpts<'e>(
+    executor: impl SqliteExecutor<'e>,
+    target_id: Uuid,
+    space_id: Uuid,
+    sources: &[Uuid],
+    chars: usize,
+) -> Result<Vec<Backlink>, StoreError> {
+    if sources.is_empty() {
+        return Ok(Vec::new());
+    }
+    sqlx::query(BACKLINK_EXCERPTS)
+        .bind(target_id.to_string())
+        .bind(json_ids(sources))
+        .bind(sql_limit(chars))
+        .bind(space_id.to_string())
+        .fetch_all(executor)
+        .await?
+        .iter()
+        .map(|r| {
+            Ok(Backlink {
+                node_id: parse_uuid(&r.get::<String, _>(0))?,
+                block_id: r.get(1),
+                excerpt: r.get(2),
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -1178,8 +1283,26 @@ mod tests {
     );
 
     const QUERIES: [Expected; 5] = [
-        (BACKLINK_SOURCES, 4, &[&["page_links_by_target"]], &[]),
-        (BACKLINK_EXCERPTS, 3, &[&["page_links_by_target"]], &[]),
+        // Les liens vers la cible, de son espace seulement, à partir d'une source : jamais ceux
+        // d'un autre espace (Task S6).
+        (
+            BACKLINK_SOURCES,
+            4,
+            &[&[
+                "page_links_by_target",
+                "target_id=? AND space_id=? AND node_id>?",
+            ]],
+            &[],
+        ),
+        (
+            BACKLINK_EXCERPTS,
+            4,
+            &[&[
+                "page_links_by_target",
+                "target_id=? AND space_id=? AND node_id=?",
+            ]],
+            &[],
+        ),
         (
             "DELETE FROM search_outbox WHERE token = ?",
             1,
@@ -1252,9 +1375,9 @@ mod tests {
         }
     }
 
-    /// Les sources d'un rétrolien se lisent dans l'index `page_links_by_target` (la cible, puis les
-    /// sources dans l'ordre) et les nœuds par leur clé, sans parcourir de table : des centaines de
-    /// liens posés ailleurs ne coûtent rien à la lecture d'une page. De même la clôture d'une
+    /// Les sources d'un rétrolien se lisent dans l'index `page_links_by_target` (la cible et son
+    /// espace, puis les sources dans l'ordre), sans parcourir de table : des centaines de liens
+    /// posés ailleurs, dans un autre espace, ne sont même pas lus (Task S6). De même la clôture d'une
     /// intention lit ses lignes par l'index partiel `search_outbox_taken`, pas toute l'outbox, les
     /// pages jamais indexées par `search_state_never`, et le retard d'un espace part de ses deux
     /// petits ensembles. Seuls se parcourent la liste des sources donnée (`json_each`), la
