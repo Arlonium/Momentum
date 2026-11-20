@@ -31,6 +31,7 @@ import {
 import { blockElement, shorten } from "../../comments/dom";
 import { groupedDelay } from "../../rereads";
 import type { MementumEditor } from "../debug";
+import { goToBlock } from "../goToBlock";
 import { focusEditor } from "./BlockWindowHost";
 import { readHeadings, type Heading } from "./headings";
 
@@ -132,25 +133,10 @@ function useHeadings(editor: MementumEditor): readonly Heading[] {
 
 /**
  * Va au titre du bloc `id` : le curseur au début du titre, le focus à l'éditeur, la page défilée
- * jusqu'à lui. Un titre parti depuis (la table était tenue sous le pointeur) : rien.
+ * jusqu'à lui (`goToBlock`). Un titre parti depuis (la table était tenue sous le pointeur) : rien.
  */
 function goToHeading(editor: MementumEditor, id: string): void {
-  const root = editor.domElement;
-  const element = root ? blockElement(root, id) : null;
-  if (element === null || editor.getBlock(id) === undefined) return;
-  try {
-    editor.setTextCursorPosition(id, "start");
-  } catch {
-    // Un bloc qu'on ne sait pas désigner : le curseur reste où il était.
-  }
-  focusEditor(editor);
-  // En lecture seule, ProseMirror ne pose pas sa sélection dans la page, et relit celle du document
-  // quand l'éditeur prend le focus : on la pose au début du titre, où un lecteur d'écran reprend.
-  if (!editor.isEditable) {
-    const text = element.querySelector(":scope > .bn-block > .bn-block-content .bn-inline-content");
-    if (text !== null) document.getSelection()?.collapse(text, 0);
-  }
-  element.scrollIntoView({ block: "start" });
+  goToBlock(editor, id, { block: "start" });
 }
 
 /** Les modificateurs d'un clic qui ouvre ailleurs (un onglet, une fenêtre) : laissé au navigateur. */

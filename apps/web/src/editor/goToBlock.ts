@@ -1,0 +1,111 @@
+// Aller à un bloc de la page affichée : le curseur au début de son texte, le focus à l'éditeur, le
+// bloc amené à l'écran. Pour un lien de la table des matières (`blocks/Toc.tsx`, d'où vient ce code)
+// et pour une adresse qui vise un bloc (`/p/<page>#b=<bloc>`, lot 4 : un résultat de recherche, un
+// rétrolien ; `useArrival`). C'est une navigation : rien n'est écrit dans le document, et la même
+// chose vaut pour qui lit et pour qui modifie.
+//
+// L'identifiant d'un bloc vient d'ailleurs (une adresse, un serveur, un autre client) : un texte
+// quelconque. Il n'est comparé qu'à l'attribut `data-id` des blocs affichés (`blockElement`, qui
+// l'échappe), et un bloc introuvable ne fait rien : ni erreur, ni message, ni défilement.
+import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { blockElement } from "../comments/dom";
+import { focusEditor } from "./blocks/BlockWindowHost";
+import type { MementumEditor } from "./debug";
+
+type How = {
+  /** Où le bloc est amené dans la fenêtre (`scrollIntoView`) : au milieu par défaut. */
+  block?: ScrollLogicalPosition;
+  /** Donner le focus à l'éditeur (par défaut) ; sinon le bloc est seulement montré. */
+  focus?: boolean;
+};
+
+/**
+ * Va au bloc `id` de `editor`. Rend faux, sans rien faire, si la vue n'est pas montée ou si le bloc
+ * n'y est pas (parti, d'une autre page, jamais écrit).
+ */
+export function goToBlock(editor: MementumEditor, id: string, { block = "center", focus = true }: How = {}): boolean {
+  const root = editor.domElement;
+  const element = root?.isConnected ? blockElement(root, id) : null;
+  // Une seule recherche du bloc dans la page (R641), et seulement s'il est affiché.
+  if (element === null || editor.getBlock(id) === undefined) return false;
+  try {
+    editor.setTextCursorPosition(id, "start");
+  } catch {
+    // Un bloc qu'on ne sait pas désigner (sans texte) : le curseur reste où il était.
+  }
+  if (focus) {
+    focusEditor(editor);
+    // En lecture seule, ProseMirror ne pose pas sa sélection dans la page, et relit celle du document
+    // quand l'éditeur prend le focus : on la pose au début du bloc, où un lecteur d'écran reprend.
+    if (!editor.isEditable) {
+      const text = element.querySelector(":scope > .bn-block > .bn-block-content .bn-inline-content");
+      if (text !== null) document.getSelection()?.collapse(text, 0);
+    }
+  }
+  element.scrollIntoView({ block });
+  return true;
+}
+
+/** Un bloc visé : suivi une fois par objet (`BlockTarget` du routeur en est un). */
+export type Arrival = { readonly blockId: string };
+
+/** Ce que l'arrivée lit de la session de synchro de la page (`CollabSession`). */
+export type Synced = { readonly synced: boolean; subscribe(listener: () => void): () => void };
+
+/**
+ * La personne écrit ailleurs que dans cet éditeur (un champ, un autre texte modifiable), ou une
+ * fenêtre est ouverte par-dessus la page : une arrivée tardive ne lui prend pas le focus.
+ */
+function busyElsewhere(editor: MementumEditor): boolean {
+  if (document.querySelector("dialog[open]") !== null) return true;
+  const active = document.activeElement;
+  if (active === null || active === document.body || editor.domElement?.contains(active)) return false;
+  return (
+    active instanceof HTMLInputElement ||
+    active instanceof HTMLTextAreaElement ||
+    active.closest('[contenteditable="true"]') !== null
+  );
+}
+
+/**
+ * Suit la visée `target` dans `editor` : va à son bloc dès que la session de la page a fait sa
+ * première synchro (jamais sur un document encore vide) et que la vue de l'éditeur est montée
+ * (y-prosemirror y rend le document en la créant), puis le dit par `onDone`, bloc trouvé ou non. Qui
+ * donne la visée la retire alors : une session recréée, donc un éditeur neuf, ne ramène pas au bloc.
+ *
+ * Donnée à un éditeur prêt, la visée est suivie dans le rendu du geste qui l'a posée, et prend le
+ * focus (la fenêtre de recherche vient de le rendre à ce qui l'avait). Suivie plus tard (la page
+ * s'ouvrait), elle montre le bloc, et ne prend pas le focus à qui écrit ailleurs entre-temps.
+ */
+export function useArrival<T extends Arrival>(
+  editor: MementumEditor,
+  session: Synced,
+  target: T | null,
+  onDone: ((target: T) => void) | undefined,
+): void {
+  const subscribe = useCallback((onChange: () => void) => session.subscribe(onChange), [session]);
+  const ready = useSyncExternalStore(subscribe, () => session.synced);
+  const done = useRef(onDone);
+  done.current = onDone;
+  /** La visée en cours, et si elle a dû attendre la page. */
+  const pending = useRef<{ target: T | null; waited: boolean }>({ target: null, waited: false });
+  useEffect(() => {
+    if (pending.current.target !== target) pending.current = { target, waited: false };
+    if (target === null) return;
+    const state = pending.current;
+    const arrive = () => {
+      goToBlock(editor, target.blockId, { focus: !state.waited || !busyElsewhere(editor) });
+      done.current?.(target);
+    };
+    if (!ready) {
+      state.waited = true;
+      return;
+    }
+    if (editor.domElement?.isConnected) {
+      arrive();
+      return;
+    }
+    state.waited = true;
+    return editor.onMount(arrive);
+  }, [editor, ready, target]);
+}
