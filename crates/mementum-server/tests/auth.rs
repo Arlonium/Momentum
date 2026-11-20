@@ -1414,9 +1414,11 @@ async fn startup_warns_while_no_account_exists() {
     drop(logs);
     t.signed_up("alice@exemple.fr", "Alice").await;
 
-    // Au démarrage suivant, sur les mêmes données : plus rien à dire.
+    // Au démarrage suivant, sur les mêmes données : plus rien à dire. La première application
+    // est arrêtée d'abord : restée en vie, elle garderait son indexeur sur la base (lot 4).
+    let (dir, cfg) = t.stop().await;
     let logs = Logs::capture();
-    let _router = mementum_server::app(&t.cfg).await.unwrap();
+    let _restarted = TestApp::on(dir, cfg).await;
     let text = logs.text();
     assert!(!text.contains("aucun compte"), "{text}");
 }

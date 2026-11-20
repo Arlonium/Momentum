@@ -1039,12 +1039,16 @@ async fn startup_counts_strangers_and_missing_contents_and_removes_none() {
     let page = Uuid::parse_str(&alice.create(json!({ "title": "P" })).await.id).unwrap();
     uploaded(&alice.browser, page, "photo.png", PNG).await;
     uploaded(&alice.browser, page, "rapport.pdf", PDF).await;
-    let restart = async || {
+    drop(alice);
+    // L'application est arrêtée avant d'être relancée sur son dossier : la première, restée en
+    // vie, garderait son indexeur sur la base (lot 4).
+    let restart = async |t: TestApp| {
+        let (dir, cfg) = t.stop().await;
         let logs = Logs::capture();
-        let _restarted = mementum_server::app(&t.cfg).await.unwrap();
-        logs.text()
+        let restarted = TestApp::on(dir, cfg).await;
+        (restarted, logs.text())
     };
-    let quiet = restart().await;
+    let (t, quiet) = restart(t).await;
     assert!(!quiet.contains("ne connaît pas"), "{quiet}");
     assert!(!quiet.contains("n'a plus"), "{quiet}");
 
@@ -1058,7 +1062,7 @@ async fn startup_counts_strangers_and_missing_contents_and_removes_none() {
     let leftover = t.cfg.data_dir.join("files").join("tmp").join("reste");
     std::fs::write(&leftover, b"reste").unwrap();
 
-    let journal = restart().await;
+    let (t, journal) = restart(t).await;
     let warning = |marker: &str| {
         journal
             .lines()

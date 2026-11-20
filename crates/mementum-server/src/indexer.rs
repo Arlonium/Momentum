@@ -29,11 +29,21 @@
 //!
 //! **Ce qui échoue.** Une page qu'on ne sait plus relire quitte l'index, est notée à son `seq`
 //! ([`Store::index_failed`]) et journalisée une fois : elle n'est pas réessayée avant que son
-//! `seq` change. Une erreur de la base, elle, est réessayée (1 s, puis le double, 60 s au plus).
+//! `seq` change. Une indexation qui panique finit de même (Ruling R995). Une erreur de la base
+//! est réessayée (1 s, puis le double, 60 s au plus) : sans compter si elle passe d'elle-même (un
+//! verrou, une base occupée), [`MAX_TRIES`] fois sinon, après quoi la page quitte l'index elle
+//! aussi. Aucune page n'est réessayée sans fin pour une raison qui ne passe pas.
 //!
-//! **L'arrêt.** [`IndexerHandle::stop`] laisse finir l'indexation en cours, puis rend : `serve`
-//! l'appelle après [`Hub::shutdown`] et avant de fermer la base. L'indexeur s'arrête aussi de
-//! lui-même quand plus personne ne tient sa poignée.
+//! **Le démarrage.** Tant que la reprojection et le rattrapage ne sont pas finis, l'indexeur ne
+//! sait pas ce qui est en retard : [`IndexerHandle::behind`] répond « en retard » (Ruling R996).
+//!
+//! **L'arrêt.** [`IndexerHandle::stop`] ne laisse rien commencer et attend l'indexation en
+//! cours, [`STOP_WAIT`] au plus (Ruling R997) : `serve` l'appelle après [`Hub::shutdown`] et
+//! avant de fermer la base. L'indexeur s'arrête aussi de lui-même quand plus personne ne tient sa
+//! poignée.
+//!
+//! **Limite.** Un seul indexeur, une page à la fois, sans part par compte : une page coûteuse à
+//! relire (Ruling R860) retient les pages de toute l'instance le temps de sa relecture.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -68,6 +78,15 @@ const RETRY_FIRST: Duration = Duration::from_secs(1);
 /// Le plus long délai entre deux essais.
 const RETRY_AT_MOST: Duration = Duration::from_secs(60);
 
+/// Essais d'une page que la base refuse pour une raison qui ne passe pas d'elle-même : au-delà,
+/// la page quitte l'index comme une page illisible (Ruling R995).
+const MAX_TRIES: u32 = 5;
+
+/// Ce que l'arrêt attend au plus de l'indexation en cours (Ruling R997). Passé ce délai, la base
+/// ferme : une transaction pas encore validée n'a rien écrit, et la page, restée en retard dans
+/// la base, est reprise par le rattrapage du démarrage suivant.
+pub const STOP_WAIT: Duration = Duration::from_secs(10);
+
 /// Les réglages de l'indexeur.
 #[derive(Debug, Clone)]
 pub(crate) struct IndexerConfig {
@@ -100,6 +119,8 @@ impl Waiting {
 struct Retry {
     at: Instant,
     delay: Duration,
+    /// Les essais refusés pour une raison qui ne passe pas d'elle-même.
+    tries: u32,
 }
 
 /// Ce que l'indexeur sait en retard, en mémoire. Verrouillé brièvement, jamais à travers une
@@ -235,9 +256,15 @@ struct Shared {
     /// [`IndexerHandle::settled`] demande de relire les marqueurs.
     asked: AtomicBool,
     rounds: watch::Sender<Round>,
-    task: Mutex<Option<JoinHandle<()>>>,
+    /// La tâche de fond a été lancée ([`spawn`]).
+    spawned: AtomicBool,
+    /// Le démarrage n'est pas fini : la reprojection, s'il y en a une, puis le rattrapage. Tant
+    /// qu'il dure, l'indexeur ne sait pas ce qui est en retard ([`IndexerHandle::behind`]).
+    starting: AtomicBool,
     /// Les pages relues ([`stored_page`]), pour les tests.
     reads: AtomicU64,
+    /// Les pages dont la relecture panique, pour les tests ([`IndexerHandle::panic_reading`]).
+    panics: Mutex<HashSet<Uuid>>,
 }
 
 impl Shared {
@@ -270,12 +297,10 @@ pub struct IndexerHandle {
 /// Lance l'indexeur sur le moteur courant : une tâche de fond, qui commence par son rattrapage.
 pub(crate) fn spawn(store: Store, hub: Arc<Hub>, cfg: IndexerConfig) -> IndexerHandle {
     let handle = not_running(store, hub, cfg);
-    let task = tokio::spawn(run(handle.shared.clone()));
-    *handle
-        .shared
-        .task
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner) = Some(task);
+    handle.shared.starting.store(true, Ordering::SeqCst);
+    handle.shared.spawned.store(true, Ordering::SeqCst);
+    // La tâche n'est pas gardée : sa fin se lit dans les tours qu'elle publie (`Round::stopped`).
+    tokio::spawn(run(handle.shared.clone()));
     handle
 }
 
@@ -291,8 +316,10 @@ pub(crate) fn not_running(store: Store, hub: Arc<Hub>, cfg: IndexerConfig) -> In
         stopping: AtomicBool::new(false),
         asked: AtomicBool::new(false),
         rounds: watch::Sender::new(Round::default()),
-        task: Mutex::new(None),
+        spawned: AtomicBool::new(false),
+        starting: AtomicBool::new(false),
         reads: AtomicU64::new(0),
+        panics: Mutex::default(),
     });
     IndexerHandle {
         _life: Arc::new(Lifeline(shared.clone())),
@@ -309,11 +336,23 @@ impl IndexerHandle {
     /// La base ne rend que les [`BEHIND_LIMIT`] premières pages en retard de l'espace, sans les
     /// droits : quand elle en rend autant sans qu'aucune soit vue, la réponse est « en retard »
     /// (Ruling R983).
+    ///
+    /// Tant que le démarrage n'est pas fini (la reprojection d'une base indexée sous une autre
+    /// version, puis le rattrapage), l'indexeur ne sait pas ce qu'un arrêt a laissé en retard :
+    /// la réponse est « en retard », pour tous (Ruling R996). Elle le reste si la version gardée
+    /// de la projection ne se lit pas.
+    ///
+    /// Une page dont la lecture a échoué n'est pas en retard : elle a quitté l'index, et rien
+    /// d'autre ne viendra avant sa prochaine écriture. Seule sa ligne d'outbox la dit en retard,
+    /// le temps que l'index plein texte la valide (Ruling R995).
     pub async fn behind(
         &self,
         space_id: Uuid,
         seen: impl Fn(Uuid) -> bool,
     ) -> Result<bool, StoreError> {
+        if self.shared.starting.load(Ordering::SeqCst) {
+            return Ok(true);
+        }
         if self.shared.queues().any(&seen) {
             return Ok(true);
         }
@@ -330,13 +369,7 @@ impl IndexerHandle {
     /// si l'indexeur est arrêté, ou n'a jamais été lancé.
     #[doc(hidden)]
     pub async fn settled(&self) {
-        let running = self
-            .shared
-            .task
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .is_some();
-        if !running {
+        if !self.shared.spawned.load(Ordering::SeqCst) {
             return;
         }
         let mut rounds = self.shared.rounds.subscribe();
@@ -358,19 +391,21 @@ impl IndexerHandle {
         }
     }
 
-    /// Arrête l'indexeur : l'indexation en cours va au bout (sa transaction n'est pas coupée),
-    /// rien d'autre n'est commencé. Ce qui restait à indexer l'est au démarrage suivant.
+    /// Arrête l'indexeur, et rend quand sa boucle a fini : rien d'autre n'est commencé, et
+    /// l'indexation en cours est attendue (sa transaction n'est pas coupée), [`STOP_WAIT`] au
+    /// plus (Ruling R997). Ce qui restait à indexer l'est au démarrage suivant. Plusieurs appels
+    /// de front attendent tous la même fin.
     pub async fn stop(&self) {
         self.shared.stopping.store(true, Ordering::SeqCst);
         self.shared.wake.notify_one();
-        let task = self
-            .shared
-            .task
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take();
-        if let Some(task) = task {
-            let _ = task.await;
+        if !self.shared.spawned.load(Ordering::SeqCst) {
+            return;
+        }
+        let mut rounds = self.shared.rounds.subscribe();
+        while !rounds.borrow_and_update().stopped {
+            if rounds.changed().await.is_err() {
+                return;
+            }
         }
     }
 
@@ -392,19 +427,61 @@ impl IndexerHandle {
     pub fn reads(&self) -> u64 {
         self.shared.reads.load(Ordering::SeqCst)
     }
+
+    /// La relecture de cette page paniquera, comme un défaut de yrs devant un journal hostile.
+    /// Pour les tests : rien d'autre ne fait paniquer une relecture à la demande.
+    #[doc(hidden)]
+    pub fn panic_reading(&self, page: Uuid) {
+        self.shared
+            .panics
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(page);
+    }
 }
 
 /// Ce qu'est devenue une indexation.
 enum Outcome {
     /// La page est à jour dans la base, ou n'existe plus, ou ne se relit plus (notée).
     Done,
-    /// La base a refusé : à réessayer.
-    Retry,
+    /// La base a refusé. `passing` : un verrou, une base occupée, à réessayer sans compter ; sinon
+    /// l'essai compte contre [`MAX_TRIES`].
+    Retry { passing: bool },
+}
+
+/// Vrai pour une erreur de la base qui passe d'elle-même : un verrou tenu par un autre, une base
+/// occupée, un pool qui n'a pas rendu de connexion à temps. Le serveur ne dépend pas de sqlx : la
+/// sorte se lit dans le message de SQLite (« database is locked », « database table is locked »,
+/// « busy »). Toute autre erreur est tenue pour durable.
+fn passing(error: &StoreError) -> bool {
+    let StoreError::Sqlx(error) = error else {
+        return false;
+    };
+    let said = error.to_string();
+    ["locked", "busy", "timed out"]
+        .iter()
+        .any(|word| said.contains(word))
+}
+
+/// Ce que devient une écriture de l'index refusée.
+fn refused(page: Uuid, error: &StoreError) -> Outcome {
+    let passing = passing(error);
+    tracing::warn!(
+        %page, %error, passing,
+        "indexation d'une page refusée par la base : nouvel essai plus tard"
+    );
+    Outcome::Retry { passing }
 }
 
 /// Indexe une page : relit ce que le store garde, projette, écrit la différence.
 async fn index_one(shared: Arc<Shared>, page: Uuid) -> Outcome {
     shared.reads.fetch_add(1, Ordering::SeqCst);
+    let panics = shared
+        .panics
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .contains(&page);
+    assert!(!panics, "relecture de la page {page} : panique demandée");
     let written = match stored_page(&shared.store, page).await {
         // Une page sans document, ou supprimée entre-temps : elle sort quand même de `-1`.
         Ok(None) => shared.store.index_page(page, 0, &[], false).await,
@@ -450,16 +527,22 @@ async fn index_one(shared: Arc<Shared>, page: Uuid) -> Outcome {
             }
         }
         Err(SyncError::Store(error)) => Err(error),
-        Err(error) => unreadable(&shared.store, page, &error).await,
+        Err(error) => unreadable(&shared.store, page, error.to_string()).await,
     };
     match written {
         Ok(_) => Outcome::Done,
         // Supprimée entre-temps : ses lignes sont parties avec elle.
         Err(StoreError::NotFound) => Outcome::Done,
-        Err(error) => {
-            tracing::warn!(%page, %error, "indexation d'une page refusée par la base : nouvel essai plus tard");
-            Outcome::Retry
-        }
+        Err(error) => refused(page, &error),
+    }
+}
+
+/// Renonce à indexer la page à ce `seq` (sa relecture a paniqué, ou la base a refusé son
+/// indexation [`MAX_TRIES`] fois) : elle quitte l'index comme une page illisible (Ruling R995).
+async fn give_up(shared: Arc<Shared>, page: Uuid, why: &'static str) -> Outcome {
+    match unreadable(&shared.store, page, why.to_string()).await {
+        Ok(_) | Err(StoreError::NotFound) => Outcome::Done,
+        Err(error) => refused(page, &error),
     }
 }
 
@@ -467,7 +550,7 @@ async fn index_one(shared: Arc<Shared>, page: Uuid) -> Outcome {
 async fn unreadable(
     store: &Store,
     page: Uuid,
-    error: &SyncError,
+    error: String,
 ) -> Result<mementum_store::Indexed, StoreError> {
     let doc = store.load_doc(page).await?;
     let seq = doc
@@ -476,12 +559,13 @@ async fn unreadable(
         .map(|(seq, _)| *seq)
         .or(doc.snapshot.as_ref().map(|(seq, _)| *seq))
         .unwrap_or(0);
+    store.index_failed(page, seq).await?;
+    // Dit une fois, l'échec noté : un refus de la base ci-dessus ne le redit pas à chaque essai.
     tracing::error!(
         %page, seq, %error,
         "page impossible à relire : elle quitte l'index de recherche jusqu'à sa prochaine \
          écriture"
     );
-    store.index_failed(page, seq).await?;
     Ok(mementum_store::Indexed { changed: 0 })
 }
 
@@ -529,6 +613,7 @@ async fn pause(shared: &Shared, delay: Duration) {
 
 /// La boucle de l'indexeur.
 async fn run(shared: Arc<Shared>) {
+    let _stopped = Stopped(shared.clone());
     // Abonné avant toute lecture des marqueurs : aucune annonce ne passe entre les deux.
     let mut changes = shared.store.changes();
     let mut delay = RETRY_FIRST;
@@ -549,7 +634,9 @@ async fn run(shared: Arc<Shared>) {
     let mut sources_after: Option<Instant> = None;
     let mut catch_up: Option<Option<Uuid>> = Some(None);
     let mut announced = true;
-    let mut job: Option<JoinHandle<Outcome>> = None;
+    // Le travail en cours, un seul à la fois : une indexation, ou (`true`) le renoncement à une
+    // page qu'on ne sait pas indexer.
+    let mut job: Option<(JoinHandle<Outcome>, bool)> = None;
     let mut round = 0u64;
     while !shared.stopping() {
         let now = Instant::now();
@@ -608,6 +695,11 @@ async fn run(shared: Arc<Shared>) {
                         queues.make_ready(page);
                     }
                     catch_up = stale.next.map(Some);
+                    if catch_up.is_none() {
+                        // Le démarrage est fini : ce qui est en retard est en file, ou noté
+                        // dans la base.
+                        shared.starting.store(false, Ordering::SeqCst);
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(%error, "rattrapage de l'index impossible à lire : nouvel essai plus tard");
@@ -615,10 +707,11 @@ async fn run(shared: Arc<Shared>) {
                 }
             }
         }
-        if job.is_none() {
+        // Rien n'est commencé une fois l'arrêt demandé.
+        if job.is_none() && !shared.stopping() {
             let next = shared.queues().next(Instant::now(), &shared.cfg);
             if let Some(page) = next {
-                job = Some(tokio::spawn(index_one(shared.clone(), page)));
+                job = Some((tokio::spawn(index_one(shared.clone(), page)), false));
             }
         }
         round += 1;
@@ -628,7 +721,6 @@ async fn run(shared: Arc<Shared>) {
             idle,
             stopped: false,
         });
-        // Une page prête de plus (un lot à relire) : pas d'attente.
         // Un lot de plus à lire (le rattrapage d'une instance où rien n'est en retard dans ce
         // lot) : pas d'attente.
         let more = job.is_none() && sources_after.is_none() && (markers || catch_up.is_some());
@@ -652,35 +744,93 @@ async fn run(shared: Arc<Shared>) {
                 Ok(_) | Err(RecvError::Lagged(_)) => markers = true,
                 Err(RecvError::Closed) => announced = false,
             },
-            done = async { job.as_mut().expect("une indexation en cours").await }, if job.is_some() => {
-                job = None;
-                let mut queues = shared.queues();
-                let Some(page) = queues.running.take() else { continue };
-                match done {
-                    Ok(Outcome::Done) => {
-                        queues.retry.remove(&page);
-                    }
-                    Ok(Outcome::Retry) | Err(_) => {
-                        let delay = queues
-                            .retry
-                            .get(&page)
-                            .map_or(RETRY_FIRST, |retry| (retry.delay * 2).min(RETRY_AT_MOST));
-                        queues.retry.insert(page, Retry { at: Instant::now() + delay, delay });
-                    }
-                }
+            done = async { (&mut job.as_mut().expect("un travail en cours").0).await }, if job.is_some() => {
+                let giving_up = job.take().is_some_and(|(_, giving_up)| giving_up);
+                job = finished(&shared, done, giving_up).map(|job| (job, true));
             }
             () = async { tokio::time::sleep_until(wake_at.expect("un réveil")).await }, if wake_at.is_some() => {}
         }
     }
-    // L'indexation en cours va au bout : sa transaction n'est pas coupée.
-    if let Some(job) = job {
-        let _ = job.await;
+    // L'indexation en cours va au bout, sa transaction n'est pas coupée ; mais l'arrêt ne l'attend
+    // pas sans fin (une page coûteuse à relire, R860). Elle n'est pas interrompue pour autant :
+    // la base, en fermant, attend sa requête en cours et refuse les suivantes, et ce qui n'est
+    // pas noté indexé est repris au démarrage suivant.
+    if let Some((job, _)) = job
+        && tokio::time::timeout(STOP_WAIT, job).await.is_err()
+    {
+        tracing::warn!(
+            "arrêt : l'indexation en cours n'a pas fini à temps, elle sera reprise au démarrage \
+             suivant"
+        );
     }
-    shared.rounds.send_replace(Round {
-        n: round + 1,
-        idle: false,
-        stopped: true,
-    });
+}
+
+/// Publie la fin de la boucle quand elle tombe, même sur une panique : qui attend l'arrêt
+/// ([`IndexerHandle::stop`], [`IndexerHandle::settled`]) n'attend jamais une boucle morte.
+struct Stopped(Arc<Shared>);
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        self.0.rounds.send_modify(|round| {
+            round.n += 1;
+            round.idle = false;
+            round.stopped = true;
+        });
+    }
+}
+
+/// Ce que devient la page en cours quand son travail finit (`giving_up` : c'était un
+/// renoncement). Rend le renoncement à lancer, s'il y en a un : la page reste alors la page en
+/// cours.
+fn finished(
+    shared: &Arc<Shared>,
+    done: Result<Outcome, tokio::task::JoinError>,
+    giving_up: bool,
+) -> Option<JoinHandle<Outcome>> {
+    let mut queues = shared.queues();
+    let page = queues.running?;
+    let why = match (done, giving_up) {
+        (Ok(Outcome::Done), _) => {
+            queues.running = None;
+            queues.retry.remove(&page);
+            return None;
+        }
+        // Même la page notée illisible, la base refuse, ou le renoncement a paniqué : la page
+        // sort de la mémoire. Restée en retard dans la base, elle est reprise au démarrage
+        // suivant, ou à sa prochaine écriture.
+        (_, true) => {
+            queues.running = None;
+            queues.retry.remove(&page);
+            tracing::error!(
+                %page,
+                "page impossible à indexer, et impossible à noter comme telle : abandonnée \
+                 jusqu'à sa prochaine écriture ou au prochain démarrage"
+            );
+            return None;
+        }
+        (Ok(Outcome::Retry { passing }), false) => {
+            let before = queues.retry.get(&page).copied();
+            let tries = before.map_or(0, |retry| retry.tries) + u32::from(!passing);
+            if tries < MAX_TRIES {
+                let delay =
+                    before.map_or(RETRY_FIRST, |retry| (retry.delay * 2).min(RETRY_AT_MOST));
+                queues.running = None;
+                queues.retry.insert(
+                    page,
+                    Retry {
+                        at: Instant::now() + delay,
+                        delay,
+                        tries,
+                    },
+                );
+                return None;
+            }
+            "la base a refusé son indexation à chaque essai"
+        }
+        (Err(_), false) => "son indexation a paniqué",
+    };
+    queues.retry.remove(&page);
+    Some(tokio::spawn(give_up(shared.clone(), page, why)))
 }
 
 /// Ce qui permet à un test de se tenir à l'intérieur d'une projection.

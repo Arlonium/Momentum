@@ -1081,9 +1081,12 @@ async fn startup_logs_the_backup_made_before_migrating() {
     expected.sort();
     assert_eq!(pages, expected);
 
-    // Au démarrage suivant, plus rien à migrer : rien à dire.
+    // Au démarrage suivant, plus rien à migrer : rien à dire. La première application est
+    // arrêtée d'abord : restée en vie, elle garderait son indexeur sur la base (lot 4).
+    drop(alice);
+    let (dir, cfg) = t.stop().await;
     let logs = Logs::capture();
-    let _router = mementum_server::app(&t.cfg).await.unwrap();
+    let _restarted = TestApp::on(dir, cfg).await;
     assert!(!logs.text().contains(".bak"), "{}", logs.text());
 }
 

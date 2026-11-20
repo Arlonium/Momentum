@@ -2024,9 +2024,11 @@ async fn patch_overtaken_at_every_attempt_answers_page_moved() {
     // Les reprises épuisées laissent une trace au-dessus de `debug` : une révision d'espace
     // qu'une écriture aurait oublié d'incrémenter se verrait exactement ainsi. Une ligne, qui
     // nomme la page, et rien de la personne ni de ce qu'elle envoyait.
+    // (Les avertissements de la route : l'indexeur du lot 4, qui tourne en fond sur le même fil,
+    // peut en écrire un quand la base lui refuse une écriture.)
     let warnings: Vec<&str> = journal
         .lines()
-        .filter(|line| line.contains(" WARN "))
+        .filter(|line| line.contains(" WARN ") && line.contains("page_moved"))
         .collect();
     assert_eq!(warnings.len(), 1, "journal : {journal}");
     let warning = warnings[0];

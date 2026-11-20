@@ -57,6 +57,8 @@ async fn listing_page_invitations_reads_titles_once() {
     exec_sql(&t.db_path(), &sql).await;
 
     let uri = format!("/api/v1/spaces/{}/invitations", team.space);
+    // L'indexeur (lot 4) lit aussi `nodes`, en fond : il est arrêté avant la lecture comptée.
+    t.indexer.stop().await;
     let start = logs.text().len();
     let reply = team.olga.browser.get(&uri).await;
     let journal = logs.text()[start..].to_string();

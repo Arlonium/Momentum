@@ -697,14 +697,118 @@ async fn the_indexer_stops_before_the_store_closes() {
         indexer.stopping()
     })
     .await;
+    // Un second arrêt, demandé pendant le premier, attend lui aussi l'indexation en vol.
+    let second = tokio::spawn({
+        let indexer = indexer.clone();
+        async move { indexer.stop().await }
+    });
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+    assert!(!second.is_finished(), "le second arrêt n'a pas attendu");
     drop(held);
     let (_dir, cfg) = stopping.await.unwrap();
+    second.await.unwrap();
     settling.await.unwrap();
     drop((store, indexer));
 
     let after = Store::open(&cfg.db_path()).await.unwrap();
     assert_eq!(texts(&after, page).await, ["À écrire avant de fermer"]);
     after.close().await;
+}
+
+/// Une page dont la relecture panique (un défaut de yrs devant un journal hostile) est essayée
+/// une fois : elle quitte l'index comme une page illisible, notée à son `seq`, c'est dit une fois
+/// en `error`, et l'indexeur passe à la suite (`settled` rend). Une page échouée n'est pas dite
+/// en retard : seule sa ligne d'outbox l'est, jusqu'à ce que l'index plein texte l'ait validée.
+#[tokio::test]
+async fn a_page_whose_reading_panics_is_tried_once_and_leaves_the_index() {
+    let logs = Logs::capture();
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let (page, other) = (
+        new_page(&olga, "Hostile").await,
+        new_page(&olga, "Saine").await,
+    );
+    write(&olga, page, "Lisible\n").await;
+    t.indexer.settled().await;
+    assert_eq!(texts(&t.store, page).await, ["Lisible"]);
+    let reads = t.indexer.reads();
+
+    t.indexer.panic_reading(page);
+    write(&olga, page, "Écrit avant la panique\n").await;
+    write(&olga, other, "La suite\n").await;
+    tokio::time::timeout(REAL_WAIT, t.indexer.settled())
+        .await
+        .expect("l'indexeur réessaie sans fin la page qui panique");
+    assert_eq!(t.indexer.reads(), reads + 2, "une relecture par page");
+    assert_eq!(texts(&t.store, other).await, ["La suite"]);
+    assert_eq!(texts(&t.store, page).await, Vec::<String>::new());
+    let seq = last_seq(&t, page).await;
+    assert_eq!(state(&t, page).await, Some((seq, Some(seq))));
+    let journal = logs.text();
+    let said = journal
+        .lines()
+        .filter(|line| line.contains("ERROR") && line.contains(&page.to_string()))
+        .count();
+    assert_eq!(said, 1, "{journal}");
+
+    exec_sql(&t.db_path(), "DELETE FROM search_outbox").await;
+    assert!(
+        !t.indexer.behind(olga.space, |_| true).await.unwrap(),
+        "une page échouée n'est pas en retard sans fin"
+    );
+}
+
+/// Tant que le démarrage n'est pas fini (la reprojection, puis le rattrapage), l'indexeur ne sait
+/// pas ce qui est en retard : `behind` répond « en retard », à tous. Ici la version gardée de la
+/// projection est illisible : le démarrage ne finit pas, et la réponse reste « en retard ».
+/// Témoin : la même instance, démarrage fini, répond « à jour ».
+#[tokio::test]
+async fn behind_says_late_until_the_startup_is_over() {
+    let logs = Logs::capture();
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let space = olga.space;
+    t.indexer.settled().await;
+    exec_sql(&t.db_path(), "DELETE FROM search_outbox").await;
+    assert!(!t.indexer.behind(space, |_| false).await.unwrap(), "témoin");
+    drop(olga);
+    let (dir, cfg) = t.stop().await;
+
+    exec_sql(
+        &cfg.db_path(),
+        "UPDATE instance_settings SET value = 'deux' WHERE key = 'search.projection'",
+    )
+    .await;
+    let t = TestApp::on(dir, cfg).await;
+    assert!(t.indexer.behind(space, |_| false).await.unwrap());
+    until(
+        "l'indexeur n'a pas lu la version de la projection",
+        async || logs.text().contains("version de la projection impossible"),
+    )
+    .await;
+    assert!(t.indexer.behind(space, |_| false).await.unwrap());
+}
+
+/// Ruling R983 : la base ne rend que les mille premières pages en retard d'un espace, sans les
+/// droits. Quand elle en rend autant sans qu'aucune soit vue, la réponse est « en retard » ;
+/// témoin : à 999, pour qui n'en voit aucune, elle est « à jour ».
+#[tokio::test]
+async fn behind_says_late_at_its_bound_whoever_looks() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    t.indexer.settled().await;
+    t.indexer.stop().await;
+    exec_sql(&t.db_path(), "DELETE FROM search_outbox").await;
+    let other = Store::open(&t.db_path()).await.unwrap();
+    for i in 0..999 {
+        stored(&other, olga.space, &format!("Page {i}"), None).await;
+    }
+    assert!(!t.indexer.behind(olga.space, |_| false).await.unwrap());
+    stored(&other, olga.space, "La millième", None).await;
+    other.close().await;
+    assert!(t.indexer.behind(olga.space, |_| false).await.unwrap());
 }
 
 // ---------------------------------------------------------------------------------------------

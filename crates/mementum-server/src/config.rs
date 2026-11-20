@@ -10,7 +10,7 @@
 //! | adresse publique | `MEMENTUM_PUBLIC_URL` | `--public-url` | aucune |
 //! | intervalle des versions d'une page, en secondes (1 au moins) | `MEMENTUM_VERSION_EVERY_SECS` | `--version-every-secs` | `600` |
 //! | taille la plus grande d'un fichier envoyé, en Mio (de 1 à 4 096) | `MEMENTUM_MAX_FILE_MB` | `--max-file-mb` | `100` |
-//! | calme attendu sur une page avant de l'indexer, en millisecondes (de 0 à 600 000) | `MEMENTUM_INDEX_AFTER_MS` | aucune | `2000` |
+//! | calme attendu sur une page avant de l'indexer, en millisecondes (de 0 à 15 000) | `MEMENTUM_INDEX_AFTER_MS` | aucune | `2000` |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
 //! l'emporte sur le défaut. Cinq derniers réglages n'ont ni variable ni
@@ -82,8 +82,10 @@ pub const MAX_MAX_FILE_MB: u64 = 4096;
 /// peuvent pas attendre deux secondes après chaque frappe.
 pub const INDEX_AFTER_MS_VAR: &str = "MEMENTUM_INDEX_AFTER_MS";
 
-/// Le plus long calme qu'on peut demander avant d'indexer une page, en millisecondes.
-pub const MAX_INDEX_AFTER_MS: u64 = 600_000;
+/// Le plus long calme qu'on peut demander avant d'indexer une page, en millisecondes : le plafond
+/// d'une page écrite sans relâche ([`INDEX_AT_MOST`](crate::INDEX_AT_MOST)). Au-delà, le calme
+/// ne serait jamais attendu, le plafond passant toujours avant lui.
+pub const MAX_INDEX_AFTER_MS: u64 = 15_000;
 
 /// Le délai au-delà duquel un envoi qui ne reçoit plus rien est abandonné (Ruling R247).
 pub const UPLOAD_IDLE: Duration = Duration::from_secs(30);
@@ -578,7 +580,11 @@ mod tests {
         let variable = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
         assert_eq!(variable.index_after, Duration::from_millis(50));
         assert_eq!(variable.index_at_most, Duration::from_secs(15));
-        for raw in ["bientôt", "-1", "600001", "1.5"] {
+        // Au-delà du plafond d'une page écrite sans relâche, le calme ne serait jamais attendu.
+        let pairs = [("MEMENTUM_INDEX_AFTER_MS", "15000")];
+        let most = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
+        assert_eq!(most.index_after, most.index_at_most);
+        for raw in ["bientôt", "-1", "15001", "1.5"] {
             let pairs = [("MEMENTUM_INDEX_AFTER_MS", raw)];
             let error = Config::resolve(None, None, None, None, None, None, vars(&pairs))
                 .unwrap_err()
