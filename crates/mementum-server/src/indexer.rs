@@ -376,6 +376,9 @@ struct Shared {
     commit_refusals: AtomicU64,
     close_refusals: AtomicU64,
     rebuilds: AtomicU64,
+    /// Le dernier passage clos, pour les mesures : ses lignes, ses entrées écrites, sa durée de
+    /// l'intention à la clôture.
+    last_feed: Mutex<Option<(usize, u64, Duration)>>,
     /// Les validations et les clôtures à refuser, pour les tests.
     refuse_commits: AtomicU32,
     refuse_closes: AtomicU32,
@@ -383,6 +386,10 @@ struct Shared {
     /// [`HALT_BEFORE_CLOSE`]), et s'il y est arrivé.
     halt: AtomicU8,
     halted: AtomicBool,
+    /// Plus aucun travail n'est commencé, pour les tests ([`IndexerHandle::freeze`]).
+    frozen: AtomicBool,
+    /// Les travaux commencés par la boucle (indexations, passages), pour les tests.
+    started: AtomicU64,
 }
 
 impl Shared {
@@ -480,10 +487,13 @@ fn with_text(store: Store, hub: Arc<Hub>, cfg: IndexerConfig, text: Option<Text>
         commit_refusals: AtomicU64::new(0),
         close_refusals: AtomicU64::new(0),
         rebuilds: AtomicU64::new(0),
+        last_feed: Mutex::default(),
         refuse_commits: AtomicU32::new(0),
         refuse_closes: AtomicU32::new(0),
         halt: AtomicU8::new(0),
         halted: AtomicBool::new(false),
+        frozen: AtomicBool::new(false),
+        started: AtomicU64::new(0),
         store,
         hub,
         cfg,
@@ -671,6 +681,17 @@ impl IndexerHandle {
         self.shared.rebuilds.load(Ordering::SeqCst)
     }
 
+    /// Le dernier passage clos de l'outbox à l'index plein texte : ses lignes, ses entrées
+    /// écrites, sa durée de l'intention à la clôture. Pour les mesures.
+    #[doc(hidden)]
+    pub fn last_feed(&self) -> Option<(usize, u64, Duration)> {
+        *self
+            .shared
+            .last_feed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Les `n` prochaines validations de l'index plein texte sont refusées, sans être tentées.
     /// Pour les tests : rien d'autre ne fait refuser une validation à la demande.
     #[doc(hidden)]
@@ -702,6 +723,31 @@ impl IndexerHandle {
     #[doc(hidden)]
     pub fn halted(&self) -> bool {
         self.shared.halted.load(Ordering::SeqCst)
+    }
+
+    /// Fige l'indexeur : plus aucune indexation ni aucun passage à l'index plein texte n'est
+    /// commencé (celui qui est en cours finit), et la recherche répond sur l'index tel qu'il
+    /// est, ce que [`IndexerHandle::stop`] ne permet pas (il lâche l'index). Tant qu'il reste du
+    /// travail, [`IndexerHandle::settled`] ne rend plus. Pour les tests : ce qu'une requête doit
+    /// tenir sans attendre l'indexeur (un droit retiré) se prouve ainsi.
+    #[doc(hidden)]
+    pub fn freeze(&self) {
+        self.shared.frozen.store(true, Ordering::SeqCst);
+    }
+
+    /// Les tours de la boucle depuis le lancement. Pour les tests : une barrière (la boucle a
+    /// tourné depuis tel événement), jamais une mesure.
+    #[doc(hidden)]
+    pub fn rounds(&self) -> u64 {
+        self.shared.rounds.borrow().n
+    }
+
+    /// Les travaux (indexations, passages à l'index plein texte) que la boucle a commencés
+    /// depuis le lancement, comptés avant que le tour qui les commence soit publié. Pour les
+    /// tests.
+    #[doc(hidden)]
+    pub fn jobs_started(&self) -> u64 {
+        self.shared.started.load(Ordering::SeqCst)
     }
 }
 
@@ -1085,6 +1131,7 @@ async fn feed_once(shared: Arc<Shared>) -> Fed {
 /// L'intention, la validation, la clôture (Ruling R909).
 async fn feed(shared: &Shared) -> anyhow::Result<Fed> {
     let index = ready_index(shared).await?;
+    let started = std::time::Instant::now();
     let limit = shared.feed_lines.load(Ordering::SeqCst);
     let feed = match shared.store.begin_feed(limit).await? {
         FeedStart::Nothing => return Ok(Fed::Nothing),
@@ -1155,6 +1202,11 @@ async fn feed(shared: &Shared) -> anyhow::Result<Fed> {
         return Err(error.context("clôture de l'intention"));
     }
     shared.searchable.store(true, Ordering::SeqCst);
+    *shared
+        .last_feed
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) =
+        Some((feed.lines.len(), written, started.elapsed()));
     Ok(Fed::Again)
 }
 
@@ -1338,7 +1390,7 @@ async fn run(shared: Arc<Shared>) {
         // Rien n'est commencé une fois l'arrêt demandé. Un travail à la fois : une indexation, ou
         // un passage de l'outbox à l'index plein texte. Le passage attend qu'aucune page ne soit
         // à indexer, [`FEED_AT_MOST`] au plus depuis qu'il est voulu (Ruling R1003).
-        if !busy && !shared.stopping() {
+        if !busy && !shared.stopping() && !shared.frozen.load(Ordering::SeqCst) {
             let now = Instant::now();
             let feed_due = feed_wanted && feed_retry.is_none_or(|(at, _)| at <= now);
             let overdue = feed_due && now >= *feed_since.get_or_insert(now) + FEED_AT_MOST;
@@ -1347,9 +1399,12 @@ async fn run(shared: Arc<Shared>) {
             } else {
                 shared.queues().next(now, &shared.cfg)
             };
+            // Compté avant que le tour soit publié : qui lit le tour sait ce qu'il a commencé.
             if let Some(page) = next {
+                shared.started.fetch_add(1, Ordering::SeqCst);
                 job = Some((tokio::spawn(index_one(shared.clone(), page)), false));
             } else if feed_due {
+                shared.started.fetch_add(1, Ordering::SeqCst);
                 feed_asks_at_start = feed_asks;
                 feeding = Some(tokio::spawn(feed_once(shared.clone())));
             }
@@ -1370,7 +1425,8 @@ async fn run(shared: Arc<Shared>) {
             tokio::task::yield_now().await;
             continue;
         }
-        let wake_at = if busy {
+        // Figé, rien de dû n'est commencé : seul un événement réveille la boucle.
+        let wake_at = if busy || shared.frozen.load(Ordering::SeqCst) {
             None
         } else {
             let due = shared.queues().next_wake(&shared.cfg);

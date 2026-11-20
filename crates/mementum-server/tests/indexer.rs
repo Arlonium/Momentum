@@ -1110,6 +1110,48 @@ async fn a_refused_commit_undoes_the_intent_and_is_tried_again() {
     );
 }
 
+/// `IndexerHandle::freeze` : l'indexeur figé ne commence plus rien, et la recherche répond sur
+/// l'index tel qu'il est (ce que `stop` ne permet pas : il lâche l'index). C'est ce qui prouve
+/// qu'une requête tient un droit retiré sans attendre l'indexeur (Review Focus 2, Task S5).
+/// Barrière, sans minutage : après le renommage, la boucle a tourné deux fois au moins (`settled`
+/// l'y force), et le passage qu'elle aurait lancé n'a pas eu lieu.
+#[tokio::test]
+async fn a_frozen_indexer_starts_nothing_and_searches_still_answer() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Titre figé").await;
+    t.indexer.settled().await;
+    let (intents, started) = (t.indexer.intents(), t.indexer.jobs_started());
+
+    t.indexer.freeze();
+    t.store
+        .rename_node(page, "Titre récent", None)
+        .await
+        .unwrap();
+    let rounds = t.indexer.rounds();
+    let settling = tokio::spawn({
+        let indexer = t.indexer.clone();
+        async move { indexer.settled().await }
+    });
+    until(
+        "la boucle n'a pas tourné depuis le renommage",
+        async || t.indexer.rounds() >= rounds + 2,
+    )
+    .await;
+    // Compté avant que le tour soit publié : un passage lancé dans un de ces tours se verrait.
+    assert_eq!(
+        t.indexer.jobs_started(),
+        started,
+        "aucun travail n'est commencé"
+    );
+    assert_eq!(t.indexer.intents(), intents);
+    assert_eq!(found(&t, "figé", &[page]).len(), 1, "l'index tel qu'il est");
+    assert!(found(&t, "récent", &[page]).is_empty());
+    assert!(outbox(&t).await > 0, "le renommage attend");
+    assert!(!settling.is_finished());
+    settling.abort();
+}
+
 // ---------------------------------------------------------------------------------------------
 // Mesures (`#[ignore]`, en release, une à la fois : `cargo test --release -p mementum-server
 // --test indexer -- --ignored --nocapture --test-threads=1`). Aucune n'est un critère de refus :
@@ -1415,4 +1457,181 @@ async fn keystroke_seen_while_10000_pages_are_first_indexed() {
         rank(&mut after, 95),
         rank(&mut after, 100),
     );
+}
+
+/// Les octets d'un dossier, sous-dossiers compris.
+fn dir_bytes(dir: &std::path::Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|entry| match entry.file_type() {
+            Ok(kind) if kind.is_dir() => dir_bytes(&entry.path()),
+            _ => std::fs::metadata(entry.path()).map_or(0, |meta| meta.len()),
+        })
+        .sum()
+}
+
+/// Les octets d'une base fermée : son fichier, son journal, l'index de son journal.
+fn database_bytes(db: &std::path::Path) -> u64 {
+    ["", "-wal", "-shm"]
+        .iter()
+        .map(|suffix| {
+            let mut name = db.file_name().unwrap().to_os_string();
+            name.push(suffix);
+            std::fs::metadata(db.with_file_name(name)).map_or(0, |meta| meta.len())
+        })
+        .sum()
+}
+
+/// Task S4c, Step 3 : un passage de l'outbox à l'index plein texte, de l'intention à la clôture
+/// (`IndexerHandle::last_feed`) : celui d'un bloc tapé dans une page de 10 000 blocs (une ligne,
+/// une entrée, R919), et celui de la même page renommée (une ligne de page entière, toutes ses
+/// entrées récrites, R902). La première validation de la page est dite aussi.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure, en release"]
+async fn measure_a_feed_of_one_block_and_of_a_renamed_10000_block_page() {
+    let _alone = ALONE.lock().await;
+    const BLOCKS: usize = 10_000;
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        cfg.index_after = Duration::ZERO;
+    })
+    .await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Grande page").await;
+    let session = olga.browser.session();
+    t.indexer.settled().await;
+    drop(olga);
+    let (dir, cfg) = t.stop().await;
+    // Ses 10 000 blocs, écrits serveur arrêté par un autre `Store` (`PUT /mmd` y mettrait des
+    // minutes, R259) : le rattrapage du démarrage la trouve.
+    let other = Store::open(&cfg.db_path()).await.unwrap();
+    let (doc, _) = mementum_sync::stored_page(&other, page)
+        .await
+        .unwrap()
+        .unwrap();
+    let update = doc
+        .write_blocks(&parse(&paragraphs(BLOCKS, "plan")).unwrap())
+        .unwrap();
+    other.append_updates(page, &[&update], None).await.unwrap();
+    other.close().await;
+
+    let start = std::time::Instant::now();
+    let t = TestApp::on(dir, cfg).await;
+    t.indexer.settled().await;
+    println!(
+        "MESURE première validation d'une page de {BLOCKS} blocs : {:?} du démarrage au repos \
+         (relue, projetée, écrite, puis {} entrées en {} intentions)",
+        start.elapsed(),
+        t.indexer.entries_written(),
+        t.indexer.intents(),
+    );
+
+    let browser = t.browser();
+    browser.set_session(session.as_deref());
+    let addr = t.listen().await;
+    let client = synced_as(&browser, &sync_url(addr, page)).await;
+    for pass in 1..=3 {
+        let before = t.indexer.entries_written();
+        let start = std::time::Instant::now();
+        types(&client, "mot ").await;
+        t.indexer.settled().await;
+        let whole = start.elapsed();
+        let (lines, entries, took) = t.indexer.last_feed().unwrap();
+        println!(
+            "MESURE passage d'un bloc tapé dans une page de {BLOCKS} blocs (essai {pass}) : \
+             {lines} ligne, {entries} entrée, {took:?} de l'intention à la clôture ; de la frappe \
+             au repos {whole:?}, sans calme attendu ({} entrée écrite en tout)",
+            t.indexer.entries_written() - before,
+        );
+    }
+    for pass in 1..=3 {
+        let before = t.indexer.entries_written();
+        let start = std::time::Instant::now();
+        t.store
+            .rename_node(page, &format!("Grande page renommée {pass}"), None)
+            .await
+            .unwrap();
+        t.indexer.settled().await;
+        let whole = start.elapsed();
+        let (lines, entries, took) = t.indexer.last_feed().unwrap();
+        println!(
+            "MESURE passage d'une page de {BLOCKS} blocs renommée (essai {pass}) : {lines} ligne, \
+             {entries} entrées, {took:?} de l'intention à la clôture ; du renommage au repos \
+             {whole:?} ({} entrées écrites en tout)",
+            t.indexer.entries_written() - before,
+        );
+    }
+    drop((client, browser));
+    t.stop().await;
+}
+
+/// Task S4c, Step 3 : la base et le dossier de l'index pour 10 000 pages (décision L18, R931),
+/// avant et après la première indexation, et le démarrage sur cet index (les jetons comparés,
+/// rien d'attendu d'autre ; le rattrapage, qui relit l'état de chaque page, est dit à part). Une
+/// seule instance pour les deux mesures : la remplir est ce qui coûte.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "mesure, en release"]
+async fn measure_database_and_index_size_and_startup_for_10000_pages() {
+    let _alone = ALONE.lock().await;
+    const PAGES: usize = 10_000;
+    const BLOCKS: usize = 10;
+    let t = default_app().await;
+    let olga = t.account("Olga").await;
+    let space = olga.space;
+    t.indexer.settled().await;
+    drop(olga);
+    let (dir, cfg) = t.stop().await;
+    let other = Store::open(&cfg.db_path()).await.unwrap();
+    let doc = state_of(&paragraphs(BLOCKS, "rattrapage"));
+    for i in 0..PAGES {
+        stored(&other, space, &format!("Page {i}"), Some(doc.clone())).await;
+    }
+    other.close().await;
+    let (db, search) = (cfg.db_path(), cfg.data_dir.join("search"));
+    let before = database_bytes(&db);
+
+    let start = std::time::Instant::now();
+    let t = TestApp::on(dir, cfg).await;
+    t.indexer.settled().await;
+    let indexed_in = start.elapsed();
+    let (entries, intents) = (t.indexer.entries_written(), t.indexer.intents());
+    let text = query_i64(
+        &t.db_path(),
+        "SELECT SUM(LENGTH(CAST(text AS BLOB))) FROM blocks_index",
+    )
+    .await;
+    let titles = query_i64(
+        &t.db_path(),
+        "SELECT SUM(LENGTH(CAST(title AS BLOB))) FROM nodes WHERE kind = 'page'",
+    )
+    .await;
+    let (dir, cfg) = t.stop().await;
+    let (after, index) = (database_bytes(&db), dir_bytes(&search));
+    println!(
+        "MESURE {PAGES} pages de {BLOCKS} blocs ({text} octets de texte projeté, {titles} de \
+         titres) : base {before} octets avant l'indexation, {after} après ; dossier search/ \
+         {index} octets à l'arrêt (fusions en cours ou non) ; première indexation et validation \
+         {indexed_in:?} ({entries} entrées, {intents} intentions)"
+    );
+
+    let start = std::time::Instant::now();
+    let t = TestApp::on(dir, cfg).await;
+    let started = start.elapsed();
+    until("le démarrage ne finit pas", async || {
+        !t.indexer.behind(space, |_| false).await.unwrap()
+    })
+    .await;
+    let caught_up = start.elapsed();
+    println!(
+        "MESURE démarrage sur un index de {PAGES} pages : `start` rend en {started:?} (base et \
+         index ouverts) ; jetons comparés et rattrapage finis {caught_up:?} après le début ; \
+         {} reconstruction, {} page relue, dossier search/ {} octets",
+        t.indexer.rebuilds(),
+        t.indexer.reads(),
+        dir_bytes(&search),
+    );
+    t.stop().await;
 }
