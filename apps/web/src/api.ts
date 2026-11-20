@@ -58,6 +58,8 @@ import type {
   PageNode,
   PendingInvitation,
   ResolveThread,
+  SearchRequest,
+  SearchResults,
   SetGeneral,
   SetLevel,
   SignUp,
@@ -481,11 +483,22 @@ async function send(
 /**
  * Ce que dit un appel `method path` resté sans réponse du serveur : une lecture, que le serveur ne
  * répond pas ; une écriture, qu'elle a peut-être été faite (R757). Se connecter et se déconnecter ne
- * laissent rien qu'on referait à tort : le serveur ne répond pas.
+ * laissent rien qu'on referait à tort : le serveur ne répond pas. Un `POST` qui ne fait que lire
+ * (`READING_POSTS`) se dit comme une lecture.
  */
 function silence(method: string, path: string): string {
-  return method === "GET" || path === LOGIN || path === LOGOUT ? UNREACHABLE : MAYBE_DONE;
+  if (method === "GET" || path === LOGIN || path === LOGOUT) return UNREACHABLE;
+  if (method === "POST" && READING_POSTS.some((reading) => reading.test(path))) return UNREACHABLE;
+  return MAYBE_DONE;
 }
+
+/**
+ * Les `POST` qui ne font que lire, par leur chemin : leur corps porte ce qui ne doit pas voyager
+ * dans une adresse (la recherche, R917), et le serveur n'écrit rien pour eux. Une réponse perdue y
+ * dit « le serveur ne répond pas », jamais « ce que tu as demandé a peut-être été fait » (R757).
+ * Une route n'entre ici que si elle n'écrit rien, dans aucun cas.
+ */
+const READING_POSTS: readonly RegExp[] = [/^\/api\/v1\/spaces\/[^/]+\/search$/];
 
 /** `GET /api/v1/me` : le compte de la session et ses espaces ; sans session, `401`. */
 export async function getMe(): Promise<Me> {
@@ -884,6 +897,34 @@ export function getFavorites(spaceId: string): Promise<Favorites> {
  */
 export function setFavorite(pageId: string, on: boolean): Promise<void> {
   return call(on ? "PUT" : "DELETE", `${page(pageId)}/favorite`);
+}
+
+// Recherche (lot 4, R914, R917) : dans un espace, les pages que le compte y voit, hors corbeille,
+// trouvées par leur titre ou par le texte d'un de leurs blocs.
+
+/**
+ * `POST /api/v1/spaces/{id}/search` : un `POST` qui ne fait que lire (`READING_POSTS`). La recherche
+ * part dans le corps, **jamais dans l'adresse** (le journal d'accès d'un mandataire la garderait,
+ * R917) ; `after` : le nombre de pages déjà demandées (20, 40, 60, 80). Vingt pages au plus par
+ * réponse, sans total ; aucune réponse calculée n'arrive avant 50 ms (R932). Refus : `404` (plus
+ * aucun rôle dans l'espace), `422 invalid_query` (plus de 200 caractères ou de 8 mots, `after` à
+ * 100 ou plus : le message se montre tel quel), `429 search_busy` : la réponse d'une recherche
+ * qu'une plus récente du compte a remplacée, à jeter comme une réponse en retard, jamais à rejouer
+ * (R910). `signal` abandonne la requête, sans rien libérer côté serveur.
+ */
+export async function searchSpace(
+  spaceId: string,
+  body: SearchRequest,
+  signal?: AbortSignal,
+): Promise<SearchResults> {
+  const res = await send("POST", `${space(spaceId)}/search`, body, signal);
+  try {
+    return (await res.json()) as SearchResults;
+  } catch (e) {
+    if (signal?.aborted) throw e;
+    // Connexion coupée pendant le corps.
+    throw new ApiError(0, null, UNREACHABLE);
+  }
 }
 
 // Dupliquer une page (R252) : la page et ses sous-pages que le compte voit, hors corbeille, dans

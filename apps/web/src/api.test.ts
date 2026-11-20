@@ -1475,3 +1475,95 @@ test("a_lost_answer_to_a_write_says_it_may_have_been_done_and_to_a_read_that_the
     "La réponse du serveur n'est pas arrivée : la page a peut-être été créée. Regarde dans la barre latérale avant de réessayer.",
   );
 });
+
+// La recherche (lot 4, Task C1) : un `POST` qui ne fait que lire (R917). La recherche est dans le
+// corps, jamais dans l'adresse ; une réponse perdue se dit comme celle d'une lecture (R757).
+
+const HITS = { results: [], more: false, indexing: false };
+
+test("the_query_is_never_put_in_an_address", async () => {
+  await loadedAs("alice");
+  const WORD = "témoin-secret";
+  const first = api.searchSpace("s1", { q: `${WORD} & co ?` });
+  const call = await waiting("POST", "/api/v1/spaces/s1/search");
+  // L'adresse ne porte que l'espace ; la recherche part dans le corps, telle quelle.
+  expect(call.path).toBe("/api/v1/spaces/s1/search");
+  expect(call.body).toEqual({ q: `${WORD} & co ?` });
+  expect(call.type).toBe("application/json");
+  expect(call.account).toBe("alice");
+  call.answer(200, HITS);
+  await expect(first).resolves.toEqual(HITS);
+  // La suite d'une recherche : `after` dans le corps aussi.
+  const next = api.searchSpace("s1", { q: WORD, after: 20 });
+  const second = await waiting("POST", "/api/v1/spaces/s1/search");
+  expect(second.body).toEqual({ q: WORD, after: 20 });
+  second.answer(200, HITS);
+  await next;
+  // Aucune adresse appelée, aucune fois, ne porte le mot.
+  for (const received of log()) expect(received).not.toContain("moin");
+  // Un espace au nom étrange est échappé dans le chemin.
+  void api.searchSpace("a/b?c", { q: WORD }).catch(() => {});
+  await waiting("POST", "/api/v1/spaces/a%2Fb%3Fc/search");
+});
+
+test("a_lost_answer_of_a_search_is_said_as_a_reading", async () => {
+  await loadedAs("alice");
+  const SILENT = "Le serveur Mementum ne répond pas. Vérifie qu'il est lancé, puis réessaie.";
+  const failed = async (call: Promise<unknown>) =>
+    call.then(
+      () => null,
+      (error: unknown) => error as InstanceType<typeof api.ApiError>,
+    );
+  // Coupée en route, rendue par un mandataire sans corps de l'API, ou le corps perdu après les
+  // en-têtes : le serveur ne répond pas, et rien n'« a peut-être été fait ».
+  const ways: ((call: Received) => void)[] = [
+    (c) => c.fail(),
+    (c) => c.answerLostBody(502),
+    (c) => c.answerLostBody(504),
+    (c) => c.answerLostBody(200),
+  ];
+  for (const way of ways) {
+    const searching = failed(api.searchSpace("s1", { q: "chat" }));
+    way(await waiting("POST", "/api/v1/spaces/s1/search"));
+    const error = (await searching)!;
+    expect(error.message).toBe(SILENT);
+    expect(error.message).not.toContain("peut-être");
+  }
+  // Témoin : une écriture perdue de la même façon dit toujours le doute, et un autre `POST` d'un
+  // espace n'est pas pris pour une lecture.
+  const creating = failed(api.createPage({ spaceId: "s1", section: "space" }));
+  (await waiting("POST", "/api/v1/pages")).fail();
+  expect((await creating)!.message).toContain("peut-être été fait");
+  const inviting = failed(api.inviteToSpace("s1", { email: "bruno@exemple.fr", role: "member" }));
+  (await waiting("POST", "/api/v1/spaces/s1/invitations")).fail();
+  expect((await inviting)!.message).toContain("peut-être été fait");
+  // Un refus du serveur est rendu tel qu'il le dit.
+  const refused = failed(api.searchSpace("s1", { q: "chat" }));
+  (await waiting("POST", "/api/v1/spaces/s1/search")).answer(422, {
+    error: "invalid_query",
+    message: "ta recherche est trop longue",
+  });
+  expect(await refused).toMatchObject({ status: 422, code: "invalid_query", message: "ta recherche est trop longue" });
+});
+
+test("a_search_without_session_asks_to_log_in_and_a_late_refusal_sends_it_again", async () => {
+  await loadedAs("alice");
+  // Sous la session en cours : la connexion est demandée, la recherche ne repart pas d'elle-même.
+  const lost = api.searchSpace("s1", { q: "chat" });
+  (await waiting("POST", "/api/v1/spaces/s1/search")).answer(401, UNAUTHENTICATED);
+  await expect(lost).rejects.toMatchObject({ code: "unauthenticated" });
+  await flush();
+  expect(asked).toBe(1);
+  expect(count("POST", "/api/v1/spaces/s1/search")).toBe(1);
+  // Partie avant une session rouverte, refusée après : elle repart une fois, comme une lecture.
+  const late = api.searchSpace("s1", { q: "chien" });
+  const first = await waiting("POST", "/api/v1/spaces/s1/search");
+  await logIn("alice");
+  first.answer(401, UNAUTHENTICATED);
+  (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
+  const again = await waiting("POST", "/api/v1/spaces/s1/search");
+  expect(again.body).toEqual({ q: "chien" });
+  again.answer(200, HITS);
+  await expect(late).resolves.toEqual(HITS);
+  expect(asked).toBe(1);
+});
