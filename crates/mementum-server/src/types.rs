@@ -72,6 +72,33 @@ pub struct Favorites {
     pub pages: Vec<String>,
 }
 
+/// Les pages qui mènent à une page (`GET /api/v1/pages/{id}/backlinks`, lot 4, Task S6) :
+/// seulement celles que le compte voit, de l'espace de la page, hors corbeille, dans l'ordre de
+/// leurs identifiants, deux cents au plus. Rien ne dit s'il y en a d'autres, ni combien.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Backlinks {
+    pub pages: Vec<Backlink>,
+}
+
+/// Une page qui mène à une autre, par un lien de page, une mention de page ou un lien du texte
+/// vers son adresse ([`Backlinks`]). Son titre se lit dans l'arbre de l'espace ([`Tree`]), qui
+/// montre les mêmes pages.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct Backlink {
+    pub page_id: String,
+    /// Le premier de ses blocs qui y mène, dans l'ordre des identifiants de bloc (pas l'ordre du
+    /// document) : un identifiant écrit par un client, une chaîne quelconque de cent octets au
+    /// plus, à ne mettre dans une adresse qu'échappée. `null` : le bloc n'a pas d'identifiant qui
+    /// puisse servir (absent, répété dans la page, trop long), et ne se rejoint pas.
+    pub block_id: Option<String>,
+    /// Le texte de ce bloc, tel que la recherche l'indexe, coupé à 240 caractères (points de code,
+    /// pas unités UTF-16), sans marque de coupe : du texte, jamais du HTML. Pour un lien de page,
+    /// le titre qu'il a copié ; il peut être vide.
+    pub excerpt: String,
+}
+
 /// Un fichier envoyé dans une page (`POST /api/v1/pages/{id}/files`, Rulings R245 à R247) : une
 /// attache de la page, qui nomme un contenu gardé sous son SHA-256.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -934,6 +961,8 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<Accepted>(&cfg),
         file::<AccessEntry>(&cfg),
         file::<Author>(&cfg),
+        file::<Backlink>(&cfg),
+        file::<Backlinks>(&cfg),
         file::<ChangePassword>(&cfg),
         file::<Comment>(&cfg),
         file::<CopyFile>(&cfg),

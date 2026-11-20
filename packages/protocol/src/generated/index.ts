@@ -4,6 +4,8 @@
 export type { Accepted } from "./Accepted";
 export type { AccessEntry } from "./AccessEntry";
 export type { Author } from "./Author";
+export type { Backlink } from "./Backlink";
+export type { Backlinks } from "./Backlinks";
 export type { ChangePassword } from "./ChangePassword";
 export type { Comment } from "./Comment";
 export type { CopyFile } from "./CopyFile";
