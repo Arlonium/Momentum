@@ -1464,6 +1464,7 @@ dependencies = [
  "mementum-md",
  "mementum-schema",
  "mementum-search",
+ "mementum-server",
  "mementum-store",
  "mementum-sync",
  "serde",
