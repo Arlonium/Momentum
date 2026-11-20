@@ -105,6 +105,25 @@ async fn last_seq(t: &TestApp, page: Uuid) -> i64 {
     query_i64(&t.db_path(), &sql).await
 }
 
+/// Ce que l'index plein texte rend pour ces mots, parmi `pages` seulement : la page, le bloc
+/// trouvé (aucun pour un titre), l'extrait.
+fn found(t: &TestApp, words: &str, pages: &[Uuid]) -> Vec<(Uuid, Option<String>, String)> {
+    let query = mementum_search::read_query(words).expect("une requête lisible");
+    let allowed: mementum_search::PageSet = pages.iter().copied().collect();
+    t.indexer
+        .search(&query, &allowed, 0, 20)
+        .unwrap()
+        .pages
+        .into_iter()
+        .map(|hit| (hit.node_id, hit.block_id, hit.excerpt))
+        .collect()
+}
+
+/// Les lignes de l'outbox, tous états confondus.
+async fn outbox(t: &TestApp) -> i64 {
+    query_i64(&t.db_path(), "SELECT COUNT(*) FROM search_outbox").await
+}
+
 /// L'état Yjs d'une page qui porte `mmd`.
 fn state_of(mmd: &str) -> Vec<u8> {
     let (page, _) = PageDoc::new_page();
@@ -472,9 +491,14 @@ async fn a_database_indexed_under_another_projection_version_is_indexed_again() 
         t.store.projection_version().await.unwrap(),
         Some(mementum_search::PROJECTION_VERSION)
     );
-    let whole =
-        format!("SELECT COUNT(*) FROM search_outbox WHERE node_id = '{page}' AND block_id = ''");
-    assert_eq!(query_i64(&t.db_path(), &whole).await, 1);
+    // Sa ligne de page entière a fait récrire ses entrées de l'index plein texte (Task S4c) :
+    // il a été nourri de nouveau, et l'outbox est close.
+    assert!(
+        t.indexer.intents() >= 1,
+        "aucun passage à l'index plein texte"
+    );
+    assert_eq!(found(&t, "texte", &[page]).len(), 1);
+    assert_eq!(outbox(&t).await, 0);
 }
 
 /// Ruling R906 : une page écrite sans relâche (jamais deux secondes de calme) est indexée quand
@@ -605,14 +629,45 @@ async fn a_keystroke_in_a_large_page_writes_one_row() {
     );
     let first = &texts(&t.store, page).await[0];
     assert_eq!(first, "Ligne 0000 et un mot");
-    let lines =
-        format!("SELECT COUNT(*) FROM search_outbox WHERE node_id = '{page}' AND block_id != ''");
-    assert_eq!(query_i64(&t.db_path(), &lines).await, BLOCKS as i64);
+}
+
+/// Ruling R919 : une frappe dans une grande page ne récrit qu'une entrée de l'index plein texte.
+/// Les écritures d'entrées sont comptées ; témoin : la première indexation en écrit une par bloc.
+#[tokio::test]
+async fn a_keystroke_in_a_large_page_rewrites_one_entry() {
+    const BLOCKS: usize = 1_000;
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Grande page").await;
+    t.indexer.settled().await;
+    let before = t.indexer.entries_written();
+    let lines: Vec<String> = (0..BLOCKS).map(|i| format!("Ligne {i:04}")).collect();
+    write(&olga, page, &format!("{}\n", lines.join("\n\n"))).await;
+    t.indexer.settled().await;
+    assert_eq!(
+        t.indexer.entries_written() - before,
+        BLOCKS as u64,
+        "témoin : la première indexation écrit une entrée par bloc"
+    );
+
+    let addr = t.listen().await;
+    let client = synced_as(&olga.browser, &sync_url(addr, page)).await;
+    let before = t.indexer.entries_written();
+    types(&client, " et un mot").await;
+    t.indexer.settled().await;
+    assert_eq!(
+        t.indexer.entries_written() - before,
+        1,
+        "une entrée pour une frappe"
+    );
+    let hits = found(&t, "mot", &[page]);
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].2, "Ligne 0000 et un mot");
 }
 
 /// Ce que l'indexeur sait en retard (Ruling R915) : une page écrite qui attend son calme est dite
-/// en retard à qui la voit, et à lui seul ; à jour, elle ne l'est plus. (L'outbox est vidée à la
-/// main : rien ne la clôt avant la Task S4c.)
+/// en retard à qui la voit, et à lui seul ; à jour (indexée, et ses lignes validées dans l'index
+/// plein texte), elle ne l'est plus.
 #[tokio::test]
 async fn behind_tells_a_seen_page_is_late_and_nothing_of_an_unseen_one() {
     let t = default_app().await;
@@ -621,7 +676,6 @@ async fn behind_tells_a_seen_page_is_late_and_nothing_of_an_unseen_one() {
     let addr = t.listen().await;
     let client = synced_as(&olga.browser, &sync_url(addr, page)).await;
     t.indexer.settled().await;
-    exec_sql(&t.db_path(), "DELETE FROM search_outbox").await;
     let behind = async |seen: bool| {
         t.indexer
             .behind(olga.space, |id| seen && id == page)
@@ -639,11 +693,11 @@ async fn behind_tells_a_seen_page_is_late_and_nothing_of_an_unseen_one() {
     assert!(!behind(false).await, "rien d'une page qu'on ne voit pas");
     tokio::time::advance(Duration::from_millis(2_100)).await;
     until("la page indexée est encore dite en retard", async || {
-        exec_sql(&t.db_path(), "DELETE FROM search_outbox").await;
         !behind(true).await
     })
     .await;
     assert_eq!(texts(&t.store, page).await, ["un"]);
+    assert_eq!(found(&t, "un", &[page]).len(), 1);
 }
 
 /// À l'arrêt, l'indexeur finit l'indexation en cours avant que la base ferme : une écriture de
@@ -753,7 +807,6 @@ async fn a_page_whose_reading_panics_is_tried_once_and_leaves_the_index() {
         .count();
     assert_eq!(said, 1, "{journal}");
 
-    exec_sql(&t.db_path(), "DELETE FROM search_outbox").await;
     assert!(
         !t.indexer.behind(olga.space, |_| true).await.unwrap(),
         "une page échouée n'est pas en retard sans fin"
@@ -771,7 +824,6 @@ async fn behind_says_late_until_the_startup_is_over() {
     let olga = t.account("Olga").await;
     let space = olga.space;
     t.indexer.settled().await;
-    exec_sql(&t.db_path(), "DELETE FROM search_outbox").await;
     assert!(!t.indexer.behind(space, |_| false).await.unwrap(), "témoin");
     drop(olga);
     let (dir, cfg) = t.stop().await;
@@ -800,7 +852,6 @@ async fn behind_says_late_at_its_bound_whoever_looks() {
     let olga = t.account("Olga").await;
     t.indexer.settled().await;
     t.indexer.stop().await;
-    exec_sql(&t.db_path(), "DELETE FROM search_outbox").await;
     let other = Store::open(&t.db_path()).await.unwrap();
     for i in 0..999 {
         stored(&other, olga.space, &format!("Page {i}"), None).await;
@@ -809,6 +860,254 @@ async fn behind_says_late_at_its_bound_whoever_looks() {
     stored(&other, olga.space, "La millième", None).await;
     other.close().await;
     assert!(t.indexer.behind(olga.space, |_| false).await.unwrap());
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task S4c : l'index plein texte, nourri depuis la base par intention, validation, clôture
+// (Rulings R909, R919). Les arrêts et les séparations de la base et de l'index sont dans
+// `tests/index_recovery.rs`.
+// ---------------------------------------------------------------------------------------------
+
+/// Un mot tapé dans une page devient trouvable, avec son bloc et son extrait, et le titre d'une
+/// page l'est dès sa création. Rien n'est rendu hors de l'ensemble de pages donné. Une fois
+/// l'indexeur au repos, l'outbox est vide, l'intention close, et le jeton de la base est celui
+/// d'une validation. Témoin : avant la frappe, le mot ne trouve rien.
+#[tokio::test]
+async fn a_typed_word_becomes_findable() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Carnet").await;
+    t.indexer.settled().await;
+    assert!(found(&t, "bonjour", &[page]).is_empty(), "témoin");
+    assert_eq!(
+        found(&t, "carnet", &[page]),
+        [(page, None, String::new())],
+        "le titre d'une page créée"
+    );
+
+    let addr = t.listen().await;
+    let client = synced_as(&olga.browser, &sync_url(addr, page)).await;
+    types(&client, "bonjour tout le monde").await;
+    t.indexer.settled().await;
+    let hits = found(&t, "bonjour", &[page]);
+    assert_eq!(hits.len(), 1, "{hits:?}");
+    assert_eq!(hits[0].0, page);
+    assert!(hits[0].1.is_some(), "le bloc trouvé");
+    assert_eq!(hits[0].2, "bonjour tout le monde");
+    assert!(
+        found(&t, "bonjour", &[]).is_empty(),
+        "hors des pages permises"
+    );
+    assert!(found(&t, "bonjour", &[Uuid::now_v7()]).is_empty());
+
+    assert_eq!(outbox(&t).await, 0, "l'outbox est close");
+    let tokens = t.store.feed_tokens().await.unwrap();
+    assert!(tokens.committed.is_some(), "aucune validation close");
+    assert_eq!(tokens.intent, None);
+}
+
+/// Ruling R902 : le titre est sur chaque entrée de sa page. Renommée, la page est trouvée par son
+/// nouveau titre et plus par l'ancien, seul comme avec un mot d'un de ses blocs, et toutes ses
+/// entrées ont été récrites (comptées). Témoin : avant, l'ancien titre la trouve.
+#[tokio::test]
+async fn a_rename_is_found_by_the_new_title_and_no_longer_by_the_old() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Ancien intitulé").await;
+    write(&olga, page, "Alpha\n\nBravo\n\nCharlie\n").await;
+    t.indexer.settled().await;
+    assert_eq!(found(&t, "ancien", &[page]).len(), 1, "témoin");
+    let with_block = found(&t, "ancien bravo", &[page]);
+    assert_eq!(with_block.len(), 1, "témoin : {with_block:?}");
+    assert_eq!(with_block[0].2, "Bravo");
+
+    let before = t.indexer.entries_written();
+    olga.patched(&page.to_string(), json!({ "title": "Nouveau nom" }))
+        .await;
+    t.indexer.settled().await;
+    assert!(found(&t, "ancien", &[page]).is_empty());
+    assert!(found(&t, "ancien bravo", &[page]).is_empty());
+    assert_eq!(found(&t, "nouveau", &[page]).len(), 1);
+    let with_block = found(&t, "nouveau bravo", &[page]);
+    assert_eq!(with_block.len(), 1, "{with_block:?}");
+    assert_eq!(with_block[0].2, "Bravo");
+    assert_eq!(
+        t.indexer.entries_written() - before,
+        4,
+        "l'entrée de titre et celle de chaque bloc"
+    );
+    assert_eq!(outbox(&t).await, 0);
+}
+
+/// Une page supprimée pour de bon quitte l'index plein texte, par la ligne d'outbox de page
+/// entière que sa suppression pose (Ruling R918), qui survit à la page. Témoin : à la corbeille,
+/// elle y est encore (décision L4 : c'est la requête qui écarte la corbeille, pas l'index).
+#[tokio::test]
+async fn a_deleted_page_leaves_the_text_index() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Éphémère").await;
+    write(&olga, page, "Un contenu voué à partir\n").await;
+    t.indexer.settled().await;
+    assert_eq!(found(&t, "voué", &[page]).len(), 1);
+
+    t.store.trash_node(page, olga.id).await.unwrap();
+    t.indexer.settled().await;
+    assert_eq!(found(&t, "voué", &[page]).len(), 1, "témoin : la corbeille");
+    assert_eq!(found(&t, "éphémère", &[page]).len(), 1);
+
+    t.store.delete_node(page).await.unwrap();
+    t.indexer.settled().await;
+    assert!(found(&t, "voué", &[page]).is_empty());
+    assert!(found(&t, "éphémère", &[page]).is_empty());
+    assert_eq!(outbox(&t).await, 0);
+}
+
+/// Une page qu'on ne sait plus relire quitte l'index plein texte : plus aucun résultat ni
+/// extrait d'elle, ni par son texte ni par son titre, par la ligne d'outbox de page entière que
+/// pose `Store::index_failed`. Témoin : elle était trouvée.
+#[tokio::test]
+async fn a_page_that_can_no_longer_be_read_leaves_the_text_index() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Abîmée").await;
+    write(&olga, page, "Encore lisible\n").await;
+    t.indexer.settled().await;
+    assert_eq!(found(&t, "lisible", &[page]).len(), 1, "témoin");
+    assert_eq!(found(&t, "abîmée", &[page]).len(), 1, "témoin");
+    drop(olga);
+    let (dir, cfg) = t.stop().await;
+
+    // Son état gardé devient illisible, et son `seq` avance.
+    let seq = {
+        let sql = format!(
+            "SELECT MAX(COALESCE((SELECT MAX(seq) FROM doc_updates WHERE node_id = '{page}'), 0), \
+                        COALESCE((SELECT seq FROM doc_snapshots WHERE node_id = '{page}'), 0))"
+        );
+        query_i64(&cfg.db_path(), &sql).await + 1
+    };
+    exec_sql(
+        &cfg.db_path(),
+        &format!(
+            "DELETE FROM doc_updates WHERE node_id = '{page}'; \
+             INSERT OR REPLACE INTO doc_snapshots (node_id, seq, state_blob, created_at) \
+             VALUES ('{page}', {seq}, x'FFFFFFFFFFFFFFFFFFFF', 0)"
+        ),
+    )
+    .await;
+
+    let t = TestApp::on(dir, cfg).await;
+    t.indexer.settled().await;
+    assert_eq!(state(&t, page).await, Some((seq, Some(seq))));
+    assert!(found(&t, "lisible", &[page]).is_empty());
+    assert!(found(&t, "abîmée", &[page]).is_empty());
+    assert_eq!(outbox(&t).await, 0);
+    assert_eq!(t.indexer.rebuilds(), 0, "l'index était celui de la base");
+}
+
+/// Une clôture refusée sans que le processus s'arrête (plan, « L'intention, la validation, la
+/// clôture ») : l'index a validé, la base tient encore l'intention. Aucune intention neuve ne
+/// commence ; le passage suivant rejoue celle-là sous le même jeton, puis clôt. Le mot écrit
+/// pendant le refus est trouvé après, par l'intention qui suit. Les intentions sont comptées.
+#[tokio::test]
+async fn a_refused_close_is_replayed_and_closed_again_without_a_restart() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Notes").await;
+    t.indexer.settled().await;
+    let intents = t.indexer.intents();
+
+    // Une clôture refusée, puis plus rien n'est écrit : la même intention est rejouée et close.
+    t.indexer.refuse_closes(1);
+    write(&olga, page, "Premier jet\n").await;
+    until("la clôture n'a pas été refusée", async || {
+        t.indexer.close_refusals() == 1
+    })
+    .await;
+    // Le jeton refusé : encore l'intention posée, ou déjà clos si le nouvel essai est passé.
+    let posed = t.store.feed_tokens().await.unwrap();
+    let refused = posed.intent.or(posed.committed);
+    t.indexer.settled().await;
+    assert_eq!(found(&t, "premier", &[page]).len(), 1);
+    let closed = t.store.feed_tokens().await.unwrap();
+    assert_eq!(closed.intent, None);
+    assert_eq!(
+        closed.committed, refused,
+        "c'est le jeton refusé qui est clos"
+    );
+    assert_eq!(
+        t.indexer.intents(),
+        intents + 1,
+        "aucune intention neuve : celle qui était posée est rejouée"
+    );
+    assert_eq!(outbox(&t).await, 0);
+
+    // Une clôture refusée, puis un mot écrit pendant le refus : sa ligne perd son jeton, attend
+    // l'intention suivante, et il est trouvé après.
+    t.indexer.refuse_closes(1);
+    write(&olga, page, "Second jet\n").await;
+    until("la seconde clôture n'a pas été refusée", async || {
+        t.indexer.close_refusals() == 2
+    })
+    .await;
+    write(&olga, page, "Troisième jet\n").await;
+    t.indexer.settled().await;
+    assert!(found(&t, "premier", &[page]).is_empty());
+    assert!(found(&t, "second", &[page]).is_empty());
+    assert_eq!(found(&t, "troisième", &[page]).len(), 1);
+    assert_eq!(t.store.feed_tokens().await.unwrap().intent, None);
+    assert_eq!(
+        t.indexer.intents(),
+        intents + 3,
+        "l'intention du second jet, rejouée, puis celle du troisième"
+    );
+    assert_eq!(t.indexer.close_refusals(), 2);
+    assert_eq!(outbox(&t).await, 0);
+    assert_eq!(t.indexer.rebuilds(), 0);
+}
+
+/// Une validation de l'index plein texte refusée défait l'intention, et le passage est tenté de
+/// nouveau, sur un index rouvert : le mot est trouvé, par une seconde intention.
+#[tokio::test]
+async fn a_refused_commit_undoes_the_intent_and_is_tried_again() {
+    let t = quick_app().await;
+    let olga = t.account("Olga").await;
+    let page = new_page(&olga, "Notes").await;
+    write(&olga, page, "Avant le refus\n").await;
+    t.indexer.settled().await;
+    let (intents, committed) = (
+        t.indexer.intents(),
+        t.store.feed_tokens().await.unwrap().committed,
+    );
+
+    t.indexer.refuse_commits(1);
+    write(&olga, page, "Texte à valider\n").await;
+    until("la validation n'a pas été refusée", async || {
+        t.indexer.commit_refusals() == 1
+    })
+    .await;
+    assert_eq!(
+        t.store.feed_tokens().await.unwrap().committed,
+        committed,
+        "rien n'est clos par une validation refusée"
+    );
+    t.indexer.settled().await;
+    assert_eq!(found(&t, "valider", &[page]).len(), 1);
+    assert!(found(&t, "refus", &[page]).is_empty());
+    assert_eq!(
+        t.indexer.intents(),
+        intents + 2,
+        "l'intention défaite, puis une neuve"
+    );
+    let tokens = t.store.feed_tokens().await.unwrap();
+    assert_eq!(tokens.intent, None);
+    assert_ne!(tokens.committed, committed);
+    assert_eq!(outbox(&t).await, 0);
+    assert_eq!(
+        t.indexer.rebuilds(),
+        0,
+        "l'index rouvert est celui de la base"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------

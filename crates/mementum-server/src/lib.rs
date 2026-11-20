@@ -556,8 +556,12 @@ async fn build(cfg: &Config) -> anyhow::Result<Started> {
              soit le réglage des inscriptions ; le créer avant d'exposer le serveur"
         );
     }
-    // L'indexeur de la recherche, en fond : son rattrapage n'est pas attendu (le démarrage à
-    // froid ne le paie pas).
+    // L'index plein texte (`<données>/search/`) est ouvert ici : un dossier qu'un autre processus
+    // tient, ou qui porte autre chose qu'un index, arrête le démarrage. Ses jetons sont comparés à
+    // ceux de la base par l'indexeur, en fond (Ruling R1000).
+    let text = indexer::open_text(&cfg.data_dir).await?;
+    // L'indexeur de la recherche, en fond : ni son rattrapage ni une reconstruction de l'index
+    // ne sont attendus (le démarrage à froid ne les paie pas).
     let indexer = indexer::spawn(
         store.clone(),
         hub.clone(),
@@ -566,6 +570,7 @@ async fn build(cfg: &Config) -> anyhow::Result<Started> {
             at_most: cfg.index_at_most,
             origin: public_origin.as_deref().map(Arc::from),
         },
+        text,
     );
     let state = AppState {
         store: store.clone(),

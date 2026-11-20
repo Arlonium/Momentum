@@ -1,7 +1,25 @@
-//! L'indexeur (lot 4, Task S4b ; plan du lot, « Quand ») : une tâche de fond qui tient
-//! `blocks_index`, `page_links` et `search_state` à jour, sans jamais rien coûter à une frappe.
-//! L'index plein texte n'est pas encore nourri : c'est la Task S4c, qui lira l'outbox que les
-//! écritures d'ici remplissent.
+//! L'indexeur (lot 4, Tasks S4b et S4c ; plan du lot, « Quand ») : une tâche de fond qui tient
+//! `blocks_index`, `page_links` et `search_state` à jour, puis l'index plein texte, sans jamais
+//! rien coûter à une frappe.
+//!
+//! **L'index plein texte** (`<données>/search/`, Task S4c) est nourri depuis la base, jamais
+//! depuis les documents (Ruling R901) : chaque écriture de la projection laisse une ligne
+//! d'outbox par bloc changé (R919), un titre, une création, une suppression ou un échec de
+//! lecture une ligne de page entière (R918). Un passage ([`feed`]) se fait en trois temps (R909) :
+//! l'**intention** ([`Store::begin_feed`] : un jeton, donné aux lignes prises) ; la
+//! **validation** (chaque ligne retirée de l'index puis récrite d'après `blocks_index` et
+//! `nodes`, et validée avec le jeton pour charge utile) ; la **clôture**
+//! ([`Store::finish_feed`]). Une validation refusée lâche l'index et le rouvre : seul le jeton
+//! relu dit si elle a eu lieu. Une clôture refusée laisse l'intention posée : aucune autre ne
+//! commence, et le passage suivant **rejoue** ses lignes sous le même jeton, puis clôt. Une
+//! intention posée que l'index n'a pas validée est défaite.
+//!
+//! **L'index et la base, comparés** ([`reconcile`]) à l'ouverture, au démarrage comme après une
+//! réouverture : le jeton de l'index est celui de la dernière validation close (en ordre), ou
+//! celui de l'intention posée (elle est rejouée, jamais tenue pour faite), ou tout autre : l'index
+//! est alors vidé, et toutes les pages passent à l'outbox ([`Store::outbox_everything`]). Tant
+//! que ce n'est pas fait, rien n'est cherché ([`IndexerHandle::search`] ne rend rien) et tout
+//! est dit en retard.
 //!
 //! **Ce qui met une page à l'ordre du jour.**
 //! - Le contenu écrit par un acteur : le hub nomme la page ([`Hub::take_touched`]). Elle attend
@@ -46,12 +64,16 @@
 //! relire (Ruling R860) retient les pages de toute l'instance le temps de sa relecture.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
-use mementum_search::{PROJECTION_VERSION, project};
-use mementum_store::{IndexedBlock, Store, StoreError};
+use anyhow::Context as _;
+use mementum_search::{
+    Found, IndexError, Opened, PROJECTION_VERSION, PageSet, Query, SearchIndex, project,
+};
+use mementum_store::{FeedLine, FeedStart, IndexRow, IndexedBlock, Store, StoreError};
 use mementum_sync::{Hub, SyncError, stored_page};
 use tokio::sync::broadcast::error::{RecvError, TryRecvError};
 use tokio::sync::{Notify, watch};
@@ -87,6 +109,75 @@ const MAX_TRIES: u32 = 5;
 /// la base, est reprise par le rattrapage du démarrage suivant.
 pub const STOP_WAIT: Duration = Duration::from_secs(10);
 
+/// Le dossier de l'index plein texte, dans le dossier des données, à côté de `files/`. Il ne
+/// porte rien d'autre que l'index (Ruling R990).
+pub(crate) const SEARCH_DIR: &str = "search";
+
+/// Lignes de l'outbox prises par une intention, au plus (Ruling R1003). Une ligne de page entière
+/// récrit toutes les entrées de sa page : un passage n'est pas borné en entrées.
+const FEED_LINES: usize = 1_000;
+
+/// Tant que des pages sont à indexer, un passage de l'outbox à l'index plein texte attend qu'il
+/// n'y en ait plus, mais pas plus longtemps que cela (Ruling R1003) : la première indexation
+/// d'une instance ne valide pas l'index à chaque page, et ne le laisse pas vide jusqu'à sa fin.
+const FEED_AT_MOST: Duration = Duration::from_secs(1);
+
+/// Ce qu'un index lâché attend au plus des recherches en cours qui le tiennent encore.
+const RELEASE_WAIT: Duration = Duration::from_secs(5);
+
+/// Ce que le démarrage attend au plus d'un index encore tenu dans ce processus (une application
+/// lâchée juste avant, dont l'indexeur n'a pas fini de s'arrêter), avant de le dire occupé.
+const BUSY_WAIT: Duration = Duration::from_secs(2);
+
+/// Les points où un test arrête l'indexeur, comme un processus tué là.
+const HALT_BEFORE_COMMIT: u8 = 1;
+const HALT_BEFORE_CLOSE: u8 = 2;
+
+/// L'index plein texte ouvert au démarrage, et son dossier.
+pub(crate) struct Text {
+    dir: PathBuf,
+    opened: Opened,
+}
+
+/// Ouvre l'index plein texte du dossier des données, créé s'il manque. Un dossier illisible ou
+/// d'une autre forme est vidé par [`SearchIndex::open`] ; un dossier qui porte autre chose qu'un
+/// index, ou qu'un autre processus tient, arrête le démarrage sans que rien y soit touché.
+pub(crate) async fn open_text(data_dir: &Path) -> anyhow::Result<Text> {
+    let dir = data_dir.join(SEARCH_DIR);
+    let deadline = std::time::Instant::now() + BUSY_WAIT;
+    loop {
+        let at = dir.clone();
+        let opened = tokio::task::spawn_blocking(move || SearchIndex::open(&at))
+            .await
+            .context("ouverture de l'index de recherche")?;
+        match opened {
+            Ok(opened) => return Ok(Text { dir, opened }),
+            Err(IndexError::Busy) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(error) => {
+                return Err(anyhow::Error::new(error).context(format!(
+                    "impossible d'ouvrir l'index de recherche {}",
+                    dir.display()
+                )));
+            }
+        }
+    }
+}
+
+/// L'index plein texte, tel que l'indexeur le tient. Verrouillé brièvement, jamais à travers une
+/// attente.
+#[derive(Default)]
+struct TextIndex {
+    /// Son dossier ; `None` : une poignée sans index ([`not_running`]).
+    dir: Option<PathBuf>,
+    /// L'index ouvert ; `None` : lâché après une erreur, à rouvrir, ou jamais ouvert.
+    index: Option<Arc<SearchIndex>>,
+    /// Le jeton de sa dernière validation, lu à l'ouverture puis tenu à chaque validation.
+    token: Option<String>,
+    /// Ce jeton a été comparé à ceux de la base ([`reconcile`]) depuis l'ouverture.
+    reconciled: bool,
+}
 /// Les réglages de l'indexeur.
 #[derive(Debug, Clone)]
 pub(crate) struct IndexerConfig {
@@ -239,7 +330,8 @@ impl Queues {
 #[derive(Debug, Clone, Copy, Default)]
 struct Round {
     n: u64,
-    /// Plus rien à projeter : ni page en attente, ni marqueur à lire, ni rattrapage en cours.
+    /// Plus rien à projeter ni à valider : ni page en attente, ni marqueur à lire, ni rattrapage
+    /// en cours, ni ligne d'outbox à passer à l'index plein texte, ni intention posée.
     idle: bool,
     /// La boucle a fini.
     stopped: bool,
@@ -265,6 +357,32 @@ struct Shared {
     reads: AtomicU64,
     /// Les pages dont la relecture panique, pour les tests ([`IndexerHandle::panic_reading`]).
     panics: Mutex<HashSet<Uuid>>,
+    /// L'index plein texte.
+    text: Mutex<TextIndex>,
+    /// L'index plein texte peut être cherché : son jeton est celui de la dernière validation
+    /// close, ou il vient d'être vidé, ou une intention rejouée vient d'être close. Faux de
+    /// l'ouverture à la comparaison des jetons, et tant qu'une intention retrouvée validée n'est
+    /// pas rejouée : l'index pourrait porter un texte que la base n'a pas.
+    searchable: AtomicBool,
+    /// Une reconstruction a vidé l'index et n'a pas fini de passer toutes les pages à l'outbox :
+    /// rien ne dit encore lesquelles sont en retard.
+    rebuilding: AtomicBool,
+    /// Lignes de l'outbox prises par intention ([`FEED_LINES`] ; réglable pour les tests).
+    feed_lines: AtomicUsize,
+    /// Compteurs, pour les tests : entrées écrites dans l'index plein texte, intentions posées,
+    /// validations refusées, clôtures refusées, reconstructions lancées.
+    puts: AtomicU64,
+    intents: AtomicU64,
+    commit_refusals: AtomicU64,
+    close_refusals: AtomicU64,
+    rebuilds: AtomicU64,
+    /// Les validations et les clôtures à refuser, pour les tests.
+    refuse_commits: AtomicU32,
+    refuse_closes: AtomicU32,
+    /// Le point où l'indexeur s'arrête, pour les tests ([`HALT_BEFORE_COMMIT`],
+    /// [`HALT_BEFORE_CLOSE`]), et s'il y est arrivé.
+    halt: AtomicU8,
+    halted: AtomicBool,
 }
 
 impl Shared {
@@ -272,9 +390,42 @@ impl Shared {
         self.queues.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    fn text(&self) -> MutexGuard<'_, TextIndex> {
+        self.text.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn stopping(&self) -> bool {
         self.stopping.load(Ordering::SeqCst)
     }
+
+    /// L'index plein texte ne dit pas encore ce que la base porte : il n'est pas comparé, pas
+    /// rejoué, ou sa reconstruction n'a pas encore nommé toutes les pages.
+    fn text_unsure(&self) -> bool {
+        let has_text = self.text().dir.is_some();
+        has_text
+            && (self.rebuilding.load(Ordering::SeqCst) || !self.searchable.load(Ordering::SeqCst))
+    }
+
+    /// Vrai si l'indexeur doit s'arrêter ici, à la demande d'un test.
+    fn halts_at(&self, point: u8) -> bool {
+        let here = self.halt.load(Ordering::SeqCst) == point;
+        if here {
+            self.halted.store(true, Ordering::SeqCst);
+        }
+        here
+    }
+}
+
+/// Prend un des refus demandés par un test, s'il en reste.
+fn take_refusal(left: &AtomicU32) -> bool {
+    let mut n = left.load(Ordering::SeqCst);
+    while n > 0 {
+        match left.compare_exchange(n, n - 1, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return true,
+            Err(now) => n = now,
+        }
+    }
+    false
 }
 
 /// Tant qu'une poignée vit, l'indexeur tourne ; la dernière lâchée, il s'arrête.
@@ -295,8 +446,8 @@ pub struct IndexerHandle {
 }
 
 /// Lance l'indexeur sur le moteur courant : une tâche de fond, qui commence par son rattrapage.
-pub(crate) fn spawn(store: Store, hub: Arc<Hub>, cfg: IndexerConfig) -> IndexerHandle {
-    let handle = not_running(store, hub, cfg);
+pub(crate) fn spawn(store: Store, hub: Arc<Hub>, cfg: IndexerConfig, text: Text) -> IndexerHandle {
+    let handle = with_text(store, hub, cfg, Some(text));
     handle.shared.starting.store(true, Ordering::SeqCst);
     handle.shared.spawned.store(true, Ordering::SeqCst);
     // La tâche n'est pas gardée : sa fin se lit dans les tours qu'elle publie (`Round::stopped`).
@@ -306,8 +457,33 @@ pub(crate) fn spawn(store: Store, hub: Arc<Hub>, cfg: IndexerConfig) -> IndexerH
 
 /// Une poignée sans tâche de fond : rien n'est indexé. Pour les tests des routes, qui montent un
 /// état sans serveur ; [`IndexerHandle::behind`] y répond d'après la base seule.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn not_running(store: Store, hub: Arc<Hub>, cfg: IndexerConfig) -> IndexerHandle {
+    with_text(store, hub, cfg, None)
+}
+
+/// Une poignée sans tâche de fond, avec ou sans index plein texte.
+fn with_text(store: Store, hub: Arc<Hub>, cfg: IndexerConfig, text: Option<Text>) -> IndexerHandle {
+    let text = text.map_or_else(TextIndex::default, |text| TextIndex {
+        dir: Some(text.dir),
+        index: Some(Arc::new(text.opened.index)),
+        token: text.opened.token,
+        reconciled: false,
+    });
     let shared = Arc::new(Shared {
+        text: Mutex::new(text),
+        searchable: AtomicBool::new(false),
+        rebuilding: AtomicBool::new(false),
+        feed_lines: AtomicUsize::new(FEED_LINES),
+        puts: AtomicU64::new(0),
+        intents: AtomicU64::new(0),
+        commit_refusals: AtomicU64::new(0),
+        close_refusals: AtomicU64::new(0),
+        rebuilds: AtomicU64::new(0),
+        refuse_commits: AtomicU32::new(0),
+        refuse_closes: AtomicU32::new(0),
+        halt: AtomicU8::new(0),
+        halted: AtomicBool::new(false),
         store,
         hub,
         cfg,
@@ -350,7 +526,7 @@ impl IndexerHandle {
         space_id: Uuid,
         seen: impl Fn(Uuid) -> bool,
     ) -> Result<bool, StoreError> {
-        if self.shared.starting.load(Ordering::SeqCst) {
+        if self.shared.starting.load(Ordering::SeqCst) || self.shared.text_unsure() {
             return Ok(true);
         }
         if self.shared.queues().any(&seen) {
@@ -364,9 +540,34 @@ impl IndexerHandle {
         Ok(late.len() >= BEHIND_LIMIT || late.into_iter().any(seen))
     }
 
-    /// Rend quand l'indexeur n'a plus rien à projeter de ce qui était écrit à l'appel : pages
-    /// écrites (leur calme passé), pages jamais indexées, rattrapage. Pour les tests ; rend aussi
-    /// si l'indexeur est arrêté, ou n'a jamais été lancé.
+    /// Cherche dans l'index plein texte, parmi les pages de `allowed` seulement
+    /// ([`SearchIndex::search`]) : c'est l'appelant qui bâtit cet ensemble, des droits du compte,
+    /// à chaque requête (Rulings R921, R927). Un calcul, à mener sur le fil bloquant.
+    ///
+    /// Rien n'est rendu tant que l'index n'a pas été comparé à la base, ni pendant qu'une
+    /// intention retrouvée validée est rejouée, ni par une poignée sans index : l'index pourrait
+    /// porter un texte que la base n'a pas (Review Focus 5). [`IndexerHandle::behind`] dit alors
+    /// « en retard ». Pendant une reconstruction, seul ce qui est déjà reconstruit est trouvé.
+    pub fn search(
+        &self,
+        query: &Query,
+        allowed: &PageSet,
+        skip: usize,
+        limit: usize,
+    ) -> Result<Found, IndexError> {
+        if !self.shared.searchable.load(Ordering::SeqCst) {
+            return Ok(Found::default());
+        }
+        let Some(index) = self.shared.text().index.clone() else {
+            return Ok(Found::default());
+        };
+        index.search(query, allowed, skip, limit)
+    }
+
+    /// Rend quand l'indexeur n'a plus rien à projeter ni à valider de ce qui était écrit à
+    /// l'appel : pages écrites (leur calme passé), pages jamais indexées, rattrapage, lignes
+    /// d'outbox passées à l'index plein texte et closes. Pour les tests ; rend aussi si
+    /// l'indexeur est arrêté, ou n'a jamais été lancé.
     #[doc(hidden)]
     pub async fn settled(&self) {
         if !self.shared.spawned.load(Ordering::SeqCst) {
@@ -437,6 +638,70 @@ impl IndexerHandle {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .insert(page);
+    }
+
+    /// Entrées écrites dans l'index plein texte depuis le lancement. Pour les tests.
+    #[doc(hidden)]
+    pub fn entries_written(&self) -> u64 {
+        self.shared.puts.load(Ordering::SeqCst)
+    }
+
+    /// Intentions posées depuis le lancement (une intention rejouée n'en est pas une neuve). Pour
+    /// les tests.
+    #[doc(hidden)]
+    pub fn intents(&self) -> u64 {
+        self.shared.intents.load(Ordering::SeqCst)
+    }
+
+    /// Validations de l'index plein texte refusées depuis le lancement. Pour les tests.
+    #[doc(hidden)]
+    pub fn commit_refusals(&self) -> u64 {
+        self.shared.commit_refusals.load(Ordering::SeqCst)
+    }
+
+    /// Clôtures refusées depuis le lancement. Pour les tests.
+    #[doc(hidden)]
+    pub fn close_refusals(&self) -> u64 {
+        self.shared.close_refusals.load(Ordering::SeqCst)
+    }
+
+    /// Reconstructions de l'index plein texte lancées depuis le lancement. Pour les tests.
+    #[doc(hidden)]
+    pub fn rebuilds(&self) -> u64 {
+        self.shared.rebuilds.load(Ordering::SeqCst)
+    }
+
+    /// Les `n` prochaines validations de l'index plein texte sont refusées, sans être tentées.
+    /// Pour les tests : rien d'autre ne fait refuser une validation à la demande.
+    #[doc(hidden)]
+    pub fn refuse_commits(&self, n: u32) {
+        self.shared.refuse_commits.store(n, Ordering::SeqCst);
+    }
+
+    /// Les `n` prochaines clôtures sont refusées, sans être tentées. Pour les tests.
+    #[doc(hidden)]
+    pub fn refuse_closes(&self, n: u32) {
+        self.shared.refuse_closes.store(n, Ordering::SeqCst);
+    }
+
+    /// L'indexeur s'arrêtera, comme un processus tué là, entre l'intention et la validation de
+    /// son prochain passage : rien n'est validé dans l'index plein texte. Pour les tests.
+    #[doc(hidden)]
+    pub fn halt_before_the_commit(&self) {
+        self.shared.halt.store(HALT_BEFORE_COMMIT, Ordering::SeqCst);
+    }
+
+    /// L'indexeur s'arrêtera, comme un processus tué là, entre la validation et la clôture de
+    /// son prochain passage. Pour les tests.
+    #[doc(hidden)]
+    pub fn halt_before_the_close(&self) {
+        self.shared.halt.store(HALT_BEFORE_CLOSE, Ordering::SeqCst);
+    }
+
+    /// L'indexeur s'est arrêté au point demandé. Pour les tests.
+    #[doc(hidden)]
+    pub fn halted(&self) -> bool {
+        self.shared.halted.load(Ordering::SeqCst)
     }
 }
 
@@ -569,6 +834,330 @@ async fn unreadable(
     Ok(mementum_store::Indexed { changed: 0 })
 }
 
+/// Ce qu'est devenu un passage de l'outbox à l'index plein texte.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Fed {
+    /// Rien n'attend l'index plein texte, et aucune intention n'est posée.
+    Nothing,
+    /// Une intention a été close, ou défaite : il peut rester des lignes.
+    Again,
+    /// Refusé (la base, l'index) : nouvel essai plus tard, l'intention restée telle quelle.
+    Retry,
+    /// Arrêté au point nommé par un test.
+    Halted,
+}
+
+/// Mène une fonction de l'index sur le fil bloquant : écrire dans le moteur, valider, ouvrir et
+/// vider un dossier dépendent d'un contenu ou du disque (Ruling R863).
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T, IndexError> + Send + 'static,
+) -> anyhow::Result<T> {
+    Ok(tokio::task::spawn_blocking(work)
+        .await
+        .context("une tâche de l'index de recherche a paniqué")??)
+}
+
+/// Attend que plus personne d'autre ne tienne l'index (une recherche en cours), [`RELEASE_WAIT`]
+/// au plus, et le rend ; `None` s'il est encore tenu : il sera lâché par qui le tient. Bloquant.
+fn sole_owner(mut index: Arc<SearchIndex>) -> Option<SearchIndex> {
+    let deadline = std::time::Instant::now() + RELEASE_WAIT;
+    loop {
+        match Arc::try_unwrap(index) {
+            Ok(index) => return Some(index),
+            Err(_) if std::time::Instant::now() >= deadline => return None,
+            Err(held) => {
+                index = held;
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
+/// Lâche l'index plein texte : après une erreur d'écriture ou de validation, il ne se réutilise
+/// pas (Ruling R992), et à l'arrêt, plus aucun fichier de son dossier ne doit rester tenu. Rien
+/// n'est cherché jusqu'à ce qu'il soit rouvert et comparé à la base.
+async fn release(shared: &Shared) {
+    shared.searchable.store(false, Ordering::SeqCst);
+    let_go(shared).await;
+}
+
+/// Lâche l'index sans rien dire de ce qu'il valait : à l'arrêt, [`IndexerHandle::behind`] répond
+/// encore d'après la base, et plus rien n'est cherché faute d'index.
+async fn let_go(shared: &Shared) {
+    let held = {
+        let mut text = shared.text();
+        text.token = None;
+        text.reconciled = false;
+        text.index.take()
+    };
+    if let Some(index) = held {
+        // Lâché sur le fil bloquant : l'écrivain du moteur joint ses fils en partant.
+        let _ = tokio::task::spawn_blocking(move || drop(sole_owner(index))).await;
+    }
+}
+
+/// L'index plein texte, ouvert et comparé à la base : rouvert s'il a été lâché, puis ses jetons
+/// comparés ([`reconcile`]) si ce n'est pas fait depuis son ouverture.
+async fn ready_index(shared: &Shared) -> anyhow::Result<Arc<SearchIndex>> {
+    // Sans tenir l'index d'ici là : une reconstruction doit en être seule propriétaire.
+    let (lacking, dir) = {
+        let text = shared.text();
+        (text.index.is_none(), text.dir.clone())
+    };
+    if lacking {
+        let dir = dir.context("aucun index de recherche n'est ouvert")?;
+        let opened = blocking(move || SearchIndex::open(&dir)).await?;
+        let mut text = shared.text();
+        text.index = Some(Arc::new(opened.index));
+        text.token = opened.token;
+        text.reconciled = false;
+    }
+    if !shared.text().reconciled {
+        reconcile(shared).await?;
+    }
+    shared
+        .text()
+        .index
+        .clone()
+        .context("aucun index de recherche n'est ouvert")
+}
+
+/// Compare le jeton de l'index plein texte aux deux jetons de la base (Ruling R909 ; plan du lot,
+/// « L'intention, la validation, la clôture ») :
+/// - celui de la dernière validation close : en ordre. Une intention restée posée n'a jamais été
+///   validée ; le passage suivant la défait ([`feed`]) ;
+/// - celui de l'intention posée : un arrêt entre la validation et la clôture, ou une copie de la
+///   base prise entre les deux puis remise en place. Le passage suivant **rejoue** ses lignes
+///   depuis la base, et rien n'est cherché d'ici là ;
+/// - tout autre jeton, ou aucun (un index neuf, ou que [`SearchIndex::open`] a vidé) : la base et
+///   l'index ne vont pas ensemble. L'index est vidé, l'intention posée défaite (Ruling R978),
+///   et toutes les pages passent à l'outbox, par tranches ; aucun passage ne commence avant la
+///   dernière tranche, si bien qu'un arrêt en route laisse un index sans jeton, que le démarrage
+///   suivant reconstruit de même.
+async fn reconcile(shared: &Shared) -> anyhow::Result<()> {
+    let tokens = shared.store.feed_tokens().await?;
+    let token = shared.text().token.clone();
+    if token.is_some() && token == tokens.committed {
+        shared.searchable.store(true, Ordering::SeqCst);
+    } else if token.is_some() && token == tokens.intent {
+        // Validée, pas close : rejouée par le prochain passage, qui rendra l'index cherchable.
+    } else {
+        // Une instance neuve (ni jeton dans l'index, ni validation close) passe par ici aussi,
+        // sans le dire : ses pages d'avant ce lot n'ont pas de ligne de page entière.
+        if token.is_some() || tokens.committed.is_some() {
+            shared.rebuilds.fetch_add(1, Ordering::SeqCst);
+            tracing::info!(
+                "l'index de recherche n'est pas celui de cette base (base restaurée, dossier \
+                 d'une autre instance, index perdu ou d'une autre forme) : il est reconstruit, \
+                 en fond"
+            );
+        }
+        rebuild(shared, token.is_some()).await?;
+    }
+    shared.text().reconciled = true;
+    Ok(())
+}
+
+/// Reconstruit l'index plein texte : vidé (`wipe` : il porte des entrées), l'intention posée
+/// défaite, puis toutes les pages à l'outbox. Les passages suivants le remplissent.
+async fn rebuild(shared: &Shared, wipe: bool) -> anyhow::Result<()> {
+    shared.rebuilding.store(true, Ordering::SeqCst);
+    if wipe {
+        shared.searchable.store(false, Ordering::SeqCst);
+        let (held, dir) = {
+            let mut text = shared.text();
+            text.token = None;
+            (text.index.take(), text.dir.clone())
+        };
+        let dir = dir.context("aucun index de recherche n'est ouvert")?;
+        let opened = blocking(move || {
+            if let Some(index) = held {
+                // Fermé avant d'être vidé : un fichier qu'une fusion tient ne se supprime pas
+                // sous Windows.
+                sole_owner(index).ok_or(IndexError::Busy)?.close()?;
+            }
+            SearchIndex::reset(&dir)
+        })
+        .await?;
+        let mut text = shared.text();
+        text.index = Some(Arc::new(opened.index));
+        text.token = None;
+    }
+    // Un index vide ne montre rien que la base n'a pas.
+    shared.searchable.store(true, Ordering::SeqCst);
+    shared.store.undo_feed().await?;
+    let mut after = None;
+    loop {
+        anyhow::ensure!(!shared.stopping(), "arrêt pendant la reconstruction");
+        match shared.store.outbox_everything(after, BATCH).await? {
+            Some(next) => after = Some(next),
+            None => break,
+        }
+    }
+    shared.rebuilding.store(false, Ordering::SeqCst);
+    Ok(())
+}
+
+/// Passe des lignes de l'outbox à l'index plein texte, sans valider : chaque entrée nommée est
+/// retirée, puis récrite d'après `blocks_index` et `nodes` si elle existe encore. Rend le nombre
+/// d'entrées écrites.
+///
+/// Une ligne de page entière récrit **toutes** les entrées de la page, son titre étant sur
+/// chacune (Ruling R902) ; une page supprimée, ou dont la lecture a échoué, n'en garde aucune
+/// ([`Store::indexed_title`]). Une ligne de bloc ne récrit que son entrée (Ruling R919). Un bloc
+/// au texte vide n'a pas d'entrée. Les clés et les textes viennent de `blocks_index`, donc de la
+/// projection, qui les borne : rien d'autre n'est donné à [`SearchIndex::put_entry`].
+///
+/// `lines` est rangé par page, la ligne de page entière en tête ([`Store::begin_feed`]). Une page
+/// à la fois : ses lignes lues, écrites sur le fil bloquant, puis lâchées.
+pub(crate) async fn write_lines(
+    store: &Store,
+    index: &Arc<SearchIndex>,
+    lines: &[FeedLine],
+) -> anyhow::Result<u64> {
+    let mut written = 0;
+    let mut at = 0;
+    while at < lines.len() {
+        let node = lines[at].node_id;
+        let end = at + lines[at..].iter().take_while(|l| l.node_id == node).count();
+        let page = &lines[at..end];
+        at = end;
+        let title = store.indexed_title(node).await?;
+        let whole = page.iter().any(|line| line.block_id.is_none());
+        let mut rows: Vec<IndexRow> = Vec::new();
+        let mut blocks: Vec<String> = Vec::new();
+        if whole {
+            if title.is_some() {
+                rows = store.indexed_blocks(node).await?;
+            }
+        } else {
+            for block in page.iter().filter_map(|line| line.block_id.as_ref()) {
+                if title.is_some()
+                    && let Some(row) = store.indexed_block(node, block).await?
+                {
+                    rows.push(row);
+                }
+                blocks.push(block.clone());
+            }
+        }
+        let index = index.clone();
+        written += blocking(move || {
+            if whole {
+                index.remove_page(node)?;
+            }
+            for block in &blocks {
+                index.remove_entry(node, Some(block))?;
+            }
+            let Some(title) = title else {
+                return Ok(0);
+            };
+            let mut written = 0;
+            if whole {
+                index.put_entry(node, None, &title, "")?;
+                written += 1;
+            }
+            for row in rows.iter().filter(|row| !row.text.is_empty()) {
+                index.put_entry(node, Some(&row.block_id), &title, &row.text)?;
+                written += 1;
+            }
+            Ok(written)
+        })
+        .await?;
+    }
+    Ok(written)
+}
+
+/// Un passage de l'outbox à l'index plein texte, dans une tâche à elle ([`run`]).
+async fn feed_once(shared: Arc<Shared>) -> Fed {
+    match feed(&shared).await {
+        Ok(fed) => fed,
+        Err(error) => {
+            tracing::error!(
+                error = %format!("{error:#}"),
+                "index de recherche : passage refusé, nouvel essai plus tard ; la recherche \
+                 répond sur ce qui est déjà validé"
+            );
+            Fed::Retry
+        }
+    }
+}
+
+/// L'intention, la validation, la clôture (Ruling R909).
+async fn feed(shared: &Shared) -> anyhow::Result<Fed> {
+    let index = ready_index(shared).await?;
+    let limit = shared.feed_lines.load(Ordering::SeqCst);
+    let feed = match shared.store.begin_feed(limit).await? {
+        FeedStart::Nothing => return Ok(Fed::Nothing),
+        FeedStart::Begun(feed) => {
+            shared.intents.fetch_add(1, Ordering::SeqCst);
+            feed
+        }
+        // Une intention est posée. L'index l'a validée (une clôture refusée, un arrêt entre la
+        // validation et la clôture) : ses lignes sont rejouées depuis la base, jamais tenues pour
+        // faites. Sinon elle n'a jamais été validée : elle est défaite.
+        FeedStart::Pending(token) => {
+            if shared.text().token.as_deref() != Some(token.as_str()) {
+                shared.store.undo_feed().await?;
+                return Ok(Fed::Again);
+            }
+            match shared.store.intent_lines().await? {
+                Some(feed) if feed.token == token => feed,
+                _ => return Ok(Fed::Again),
+            }
+        }
+    };
+    let written = match write_lines(&shared.store, &index, &feed.lines).await {
+        Ok(written) => written,
+        Err(error) => {
+            // Des écritures pas validées restent dans l'écrivain : l'index ne se réutilise pas.
+            drop(index);
+            release(shared).await;
+            return Err(error.context("écriture des entrées"));
+        }
+    };
+    shared.puts.fetch_add(written, Ordering::SeqCst);
+    if shared.halts_at(HALT_BEFORE_COMMIT) {
+        return Ok(Fed::Halted);
+    }
+    let token = feed.token.clone();
+    let committed = if take_refusal(&shared.refuse_commits) {
+        drop(index);
+        Err(anyhow::anyhow!("validation refusée à la demande d'un test"))
+    } else {
+        blocking(move || index.commit(&token)).await
+    };
+    if let Err(error) = committed {
+        // Rien n'est dit de ce que le disque porte (Ruling R992) : l'index est lâché, et c'est le
+        // jeton relu à sa réouverture qui dira si la validation a eu lieu (elle est alors
+        // rejouée) ou non (l'intention est défaite).
+        shared.commit_refusals.fetch_add(1, Ordering::SeqCst);
+        release(shared).await;
+        return Err(error.context("validation de l'index"));
+    }
+    shared.text().token = Some(feed.token.clone());
+    if shared.halts_at(HALT_BEFORE_CLOSE) {
+        return Ok(Fed::Halted);
+    }
+    let closed = if take_refusal(&shared.refuse_closes) {
+        Err(anyhow::anyhow!("clôture refusée à la demande d'un test"))
+    } else {
+        match shared.store.finish_feed(&feed.token).await {
+            // `Stale` : l'intention n'est plus celle-ci (défaite par une reconstruction). Ses
+            // lignes sont restées dans l'outbox.
+            Ok(()) | Err(StoreError::Stale) => Ok(()),
+            Err(error) => Err(anyhow::Error::new(error)),
+        }
+    };
+    if let Err(error) = closed {
+        // L'index a validé, la base tient encore l'intention : aucune autre ne commencera, et le
+        // passage suivant la rejoue puis tente de clore.
+        shared.close_refusals.fetch_add(1, Ordering::SeqCst);
+        return Err(error.context("clôture de l'intention"));
+    }
+    shared.searchable.store(true, Ordering::SeqCst);
+    Ok(Fed::Again)
+}
+
 /// Avant d'indexer : si la base a été indexée sous une autre version de la projection, toutes
 /// les pages redeviennent jamais indexées, par tranches ; puis la version du binaire est écrite
 /// (Ruling R960). Sans version gardée (une instance neuve, ou d'avant ce lot, dont chaque page
@@ -627,6 +1216,24 @@ async fn run(shared: Arc<Shared>) {
             }
         }
     }
+    // L'index plein texte comparé à la base (Ruling R909), et reconstruit s'il n'est pas le sien :
+    // avant tout passage, et avant de dire quoi que ce soit à jour.
+    let mut delay = RETRY_FIRST;
+    while !shared.stopping() {
+        match ready_index(&shared).await {
+            Ok(_) => break,
+            Err(_) if shared.stopping() => break,
+            Err(error) => {
+                tracing::error!(
+                    error = %format!("{error:#}"),
+                    "index de recherche impossible à comparer à la base ou à reconstruire : \
+                     nouvel essai plus tard"
+                );
+                pause(&shared, delay).await;
+                delay = (delay * 2).min(RETRY_AT_MOST);
+            }
+        }
+    }
     // Les marqueurs sont à lire ; le rattrapage part du début.
     let mut markers = true;
     // Après une erreur de lecture, ou un lot dont toutes les pages attendent un nouvel essai :
@@ -637,9 +1244,23 @@ async fn run(shared: Arc<Shared>) {
     // Le travail en cours, un seul à la fois : une indexation, ou (`true`) le renoncement à une
     // page qu'on ne sait pas indexer.
     let mut job: Option<(JoinHandle<Outcome>, bool)> = None;
+    // Le passage de l'outbox à l'index plein texte en cours : un travail de plus de la boucle,
+    // jamais mené en même temps qu'une indexation.
+    let mut feeding: Option<JoinHandle<Fed>> = None;
+    // Des lignes d'outbox attendent peut-être : au démarrage, puis après chaque indexation,
+    // chaque annonce de la base (un titre, une création, une suppression) et chaque demande de
+    // `settled`. `feed_asks` compte ces demandes : un passage qui ne trouve rien ne baisse le
+    // drapeau que si rien n'a été demandé depuis son départ.
+    let mut feed_wanted = true;
+    let mut feed_asks = 0u64;
+    let mut feed_asks_at_start = 0u64;
+    // Depuis quand un passage est voulu, et quand le réessayer après un refus.
+    let mut feed_since: Option<Instant> = None;
+    let mut feed_retry: Option<(Instant, Duration)> = None;
     let mut round = 0u64;
     while !shared.stopping() {
         let now = Instant::now();
+        let busy = job.is_some() || feeding.is_some();
         // Ce qui est arrivé depuis le tour d'avant.
         let touched = shared.hub.take_touched();
         if !touched.is_empty() {
@@ -650,7 +1271,11 @@ async fn run(shared: Arc<Shared>) {
         }
         while announced {
             match changes.try_recv() {
-                Ok(_) | Err(TryRecvError::Lagged(_)) => markers = true,
+                Ok(_) | Err(TryRecvError::Lagged(_)) => {
+                    markers = true;
+                    feed_wanted = true;
+                    feed_asks += 1;
+                }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Closed) => announced = false,
             }
@@ -658,12 +1283,16 @@ async fn run(shared: Arc<Shared>) {
         if shared.asked.swap(false, Ordering::SeqCst) {
             markers = true;
             sources_after = None;
+            feed_wanted = true;
+            feed_asks += 1;
+            // Qui attend l'indexeur n'attend pas le délai d'un nouvel essai.
+            feed_retry = feed_retry.map(|(_, delay)| (now, delay));
         }
         if sources_after.is_some_and(|at| at <= now) {
             sources_after = None;
         }
         // Les sources durables, quand il n'y a rien de prêt : jamais plus d'un lot en mémoire.
-        let nothing_ready = job.is_none() && shared.queues().ready.is_empty();
+        let nothing_ready = !busy && shared.queues().ready.is_empty();
         if nothing_ready && markers && sources_after.is_none() {
             match shared.store.never_indexed(BATCH).await {
                 Ok(pages) => {
@@ -685,8 +1314,7 @@ async fn run(shared: Arc<Shared>) {
                 }
             }
         }
-        let nothing_ready =
-            job.is_none() && sources_after.is_none() && shared.queues().ready.is_empty();
+        let nothing_ready = !busy && sources_after.is_none() && shared.queues().ready.is_empty();
         if let (true, Some(after)) = (nothing_ready, catch_up) {
             match shared.store.stale_pages(after, BATCH).await {
                 Ok(stale) => {
@@ -707,15 +1335,29 @@ async fn run(shared: Arc<Shared>) {
                 }
             }
         }
-        // Rien n'est commencé une fois l'arrêt demandé.
-        if job.is_none() && !shared.stopping() {
-            let next = shared.queues().next(Instant::now(), &shared.cfg);
+        // Rien n'est commencé une fois l'arrêt demandé. Un travail à la fois : une indexation, ou
+        // un passage de l'outbox à l'index plein texte. Le passage attend qu'aucune page ne soit
+        // à indexer, [`FEED_AT_MOST`] au plus depuis qu'il est voulu (Ruling R1003).
+        if !busy && !shared.stopping() {
+            let now = Instant::now();
+            let feed_due = feed_wanted && feed_retry.is_none_or(|(at, _)| at <= now);
+            let overdue = feed_due && now >= *feed_since.get_or_insert(now) + FEED_AT_MOST;
+            let next = if overdue {
+                None
+            } else {
+                shared.queues().next(now, &shared.cfg)
+            };
             if let Some(page) = next {
                 job = Some((tokio::spawn(index_one(shared.clone(), page)), false));
+            } else if feed_due {
+                feed_asks_at_start = feed_asks;
+                feeding = Some(tokio::spawn(feed_once(shared.clone())));
             }
         }
+        let busy = job.is_some() || feeding.is_some();
         round += 1;
-        let idle = job.is_none() && !markers && catch_up.is_none() && shared.queues().is_empty();
+        let idle =
+            !busy && !feed_wanted && !markers && catch_up.is_none() && shared.queues().is_empty();
         shared.rounds.send_replace(Round {
             n: round,
             idle,
@@ -723,33 +1365,75 @@ async fn run(shared: Arc<Shared>) {
         });
         // Un lot de plus à lire (le rattrapage d'une instance où rien n'est en retard dans ce
         // lot) : pas d'attente.
-        let more = job.is_none() && sources_after.is_none() && (markers || catch_up.is_some());
+        let more = !busy && sources_after.is_none() && (markers || catch_up.is_some());
         if more {
             tokio::task::yield_now().await;
             continue;
         }
-        let wake_at = if job.is_none() {
-            let due = shared.queues().next_wake(&shared.cfg);
-            match (due, sources_after) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            }
-        } else {
+        let wake_at = if busy {
             None
+        } else {
+            let due = shared.queues().next_wake(&shared.cfg);
+            let retry = feed_retry.filter(|_| feed_wanted).map(|(at, _)| at);
+            [due, sources_after, retry].into_iter().flatten().min()
         };
         tokio::select! {
             () = shared.wake.notified() => {}
             () = shared.hub.touched_changed() => {}
             change = changes.recv(), if announced => match change {
-                Ok(_) | Err(RecvError::Lagged(_)) => markers = true,
+                Ok(_) | Err(RecvError::Lagged(_)) => {
+                    markers = true;
+                    feed_wanted = true;
+                    feed_asks += 1;
+                }
                 Err(RecvError::Closed) => announced = false,
             },
             done = async { (&mut job.as_mut().expect("un travail en cours").0).await }, if job.is_some() => {
                 let giving_up = job.take().is_some_and(|(_, giving_up)| giving_up);
                 job = finished(&shared, done, giving_up).map(|job| (job, true));
+                // Ce qu'elle a écrit a laissé ses lignes d'outbox.
+                feed_wanted = true;
+                feed_asks += 1;
+            }
+            fed = async { feeding.as_mut().expect("un passage en cours").await }, if feeding.is_some() => {
+                feeding = None;
+                match fed {
+                    Ok(Fed::Nothing) => {
+                        feed_wanted = feed_asks != feed_asks_at_start;
+                        feed_since = None;
+                        feed_retry = None;
+                    }
+                    // Il peut rester des lignes : un autre passage, sans attendre.
+                    Ok(Fed::Again) => {
+                        feed_since = None;
+                        feed_retry = None;
+                    }
+                    // Comme un processus tué là : plus rien n'est fait.
+                    Ok(Fed::Halted) => shared.stopping.store(true, Ordering::SeqCst),
+                    // Refusé, ou le passage a paniqué : l'intention est restée telle quelle, et
+                    // aucune autre ne commence. 1 s, puis le double, 60 s au plus.
+                    Ok(Fed::Retry) | Err(_) => {
+                        if let Err(error) = &fed {
+                            tracing::error!(%error, "index de recherche : un passage a paniqué, nouvel essai plus tard");
+                        }
+                        let delay = feed_retry
+                            .map_or(RETRY_FIRST, |(_, delay)| (delay * 2).min(RETRY_AT_MOST));
+                        feed_retry = Some((Instant::now() + delay, delay));
+                    }
+                }
             }
             () = async { tokio::time::sleep_until(wake_at.expect("un réveil")).await }, if wake_at.is_some() => {}
         }
+    }
+    // Le passage en cours va au bout de même : sa validation est close. Coupé par le délai, il
+    // laisse une intention posée, que le démarrage suivant rejoue ou défait.
+    if let Some(feeding) = feeding
+        && tokio::time::timeout(STOP_WAIT, feeding).await.is_err()
+    {
+        tracing::warn!(
+            "arrêt : la validation en cours de l'index de recherche n'a pas fini à temps, elle \
+             sera reprise au démarrage suivant"
+        );
     }
     // L'indexation en cours va au bout, sa transaction n'est pas coupée ; mais l'arrêt ne l'attend
     // pas sans fin (une page coûteuse à relire, R860). Elle n'est pas interrompue pour autant :
@@ -763,6 +1447,9 @@ async fn run(shared: Arc<Shared>) {
              suivant"
         );
     }
+    // L'index plein texte est lâché avant que l'arrêt soit publié : son dossier n'est plus tenu
+    // (le verrou de son écrivain), et une application relancée dans ce processus peut l'ouvrir.
+    let_go(&shared).await;
 }
 
 /// Publie la fin de la boucle quand elle tombe, même sur une panique : qui attend l'arrêt
@@ -1008,5 +1695,189 @@ mod tests {
             .unwrap();
         });
         assert_eq!(seen.load(Ordering::SeqCst), 1);
+    }
+
+    /// Une base, l'index plein texte de son dossier, et une poignée sans tâche de fond : les
+    /// passages de l'outbox à l'index s'y mènent un à un, à la main.
+    struct Bench {
+        dir: tempfile::TempDir,
+        store: Store,
+        handle: IndexerHandle,
+        space: Uuid,
+    }
+
+    impl Bench {
+        async fn new() -> Bench {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open(&dir.path().join("m.db")).await.unwrap();
+            let space = store.create_space("Espace", None).await.unwrap().id;
+            let hub = Hub::new(store.clone(), SyncConfig::default());
+            let text = open_text(dir.path()).await.unwrap();
+            let handle = with_text(store.clone(), hub, config(), Some(text));
+            Bench {
+                dir,
+                store,
+                handle,
+                space,
+            }
+        }
+
+        /// Une page à ce titre, dont la projection porte un bloc à ce texte.
+        async fn page(&self, title: &str, text: &str) -> Uuid {
+            let page = self
+                .store
+                .create_node(NewNode {
+                    space_id: self.space,
+                    parent_id: None,
+                    after: None,
+                    kind: NodeKind::Page,
+                    title: title.to_string(),
+                    created_by: None,
+                    grants: Vec::new(),
+                    doc: None,
+                })
+                .await
+                .unwrap()
+                .id;
+            self.set_text(page, 1, text).await;
+            page
+        }
+
+        /// La projection de la page, au `seq` donné : un bloc à ce texte.
+        async fn set_text(&self, page: Uuid, seq: i64, text: &str) {
+            let row = IndexedBlock {
+                block_id: "bloc",
+                kind: "paragraph",
+                text,
+                hash: text.as_bytes(),
+                links: &[],
+            };
+            self.store
+                .index_page(page, seq, &[row], false)
+                .await
+                .unwrap();
+        }
+
+        /// Un passage.
+        async fn feed(&self) -> Fed {
+            feed(&self.handle.shared).await.unwrap()
+        }
+
+        /// Des passages, jusqu'à ce que plus rien n'attende.
+        async fn drain(&self) {
+            for _ in 0..100 {
+                if self.feed().await == Fed::Nothing {
+                    return;
+                }
+            }
+            panic!("l'outbox ne se vide pas");
+        }
+
+        fn found(&self, words: &str, pages: &[Uuid]) -> Vec<Uuid> {
+            let query = mementum_search::read_query(words).unwrap();
+            let allowed: PageSet = pages.iter().copied().collect();
+            let found = self.handle.search(&query, &allowed, 0, 20).unwrap();
+            let mut pages: Vec<Uuid> = found.pages.into_iter().map(|hit| hit.node_id).collect();
+            pages.sort();
+            pages
+        }
+
+        async fn behind(&self, page: Uuid) -> bool {
+            self.handle
+                .behind(self.space, |id| id == page)
+                .await
+                .unwrap()
+        }
+
+        /// Ferme l'index (ses fusions finies : son dossier peut être retiré) et la base.
+        async fn close(self) -> tempfile::TempDir {
+            let index = self.handle.shared.text().index.take();
+            if let Some(index) = index {
+                Arc::try_unwrap(index).ok().unwrap().close().unwrap();
+            }
+            self.store.close().await;
+            self.dir
+        }
+    }
+
+    /// Une ligne qui change entre la validation et la clôture (son bloc est récrit) perd son
+    /// jeton : la clôture ne la retire pas, et elle est passée de nouveau à l'index plein texte,
+    /// par l'intention suivante. Le passage est arrêté entre la validation et la clôture, le
+    /// bloc récrit là, puis le passage repris : l'intention est rejouée et close, la ligne reste.
+    #[tokio::test]
+    async fn a_line_changed_during_a_commit_is_fed_again() {
+        let b = Bench::new().await;
+        let page = b.page("Page", "premier texte").await;
+        b.handle.halt_before_the_close();
+        assert_eq!(b.feed().await, Fed::Halted);
+        let posed = b.store.feed_tokens().await.unwrap();
+        assert!(posed.intent.is_some(), "validée, pas close");
+
+        b.set_text(page, 2, "second texte").await;
+        b.handle.shared.halt.store(0, Ordering::SeqCst);
+        assert_eq!(
+            b.feed().await,
+            Fed::Again,
+            "l'intention rejouée, puis close"
+        );
+        let closed = b.store.feed_tokens().await.unwrap();
+        assert_eq!((closed.intent, closed.committed), (None, posed.intent));
+        assert_eq!(b.handle.intents(), 1);
+        assert!(b.behind(page).await, "la ligne changée n'est pas close");
+
+        b.drain().await;
+        assert_eq!(b.handle.intents(), 2, "une seconde intention la prend");
+        assert_eq!(b.found("second", &[page]), [page]);
+        assert!(b.found("premier", &[page]).is_empty());
+        assert!(!b.behind(page).await);
+        b.close().await;
+    }
+
+    /// Pendant une reconstruction, la recherche ne rend que ce qui est déjà reconstruit, et le
+    /// reste est dit en retard. L'index perd son dossier (comme une sauvegarde remise en place
+    /// sans `search/`) : son jeton n'est plus celui de la base, tout passe à l'outbox, et les
+    /// passages, d'une ligne ici, le remplissent page après page.
+    #[tokio::test]
+    async fn searching_during_a_rebuild_finds_only_what_is_rebuilt() {
+        let b = Bench::new().await;
+        let mut pages = [
+            b.page("Première", "un texte commun").await,
+            b.page("Seconde", "un texte commun").await,
+        ];
+        pages.sort();
+        let [first, second] = pages;
+        b.drain().await;
+        assert_eq!(b.found("commun", &pages), pages, "témoin");
+        assert_eq!(b.handle.rebuilds(), 0);
+        assert!(!b.behind(second).await, "témoin");
+
+        // L'index est fermé, son dossier retiré : il sera rouvert neuf, sans jeton.
+        let index = {
+            let mut text = b.handle.shared.text();
+            text.token = None;
+            text.reconciled = false;
+            text.index.take().unwrap()
+        };
+        Arc::try_unwrap(index).ok().unwrap().close().unwrap();
+        std::fs::remove_dir_all(b.dir.path().join(SEARCH_DIR)).unwrap();
+        b.handle.shared.searchable.store(false, Ordering::SeqCst);
+        assert!(b.found("commun", &pages).is_empty());
+        assert!(b.behind(first).await, "rien n'est sûr avant la comparaison");
+
+        b.handle.shared.feed_lines.store(1, Ordering::SeqCst);
+        assert_eq!(b.feed().await, Fed::Again);
+        assert_eq!(b.handle.rebuilds(), 1);
+        assert_eq!(
+            b.found("commun", &pages),
+            [first],
+            "seule la page déjà reconstruite"
+        );
+        assert!(!b.behind(first).await);
+        assert!(b.behind(second).await, "le reste est dit en retard");
+
+        b.drain().await;
+        assert_eq!(b.found("commun", &pages), pages);
+        assert!(!b.behind(second).await);
+        b.close().await;
     }
 }
