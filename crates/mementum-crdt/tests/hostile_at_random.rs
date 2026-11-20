@@ -135,11 +135,20 @@ struct Served {
     compared: twins::Compared,
     /// Faux pour ne pas les comparer dans ce cas (voir [`case`]).
     watched: bool,
+    /// Le client Yjs de la prochaine page rechargée. Depuis que le serveur écrit dans la page
+    /// (`diff_write`), son client entre dans ce que les mises à jour hostiles nomment : tiré au
+    /// hasard, il changeait l'ordre des clients d'un processus à l'autre, et une graine ne se
+    /// rejouait plus (graine 1041 de la voie du journal, rouge une fois sur trois ; Ruling R1561).
+    next_server: std::cell::Cell<u64>,
 }
+
+/// Le premier client Yjs des pages servies de l'essai : au-delà des clients honnêtes et hostiles,
+/// comme un client tiré au hasard l'était presque toujours.
+const SERVER_CLIENT: u64 = 1 << 50;
 
 impl Served {
     fn new(stored: bool) -> Served {
-        let (page, created) = PageDoc::new_page();
+        let (page, created) = PageDoc::new_page_for(SERVER_CLIENT);
         trace(&created);
         Served {
             page,
@@ -151,12 +160,14 @@ impl Served {
             marks: Vec::new(),
             compared: twins::Compared::default(),
             watched: true,
+            next_server: std::cell::Cell::new(SERVER_CLIENT + 1),
         }
     }
 
     fn from_creation(created: Vec<u8>, stored: bool) -> Served {
         let journal = vec![created];
-        let page = PageDoc::from_updates(journal.iter().map(Vec::as_slice)).expect("la création");
+        let page = PageDoc::from_updates_for(SERVER_CLIENT, journal.iter().map(Vec::as_slice))
+            .expect("la création");
         Served {
             page,
             journal,
@@ -167,6 +178,7 @@ impl Served {
             marks: Vec::new(),
             compared: twins::Compared::default(),
             watched: true,
+            next_server: std::cell::Cell::new(SERVER_CLIENT + 1),
         }
     }
 
@@ -231,7 +243,10 @@ impl Served {
     }
 
     fn reloaded(&self) -> PageDoc {
-        PageDoc::from_updates(self.journal.iter().map(Vec::as_slice)).expect("le journal se relit")
+        let client = self.next_server.get();
+        self.next_server.set(client + 1);
+        PageDoc::from_updates_for(client, self.journal.iter().map(Vec::as_slice))
+            .expect("le journal se relit")
     }
 
     fn sv(&self) -> Vec<(u64, u32)> {
@@ -337,15 +352,20 @@ impl Served {
     /// (`twins::written_alike`), puis écrite au journal comme l'écrirait l'acteur ; après une
     /// erreur, la page est rechargée. Elle est tracée comme une mise à jour reçue.
     fn diff_write(&mut self, rng: &mut Rng) -> Result<bool, String> {
-        // Une suppression en attente peut nommer les horloges à venir du client de cette page : une
-        // entrée relue du journal (un journal d'avant R198) que lit la page même qui a créé la page.
-        // L'écriture du serveur prendrait ces horloges, et la page relue de son état les
-        // supprimerait (vu par cet essai : graines 533, 923, 981, 1007 de la voie du journal, par
-        // l'écriture par différence comme par la récriture complète). L'acteur qui écrit a chargé la
-        // page de son journal, sous un client tiré au hasard, qu'aucune entrée ne nomme, et aucune
-        // mise à jour de client ne laisse plus de suppression en attente (R198) : la page est
-        // rechargée avant d'écrire, comme l'acteur (relecture de S2, R1299).
-        if self.page.has_pending_deletions() {
+        // Dans la voie du journal, une entrée relue ne vient jamais après une écriture de l'acteur
+        // qui la lit : l'acteur charge la page de son journal, sous un client à lui, puis écrit. Ce
+        // qui est relu après lui l'est par un acteur neuf, sous un autre client. La page qui écrit est
+        // donc rechargée avant d'écrire, sous un client qu'aucune entrée relue ne nomme encore, et
+        // après, pour que les entrées relues qui suivent nomment un client qui n'est plus le sien
+        // (Rulings R1299, R1561). Sans cela, une entrée relue laissait une suppression en attente
+        // (graines 533, 923, 1007) ou un trou d'horloge (graines 1041, 1405, 1899, 2112) sur les
+        // horloges à venir du client même de la page, qui y écrivait ensuite : la page rechargée de
+        // son journal n'était plus la page vivante, par l'écriture par différence comme par la
+        // récriture complète. L'acteur n'atteint pas cet état : son client est tiré au hasard à
+        // chaque chargement, et une mise à jour de client qui laisserait un trou ou une suppression
+        // en attente est retenue (R131, R198). Dans la voie des clients, la page écrit sans être
+        // rechargée : c'est le chemin de l'acteur.
+        if self.stored || self.page.has_pending_deletions() {
             self.page = self.reloaded();
         }
         let mut blocks = self.page.read_blocks();
@@ -364,6 +384,21 @@ impl Served {
                     );
                 }
                 self.journal.push(written.update);
+                // L'écriture elle-même : la page rechargée de son journal est la page vivante.
+                let reloaded = self.reloaded();
+                assert_eq!(
+                    reloaded.read_blocks(),
+                    self.page.read_blocks(),
+                    "l'écriture par différence : les blocs de la page rechargée"
+                );
+                assert_eq!(
+                    reloaded.revision(),
+                    self.page.revision(),
+                    "l'écriture par différence : la révision de la page rechargée"
+                );
+                if self.stored {
+                    self.page = reloaded;
+                }
                 Ok(true)
             }
             Err(error) => {
