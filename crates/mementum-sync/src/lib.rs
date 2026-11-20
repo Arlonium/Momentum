@@ -142,7 +142,12 @@
 //!   avant toute restauration ([`Hub::restore_version`], une écriture comme
 //!   une autre, identifiants des blocs gardés). Une écriture qui n'a rien
 //!   changé n'en ouvre pas ; rien n'est encodé à chaque frappe. Chaque version
-//!   coupée envoie la trame `versions` aux connexions de la page.
+//!   coupée envoie la trame `versions` aux connexions de la page ;
+//! - **pages écrites** (Ruling R907) : une fois le contenu d'une page écrit au journal (une
+//!   frappe, une écriture du serveur, une restauration), son acteur ajoute son identifiant à un
+//!   ensemble du hub, et ne fait rien d'autre pour l'index de recherche. L'indexeur le lit
+//!   ([`Hub::take_touched`], réveillé par [`Hub::touched_changed`]), puis relit la page que le
+//!   store garde par [`stored_page`], sans passer par l'acteur et sans rien écrire.
 //!
 //! La feature `axum` expose `ws::WsBytes`, qui ramène la WebSocket d'axum
 //! au flux attendu par [`Hub::serve_connection`].
@@ -165,6 +170,7 @@ use mementum_crdt::CrdtError;
 use mementum_store::StoreError;
 use yrs::{Doc, OffsetKind, Options};
 
+pub use actor::stored_page;
 pub use brake::{FREE_REFUSALS, MAX_BLOCK};
 pub use hub::{ConnInfo, Hub, PageEvent};
 pub use presence::{MAX_REMEMBERED_CLIENTS, display_name};

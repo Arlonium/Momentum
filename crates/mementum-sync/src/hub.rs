@@ -30,7 +30,7 @@
 //! la page avant de les lire, pour que cette lecture soit aussi fraîche que
 //! possible à l'inscription (Ruling R89).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
@@ -40,7 +40,7 @@ use mementum_md::Block;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_store::Store;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 use uuid::Uuid;
 
 use crate::actor::{self, Broadcast, Command, Commands, Event, Joined, Membership, Outcome};
@@ -138,6 +138,14 @@ pub struct Hub {
     /// Le frein des comptes dont les mises à jour sont refusées après leur application
     /// (Ruling R725).
     brake: crate::brake::Brake,
+    /// Les pages dont un acteur a écrit le contenu depuis le dernier [`Hub::take_touched`]
+    /// (Ruling R907) : au plus une entrée par page, quel que soit le nombre de frappes.
+    touched: Mutex<HashSet<Uuid>>,
+    /// Réveille qui attend [`Hub::touched_changed`] : un seul jeton, gardé s'il n'y a personne.
+    touched_wake: Notify,
+    /// Les états complets encodés par les acteurs depuis le démarrage
+    /// ([`Hub::state_encodings`]).
+    state_encodings: AtomicU64,
     /// Le hub lui-même, sans le garder en vie : les acteurs s'en servent pour
     /// quitter le registre.
     me: Weak<Hub>,
@@ -161,6 +169,9 @@ impl Hub {
             calls_waiting: Arc::new(AtomicU64::new(0)),
             reloads: AtomicU64::new(0),
             brake: crate::brake::Brake::new(cfg.refusal_block),
+            touched: Mutex::new(HashSet::new()),
+            touched_wake: Notify::new(),
+            state_encodings: AtomicU64::new(0),
             me: me.clone(),
         })
     }
@@ -236,6 +247,57 @@ impl Hub {
     pub async fn compacted(&self, node_id: Uuid) -> Result<(), SyncError> {
         self.call(node_id, |reply| Command::Compacted { reply })
             .await
+    }
+
+    /// L'acteur de la page vient d'écrire son contenu au journal (Ruling R907) : la page entre
+    /// dans l'ensemble des pages écrites. Rien d'autre n'est fait pour l'index sur le chemin d'une
+    /// frappe : ni lecture des blocs, ni encodage, ni attente. Le verrou n'est tenu que le temps
+    /// d'une insertion, et jamais pendant une attente.
+    pub(crate) fn touched(&self, node_id: Uuid) {
+        let first = {
+            let mut touched = self.touched.lock().unwrap_or_else(PoisonError::into_inner);
+            let was_empty = touched.is_empty();
+            touched.insert(node_id) && was_empty
+        };
+        if first {
+            self.touched_wake.notify_one();
+        }
+    }
+
+    /// Les pages dont un acteur a écrit le contenu (une frappe, une écriture du serveur, une
+    /// restauration, une fois au journal) depuis l'appel précédent, chacune une fois, sans ordre ;
+    /// l'ensemble est vidé. Une écriture refusée, ou qui ne change rien (Ruling R181), ne nomme
+    /// rien ; une page créée, renommée ou supprimée non plus (leurs marqueurs sont dans la base,
+    /// Ruling R918).
+    ///
+    /// L'ensemble ne vit qu'en mémoire : ce qu'il portait à un arrêt brutal est perdu, et se
+    /// retrouve en comparant le dernier `seq` gardé de chaque page à ce qui a été indexé. Une
+    /// page peut y être encore après sa suppression : qui le lit s'attend à ne plus la trouver.
+    pub fn take_touched(&self) -> Vec<Uuid> {
+        let mut touched = self.touched.lock().unwrap_or_else(PoisonError::into_inner);
+        std::mem::take(&mut *touched).into_iter().collect()
+    }
+
+    /// Rend quand l'ensemble des pages écrites est passé de vide à non vide depuis le dernier
+    /// réveil : une notification sans contenu, à faire suivre de [`Hub::take_touched`]. Elle n'est
+    /// jamais manquée (passée sans personne pour l'attendre, elle est gardée pour l'appel
+    /// suivant), mais une de trop est possible : l'ensemble peut être vide au réveil, si un autre
+    /// l'a pris entre-temps. Un seul lecteur à la fois : un jeton ne réveille qu'une attente.
+    pub async fn touched_changed(&self) {
+        self.touched_wake.notified().await;
+    }
+
+    /// Combien d'états complets d'une page les acteurs ont encodés depuis le démarrage (une
+    /// version coupée, une compaction). Pour les tests : rien n'est encodé à chaque frappe, ni
+    /// pour l'historique (Ruling R135) ni pour l'index (Ruling R907).
+    #[doc(hidden)]
+    pub fn state_encodings(&self) -> u64 {
+        self.state_encodings.load(Ordering::Relaxed)
+    }
+
+    /// Un état complet encodé par un acteur.
+    pub(crate) fn count_state_encoding(&self) {
+        self.state_encodings.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Le frein des refus d'après l'application (Ruling R725).

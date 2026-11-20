@@ -468,10 +468,7 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
             created: true,
         });
     }
-    let last_seq = updates
-        .last()
-        .or(snapshot.as_ref())
-        .map_or(0, |(seq, _)| *seq);
+    let last_seq = last_seq_of(&snapshot, &updates);
     // Les suppressions sont comptées à partir du journal : celles de
     // l'instantané sont déjà nettoyées par le ramasse-miettes.
     //
@@ -481,16 +478,9 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
     // l'appliquer, en une passe. La boucle ne reste qu'en filet : une dépendance vue seulement
     // après l'application (yrs garde l'entrée en attente, la page est à jeter) fait reprendre la
     // relecture du début sans elle.
-    let mut dependents: HashSet<i64> = HashSet::new();
-    let (page, watch) = loop {
-        // Ruling R863 : relire un journal intègre ce que des clients ont écrit.
-        match off_the_engine(|| replay(node_id, &snapshot, &updates, &dependents))? {
-            Ok(loaded) => break loaded,
-            Err(seq) => {
-                dependents.insert(seq);
-            }
-        }
-    };
+    // Ruling R863 : relire un journal intègre ce que des clients ont écrit.
+    let (page, watch) =
+        off_the_engine(|| replay_whole(node_id, &snapshot, &updates, Reader::Actor))?;
     Ok(Loaded {
         page,
         last_seq,
@@ -498,6 +488,85 @@ async fn load(store: &Store, node_id: Uuid) -> Result<Loaded, SyncError> {
         watch,
         created: false,
     })
+}
+
+/// La page que le store garde, et son dernier `seq` (instantané ou journal), relue comme l'acteur
+/// la relit en se chargeant (`load` : mêmes règles, mêmes entrées écartées), **sans passer par
+/// un acteur et sans rien écrire** (Ruling R907). `Ok(None)` pour une page sans document (une
+/// création interrompue, que seul l'acteur répare, Ruling R28) ou inconnue. C'est ce que lit
+/// l'indexeur : il ne demande rien à l'acteur d'une page, dont les frappes attendraient.
+///
+/// L'instantané et le journal sont lus dans une même transaction de lecture : une compaction ou
+/// une frappe qui tombent pendant l'appel ne donnent jamais un état d'entre deux. La page rendue
+/// est celle du `seq` rendu, entrées écartées ou non : une écriture faite ensuite porte un `seq`
+/// plus grand.
+///
+/// Les entrées écartées sont dites en `debug`, pas en `error` : l'acteur de la page les a déjà
+/// dites, ou les dira en se chargeant. Une page qui ne se relit pas rend l'erreur que `load`
+/// rendrait, sans la journaliser : c'est l'appelant qui décide de ce qu'il en dit.
+///
+/// Le calcul dépend de ce que des clients ont écrit (Ruling R863) : il rend son fil au moteur
+/// tokio le temps de relire, comme l'acteur. L'appelant peut aussi mener tout l'appel sur un fil
+/// bloquant.
+pub async fn stored_page(
+    store: &Store,
+    node_id: Uuid,
+) -> Result<Option<(PageDoc, i64)>, SyncError> {
+    let DocState { snapshot, updates } = store.load_doc(node_id).await?;
+    if snapshot.is_none() && updates.is_empty() {
+        return Ok(None);
+    }
+    let last_seq = last_seq_of(&snapshot, &updates);
+    let (page, _) = off_the_engine(|| replay_whole(node_id, &snapshot, &updates, Reader::Index))?;
+    Ok(Some((page, last_seq)))
+}
+
+/// Le plus grand `seq` écrit d'une page : celui de la dernière entrée du journal, sinon celui de
+/// l'instantané.
+fn last_seq_of(snapshot: &Option<(i64, Vec<u8>)>, updates: &[(i64, Vec<u8>)]) -> i64 {
+    updates
+        .last()
+        .or(snapshot.as_ref())
+        .map_or(0, |(seq, _)| *seq)
+}
+
+/// Qui relit une page gardée : cela ne change que le niveau auquel une entrée écartée est dite.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reader {
+    /// L'acteur de la page, qui se charge : en `error`.
+    Actor,
+    /// Une lecture seule ([`stored_page`]), après ou avant lui : en `debug`.
+    Index,
+}
+
+/// Dit une entrée écartée à la relecture, au niveau de qui relit.
+macro_rules! set_aside {
+    ($reader:expr, $($line:tt)*) => {
+        match $reader {
+            Reader::Actor => tracing::error!($($line)*),
+            Reader::Index => tracing::debug!($($line)*),
+        }
+    };
+}
+
+/// Rejoue l'instantané puis le journal d'une page, en écartant ce qui doit l'être : [`replay`],
+/// repris du début sans chaque entrée qui dépend de ce qu'une entrée écartée portait (Rulings
+/// R743, R787 ; la boucle ne reste qu'en filet).
+fn replay_whole(
+    node_id: Uuid,
+    snapshot: &Option<(i64, Vec<u8>)>,
+    updates: &[(i64, Vec<u8>)],
+    reader: Reader,
+) -> Result<(PageDoc, Watch), SyncError> {
+    let mut dependents: HashSet<i64> = HashSet::new();
+    loop {
+        match replay(node_id, snapshot, updates, &dependents, reader)? {
+            Ok(replayed) => return Ok(replayed),
+            Err(seq) => {
+                dependents.insert(seq);
+            }
+        }
+    }
 }
 
 /// Rejoue l'instantané puis le journal d'une page, sans les entrées `dependents` (Ruling R743).
@@ -509,6 +578,7 @@ fn replay(
     snapshot: &Option<(i64, Vec<u8>)>,
     updates: &[(i64, Vec<u8>)],
     dependents: &HashSet<i64>,
+    reader: Reader,
 ) -> Result<Result<(PageDoc, Watch), i64>, SyncError> {
     let page = PageDoc::from_updates(snapshot.iter().map(|(_, bytes)| bytes.as_slice()))?;
     let watch = Watch::on(&page);
@@ -523,7 +593,7 @@ fn replay(
         // l'intégrerait en laissant le trou ; un navigateur la garde en attente (Ruling R131) :
         // le serveur lirait un texte qu'aucun navigateur n'affiche.
         if set_aside && matches!(page.stored_update_leaves_gap(update), Ok(true)) {
-            tracing::error!(%node_id, seq, "entrée du journal écartée à la relecture : elle suit une entrée écartée et laisserait un trou");
+            set_aside!(reader, %node_id, seq, "entrée du journal écartée à la relecture : elle suit une entrée écartée et laisserait un trou");
             continue;
         }
         // Ruling R787 : après une entrée écartée, une entrée qui dépend, par une origine ou un
@@ -531,7 +601,7 @@ fn replay(
         // reste bonne, et le journal se relit en une passe, quel que soit le nombre de ces
         // entrées (une relecture entière par entrée, avant).
         if set_aside && matches!(page.stored_update_lacks_dependency(update), Ok(true)) {
-            tracing::error!(%node_id, seq, "entrée du journal écartée à la relecture : elle dépend de ce qu'une entrée écartée portait");
+            set_aside!(reader, %node_id, seq, "entrée du journal écartée à la relecture : elle dépend de ce qu'une entrée écartée portait");
             continue;
         }
         match page.apply_update(update) {
@@ -541,7 +611,7 @@ fn replay(
             // est intacte, et se charge sans elle. Une entrée suivante qui en dépendrait resterait
             // en attente d'une dépendance, et la page serait refusée à elle.
             Err(error) if PageDoc::repeats_a_client(update) => {
-                tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : un client y paraît deux fois");
+                set_aside!(reader, %node_id, seq, %error, "entrée du journal écartée à la relecture : un client y paraît deux fois");
                 set_aside = true;
             }
             // Rulings R723, R784 : une entrée de map à origine droite, écrite par un serveur
@@ -552,7 +622,7 @@ fn replay(
             // suppression qu'elle portait. Appliquée, elle laisserait une entrée que plus rien ne tient, et un état
             // illisible le jour où son bloc est supprimé.
             Err(error) if PageDoc::refused_intact(&error) => {
-                tracing::error!(%node_id, seq, %error, "entrée du journal écartée à la relecture : aucun client n'écrit ce qu'elle porte");
+                set_aside!(reader, %node_id, seq, %error, "entrée du journal écartée à la relecture : aucun client n'écrit ce qu'elle porte");
                 set_aside = true;
             }
             // Rulings R723, R803, R806, R809 : ce que yrs a fait de l'entrée n'est pas ce qu'un client écrit
@@ -561,13 +631,13 @@ fn replay(
             // voit qu'une fois l'entrée appliquée. La page bâtie est à jeter, et la relecture
             // reprend du début sans l'entrée ; ce qui dépend d'elle est écarté à son tour.
             Err(error) if PageDoc::refused_made(&error) => {
-                tracing::error!(%node_id, seq, %error, set_aside = dependents.len() + 1, "entrée du journal écartée à la relecture, qui reprend du début : aucun client n'écrit ce qu'elle porte");
+                set_aside!(reader, %node_id, seq, %error, set_aside = dependents.len() + 1, "entrée du journal écartée à la relecture, qui reprend du début : aucun client n'écrit ce qu'elle porte");
                 return Ok(Err(*seq));
             }
             // En filet de R787 : une dépendance que la lecture n'a pas vue (un cycle entre deux
             // clients de la même entrée). La page est à jeter, et la relecture reprend sans elle.
             Err(error) if set_aside && PageDoc::lacks_a_dependency(&error) => {
-                tracing::error!(%node_id, seq, %error, set_aside = dependents.len() + 1, "entrée du journal écartée à la relecture, qui reprend du début : elle dépend de ce qu'une entrée écartée portait");
+                set_aside!(reader, %node_id, seq, %error, set_aside = dependents.len() + 1, "entrée du journal écartée à la relecture, qui reprend du début : elle dépend de ce qu'une entrée écartée portait");
                 return Ok(Err(*seq));
             }
             Err(error) => return Err(error.into()),
@@ -1527,6 +1597,7 @@ impl Actor {
             .append_restore(self.id.node_id, update, actor, version)
             .await?;
         self.since_snapshot += 1;
+        self.name_written_page();
         Ok(())
     }
 
@@ -1538,7 +1609,29 @@ impl Actor {
             .append_updates(self.id.node_id, updates, actor)
             .await?;
         self.since_snapshot += updates.len() as u64;
+        self.name_written_page();
         Ok(())
+    }
+
+    /// Le contenu de la page vient d'être écrit au journal : elle entre dans l'ensemble des pages
+    /// écrites du hub (Ruling R907), **après** l'écriture, jamais avant (une écriture refusée ne
+    /// nomme rien, et qui lit l'ensemble trouve l'écriture dans le store). C'est tout ce que
+    /// l'acteur fait pour l'index : ni lecture de ses blocs, ni encodage, ni attente. `persist`
+    /// et `persist_restore` sont les deux seuls points par où il écrit un contenu ; l'instantané
+    /// d'une compaction et une version n'en changent rien.
+    fn name_written_page(&self) {
+        if let Some(hub) = self.id.hub.upgrade() {
+            hub.touched(self.id.node_id);
+        }
+    }
+
+    /// L'état complet de la page, encodé, et compté ([`Hub::state_encodings`]) : il ne l'est que
+    /// pour une version ou une compaction, jamais à chaque frappe.
+    fn whole_state(&self) -> Vec<u8> {
+        if let Some(hub) = self.id.hub.upgrade() {
+            hub.count_state_encoding();
+        }
+        self.page.encode_state()
     }
 
     /// Ferme toutes les connexions inscrites : leurs messages ne sont plus
@@ -1626,7 +1719,7 @@ impl Actor {
         }
         self.since_snapshot = 0;
         self.watch.reset_deletions();
-        let state = self.page.encode_state();
+        let state = self.whole_state();
         let task = compact(self.store.clone(), self.id.node_id, self.last_seq, state);
         self.compaction = Some(tokio::spawn(task.with_current_subscriber()));
     }
@@ -2150,6 +2243,19 @@ mod tests {
             let (mut actor, _commands, _mailbox) = actor(&dir).await;
             watch.arm();
             assert!(actor.reload().await.is_ok());
+            assert_eq!(watch.seen(), 1);
+        });
+    }
+
+    /// Ruling R863 : la lecture seule d'une page gardée (Ruling R907) relit son journal de même.
+    #[test]
+    fn reading_a_stored_page_leaves_the_engine_free() {
+        engine_stays_free("page-gardee", |watch| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let (actor, _commands, _mailbox) = actor(&dir).await;
+            watch.arm();
+            let read = stored_page(&actor.store, actor.id.node_id).await;
+            assert!(matches!(read, Ok(Some((_, 0)))));
             assert_eq!(watch.seen(), 1);
         });
     }

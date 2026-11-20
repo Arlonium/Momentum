@@ -249,7 +249,7 @@ impl Actor {
     /// au journal, ou dans un instantané relu), et un état qu'on ne relit pas n'est pas servi
     /// (Ruling R717).
     pub(super) async fn cut_version(&mut self, reason: VersionReason) -> Result<(), SyncError> {
-        let state = self.page.encode_state();
+        let state = self.whole_state();
         if matches!(
             reason,
             VersionReason::BeforeRestore | VersionReason::Closing
