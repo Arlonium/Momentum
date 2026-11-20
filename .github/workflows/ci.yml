@@ -47,6 +47,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --release -p mementum-sync -p mementum-cli -- --ignored --nocapture
+      # Lot 4 (Task X2, Ruling R1171) : les mesures de la recherche qui portent une borne, nommées
+      # une à une (les autres mesures de `mementum-server` se lancent à la main) : la frappe d'un
+      # autre pendant la première indexation de 10 000 pages et pendant qu'une grande page est
+      # récrite en boucle (150 ms), le délai avant qu'un mot tapé soit trouvable (5 s), et la
+      # recherche par la route entière sur 100 000 blocs (100 ms). Le démarrage et la mémoire
+      # avec un index sont dans `mementum-cli`, que la ligne du dessus lance déjà.
+      - run: >-
+          cargo test --release -p mementum-server --test indexer --test search_measure --
+          --ignored --nocapture --test-threads=1
+          keystroke_seen_under_150ms measure_search_on_10000_pages
 
   web:
     name: web
