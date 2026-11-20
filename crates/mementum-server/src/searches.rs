@@ -9,9 +9,11 @@
 //!   est tenue **jusqu'au départ de la réponse**, plancher de temps compris, pas jusqu'à la fin du
 //!   calcul : rendue plus tôt, l'heure où la recherche suivante du compte commence dirait la durée
 //!   du calcul d'avant (Ruling R932) ;
-//! - **la place de l'instance** ([`Turn`]) : [`MAX_SEARCHES`] calculs de front au plus. Elle est
-//!   rendue à la fin du calcul, même si la requête est partie entre-temps (on n'arrête pas un fil
-//!   bloquant), et jamais tenue pendant l'attente du plancher.
+//! - **la place de l'instance** ([`Turn`]) : [`MAX_SEARCHES`] recherches de front au plus. Elle
+//!   est tenue par le calcul jusqu'à sa fin, même si la requête est partie entre-temps (on
+//!   n'arrête pas un fil bloquant), et par la recherche jusqu'au départ de sa réponse, plancher
+//!   compris (Ruling R1054) : rendue à la fin du calcul, elle disait sa durée au compte qui
+//!   attendait derrière.
 //!
 //! Les comptes qui attendent une place de l'instance passent **tour à tour**, dans l'ordre où ils
 //! sont devenus prêts : un compte dont une recherche est admise n'est pas prêt, si bien que la
@@ -51,6 +53,9 @@ struct Shared {
     started: AtomicU64,
     built: AtomicU64,
     computed: AtomicU64,
+    /// Réponses prêtes, qui n'attendent plus que leur plancher, pour les tests.
+    #[cfg(any(test, feature = "test-hooks"))]
+    ready: AtomicU64,
     #[cfg(any(test, feature = "test-hooks"))]
     hook: Mutex<Option<Hook>>,
 }
@@ -296,6 +301,21 @@ impl Searches {
     /// Un calcul vient de finir.
     pub(crate) fn finished(&self) {
         self.shared.computed.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Une réponse est prête (calcul, titres et retard lus) : il ne lui reste qu'à attendre son
+    /// plancher. Compté pour les tests seulement.
+    pub(crate) fn answer_ready(&self) {
+        #[cfg(any(test, feature = "test-hooks"))]
+        self.shared.ready.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// Réponses prêtes depuis le lancement, parties ou en attente de leur plancher. Pour les
+    /// tests : la barrière d'un « elle n'est pas partie avant le plancher ».
+    #[cfg(any(test, feature = "test-hooks"))]
+    #[doc(hidden)]
+    pub fn answers_ready(&self) -> u64 {
+        self.shared.ready.load(Ordering::SeqCst)
     }
 
     /// Calculs commencés depuis le lancement. Pour les tests.

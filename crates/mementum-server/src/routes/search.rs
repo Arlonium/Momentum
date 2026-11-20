@@ -39,11 +39,18 @@
 //! **Le plancher** (R932) : la réponse d'une recherche calculée ne part jamais avant
 //! [`SEARCH_FLOOR`] après la prise de ses places, que l'index ait lu une entrée ou cent mille (lire
 //! une entrée d'une page que le compte ne voit pas coûte, et ce coût se lirait dans le temps de
-//! réponse). L'attente se fait sur le moteur, la place de l'instance déjà rendue ; **la place du
-//! compte, elle, n'est rendue qu'à la fin de cette attente**, requête abandonnée ou non : sans
-//! cela, l'heure où la recherche suivante du compte commence dirait la durée du calcul. Une
-//! recherche sans aucun mot, un refus et un `429` ne lisent pas l'index et n'attendent pas.
-//! **Limite** (L-b du plan) : un calcul plus long que le plancher se lit dans le temps de réponse.
+//! réponse). L'attente se fait sur le moteur, sans fil bloquant ; **les deux places, celle du
+//! compte et celle de l'instance, ne sont rendues qu'à la fin de cette attente**, requête
+//! abandonnée ou non (R1054) : sans cela, l'heure où commence la recherche suivante du compte,
+//! ou celle d'un cinquième compte qui attendait une place de l'instance, dirait la durée du
+//! calcul. L'instance mène donc au plus quatre recherches calculées par plancher, quatre-vingts
+//! par seconde. Une recherche sans aucun mot, un refus et un `429` ne lisent pas l'index et
+//! n'attendent pas.
+//! **Ce qui reste** (limite L-b du plan) : un calcul plus long que le plancher. Sa durée se lit
+//! alors dans le temps de réponse, et dans l'attente de qui vient derrière. Et le titre d'une
+//! page trouvée est lu à l'instant de la réponse sans que le droit soit rejugé : une page fermée
+//! au compte pendant le calcul est encore rendue, avec le titre qu'elle porte à cet instant (la
+//! fenêtre est la durée du calcul).
 //!
 //! **Ce que la route ne borne pas** : la durée d'un calcul lancé. Rien ne l'interrompt (le moteur
 //! n'offre pas d'arrêt à une recherche en cours) ; elle est bornée par la forme de la recherche
@@ -157,16 +164,21 @@ async fn answered(
     turn: Turn,
     started: Instant,
 ) -> Result<SearchResults, ApiError> {
-    let found = results(search, turn).await;
-    // Sur le moteur, sans fil bloquant ni place de l'instance : une attente, pas un calcul.
+    let searches = search.state.searches.clone();
+    // La place de l'instance est tenue à deux : par le calcul, sur son fil, jusqu'à sa fin ; par
+    // cette tâche, jusqu'au plancher. Elle est rendue au plus tard des deux (Ruling R1054).
+    let turn = Arc::new(turn);
+    let found = results(search, turn.clone()).await;
+    searches.answer_ready();
+    // Sur le moteur, sans fil bloquant : une attente, pas un calcul.
     tokio::time::sleep_until(started + SEARCH_FLOOR).await;
-    drop(seat);
+    drop((seat, turn));
     found
 }
 
 /// Le calcul, sur le fil bloquant, sous la place de l'instance ; puis les titres et le retard,
 /// lus dans la base.
-async fn results(search: Search, turn: Turn) -> Result<SearchResults, ApiError> {
+async fn results(search: Search, turn: Arc<Turn>) -> Result<SearchResults, ApiError> {
     let Search {
         state,
         account,
@@ -177,7 +189,7 @@ async fn results(search: Search, turn: Turn) -> Result<SearchResults, ApiError> 
     } = search;
     let (searches, indexer) = (state.searches.clone(), state.indexer.clone());
     let computed = tokio::task::spawn_blocking(move || {
-        // La place de l'instance est rendue à la fin du calcul, pas plus tard.
+        // Un calcul lancé va au bout, même si sa tâche est partie : il garde la place jusque-là.
         let _turn = turn;
         let computed = compute(&searches, &indexer, &access, account, &query, after);
         searches.finished();
