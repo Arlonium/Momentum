@@ -216,7 +216,7 @@ fn one_changed_block_touches_one_block() {
     let third = top_ids(&page)[2].clone();
     let written = diff(&page, &TEN.replace("Trois", "Trais"));
     assert!(!written.fell_back);
-    assert_eq!(written.touched, [third.clone()]);
+    assert_eq!(written.touched, std::slice::from_ref(&third));
     assert_eq!(mmd_of(&page), TEN.replace("Trois", "Trais"));
     assert_eq!(
         changed(&before, &identities(&page)),
@@ -237,7 +237,11 @@ fn state_vector(state: &[u8]) -> Vec<u8> {
 }
 
 /// Des props changées s'écrivent en attributs du nœud de contenu : une entrée par prop changée,
-/// l'ancienne supprimée ; ni le bloc ni son contenu ne sont recréés.
+/// l'ancienne supprimée ; ni le bloc ni son contenu ne sont recréés. Un attribut écrasé supprime
+/// son ancienne entrée dans la transaction des écritures : la mise à jour rendue porte les deux
+/// jeux de suppressions (Ruling R1280 ; mises bout à bout comme dans `write_all`, qui exige que la
+/// seconde ne supprime rien, l'écriture rendait `HalfWritten`). Une prop inconnue du registre que
+/// les blocs écrits n'ont plus est retirée dans la première transaction, sans rien écrire.
 #[test]
 fn changed_props_are_written_as_attributes() {
     let base = "# Titre\n\nUn paragraphe\n\nAutre\n";
@@ -274,6 +278,21 @@ fn changed_props_are_written_as_attributes() {
         2
     );
     assert_update_is_whole(&page, &state, &written, "props au défaut");
+
+    // Une prop inconnue du registre, posée puis retirée.
+    let with_bag = "# Titre\n\nUn paragraphe {fooBar=\"x\"}\n\nAutre\n";
+    diff(&page, with_bag);
+    assert_eq!(mmd_of(&page), with_bag);
+    let state = page.encode_state();
+    let written = diff(&page, base);
+    assert_eq!(mmd_of(&page), base);
+    assert_eq!(
+        inserted_units(&state_vector(&state), &page.state_vector()),
+        0,
+        "rien d'écrit"
+    );
+    assert_eq!(deleted_units(&written.update), 1, "l'attribut retiré");
+    assert_update_is_whole(&page, &state, &written, "prop inconnue retirée");
 }
 
 /// Un bloc déplacé parmi ses frères est recréé sous son identifiant ; les autres ne sont pas
@@ -295,7 +314,10 @@ fn a_moved_block_is_recreated_under_its_id_and_the_others_stay() {
         moved_ids,
         "chaque bloc garde son identifiant"
     );
-    assert_eq!(changed(&before, &identities(&page)), [moved.clone()]);
+    assert_eq!(
+        changed(&before, &identities(&page)),
+        std::slice::from_ref(&moved)
+    );
     assert_eq!(written.touched, [moved]);
     assert_update_is_whole(&page, &state, &written, "un bloc déplacé");
 }
@@ -449,11 +471,11 @@ fn columns_and_tables_follow_the_schema() {
     let target = target.replace("| c | d |", "| c | e |");
     let written = diff(&page, &target);
     assert_eq!(mmd_of(&page), target);
-    assert_eq!(written.touched, [table.clone()]);
+    assert_eq!(written.touched, std::slice::from_ref(&table));
     let after = identities(&page);
     assert_eq!(
         changed(&before, &after),
-        [table.clone()],
+        std::slice::from_ref(&table),
         "le tableau est récrit"
     );
     assert_eq!(
@@ -537,8 +559,7 @@ fn deletions_and_writes_are_two_transactions() {
     let page = page_with(TEN);
     let seen: Arc<Mutex<Vec<(bool, bool)>>> = Arc::default();
     let log = seen.clone();
-    let _watch = page
-        .yrs_doc()
+    page.yrs_doc()
         .observe_transaction_cleanup("diff-test", move |_, event| {
             let deleted = event.delete_set.iter().next().is_some();
             log.lock()
@@ -785,7 +806,7 @@ proptest! {
     ) {
         let (page, created) = PageDoc::new_page();
         prop_assume!(page.write_blocks(&before).is_ok());
-        let journal = vec![created, page.encode_state()];
+        let journal = [created, page.encode_state()];
         // La moitié des cas récrivent la page d'avant, retouchée ; les autres, d'autres blocs.
         let target = if edits.is_empty() { after } else { retouched(page.read_blocks(), &after, &edits) };
         let oracle = PageDoc::from_updates(journal.iter().map(Vec::as_slice)).unwrap();

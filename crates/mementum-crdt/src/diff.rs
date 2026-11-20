@@ -357,7 +357,7 @@ struct Plan {
     /// Un contenu en ligne écrit en entier dans son nœud vidé.
     inlines: Vec<(XmlElementRef, Vec<Inline>)>,
     /// Le texte écrit à la place du milieu retiré : (texte, place, plages et leurs marques).
-    pasted: Vec<(XmlTextRef, u32, Vec<(String, Attrs)>)>,
+    pasted: Vec<(XmlTextRef, u32, Runs)>,
     /// Un tableau écrit dans son nœud vidé.
     tables: Vec<(XmlElementRef, Table)>,
     /// Les identifiants des blocs gardés en place, à tout niveau.
@@ -627,6 +627,17 @@ fn plan_inline<T: ReadTxn>(
 
 // =========================================================== contenu en ligne, par préfixe
 
+/// Des plages à écrire, chacune avec ses marques explicites.
+type Runs = Vec<(String, Attrs)>;
+
+/// Où vit une unité courante : le rang de l'enfant du nœud de contenu, la place UTF-16 dans son
+/// texte.
+type Place = (usize, u32);
+
+/// Une marque, telle que l'`Interner` la numérote : les cinq marques simples en bits, les deux
+/// couleurs, le numéro du lien.
+type MarkKey = (u8, Option<String>, Option<String>, Option<u32>);
+
 /// Une unité de contenu en ligne : un caractère et ses marques (un numéro, voir [`Interner`]),
 /// ou un élément en ligne (un numéro aussi ; un élément que la lecture ignore en reçoit un à lui,
 /// qui n'est égal à rien).
@@ -645,7 +656,7 @@ struct Interner {
     links: HashMap<String, u32>,
     link_values: HashMap<usize, u32>,
     link_texts: Vec<String>,
-    marks: HashMap<(u8, Option<String>, Option<String>, Option<u32>), u32>,
+    marks: HashMap<MarkKey, u32>,
     mark_list: Vec<(Styles, Option<u32>)>,
     elements: HashMap<String, u32>,
     opaque: u32,
@@ -742,7 +753,7 @@ fn current_units<T: ReadTxn>(
     txn: &T,
     content: &XmlElementRef,
     names: &mut Interner,
-) -> Option<(Vec<Piece>, Vec<(usize, u32)>)> {
+) -> Option<(Vec<Piece>, Vec<Place>)> {
     let mut pieces = Vec::new();
     let mut places = Vec::new();
     for (k, child) in content.children(txn).enumerate() {
@@ -838,7 +849,7 @@ fn target_units(content: &[Inline], link: Option<u32>, names: &mut Interner, out
 /// n'a aucun texte voisin où s'écrire.
 fn middle(
     old: &[Piece],
-    places: &[(usize, u32)],
+    places: &[Place],
     new: &[Piece],
 ) -> Option<(usize, u32, u32, std::ops::Range<usize>)> {
     let p = old.iter().zip(new).take_while(|(a, b)| a == b).count();
@@ -915,7 +926,7 @@ struct Affix {
     text: XmlTextRef,
     at: u32,
     removed: u32,
-    runs: Vec<(String, Attrs)>,
+    runs: Runs,
 }
 
 /// Le préfixe et le suffixe communs du contenu courant et du contenu voulu ; le milieu changé
