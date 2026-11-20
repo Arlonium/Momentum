@@ -1041,13 +1041,21 @@ fn tie_key(block_id: Option<&str>) -> (u64, u64) {
 
 /// Vide un dossier sans suivre aucun lien (la règle du dépôt des fichiers, Ruling R272) : un lien
 /// posé dedans est retiré lui-même, jamais ce qu'il vise.
+///
+/// `meta.json` part en dernier : un vidage coupé en route (un arrêt brutal, un fichier tenu)
+/// laisse un dossier qui porte encore la marque d'un index, et se vide de nouveau.
 fn empty_dir(dir: &Path, spare: Option<&Path>) -> std::io::Result<()> {
+    let mut meta = None;
     for entry in std::fs::read_dir(dir)? {
         let entry = entry?;
         if spare.is_some_and(|spared| entry.file_name() == spared.as_os_str()) {
             continue;
         }
         let path = entry.path();
+        if entry.file_name() == "meta.json" {
+            meta = Some(path);
+            continue;
+        }
         let meta = std::fs::symlink_metadata(&path)?;
         if is_link(&meta) {
             // Un lien vers un dossier se retire comme un dossier sous Windows, comme un fichier
@@ -1062,25 +1070,60 @@ fn empty_dir(dir: &Path, spare: Option<&Path>) -> std::io::Result<()> {
             std::fs::remove_file(&path)?;
         }
     }
+    if let Some(meta) = meta {
+        // Un lien posé à sa place est retiré lui-même, comme les autres.
+        if std::fs::remove_file(&meta).is_err() {
+            std::fs::remove_dir(&meta)?;
+        }
+    }
     Ok(())
 }
 
 /// Vrai si ce dossier peut être celui d'un index, donc vidé (Ruling R990) : vide, ou porteur d'un
-/// `meta.json`, ou porteur des seuls fichiers que le moteur pose avant ses métadonnées. Tout
+/// `meta.json`, ou porteur des seuls fichiers que le moteur pose lui-même ([`engine_file`]) : un
+/// index dont la création ou le vidage a été coupé par un arrêt brutal (Ruling R1026). Tout
 /// autre dossier (celui des données, par un chemin mal joint) n'est jamais touché.
 fn may_hold_an_index(dir: &Path) -> std::io::Result<bool> {
     let mut only_engine_files = true;
     for entry in std::fs::read_dir(dir)? {
-        let name = entry?.file_name();
+        let entry = entry?;
+        let name = entry.file_name();
         let name = name.to_string_lossy();
         if name == "meta.json" {
             return Ok(true);
         }
-        let of_the_engine =
-            name == ".managed.json" || (name.starts_with(".tantivy-") && name.ends_with(".lock"));
-        only_engine_files &= of_the_engine;
+        // Un fichier ordinaire seulement : ni un dossier ni un lien au nom d'un fichier du moteur.
+        let plain = std::fs::symlink_metadata(entry.path())
+            .is_ok_and(|meta| meta.is_file() && !is_link(&meta));
+        only_engine_files &= plain && engine_file(&name);
     }
     Ok(only_engine_files)
+}
+
+/// Vrai pour un nom que le moteur (Tantivy 0.27) pose dans son dossier, hors `meta.json` : ses
+/// deux fichiers cachés ; un temporaire d'`atomic_write`, que `tempfile` nomme `.tmp` suivi de
+/// six lettres ou chiffres ; un fichier de segment, nommé de l'identifiant du segment (32
+/// chiffres hexadécimaux en minuscules) et d'une extension de `SegmentComponent`
+/// (`<opstamp>.del` pour les suppressions). Rien d'autre : c'est cette liste fermée qui garde un
+/// dossier étranger d'être vidé. À relire à chaque montée de version du moteur.
+fn engine_file(name: &str) -> bool {
+    if name == ".managed.json" || (name.starts_with(".tantivy-") && name.ends_with(".lock")) {
+        return true;
+    }
+    if let Some(random) = name.strip_prefix(".tmp") {
+        return random.len() == 6 && random.bytes().all(|b| b.is_ascii_alphanumeric());
+    }
+    let Some((id, extension)) = name.split_once('.') else {
+        return false;
+    };
+    let segment = id.len() == 32 && id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+    let known = matches!(
+        extension,
+        "idx" | "pos" | "term" | "store" | "store.temp" | "fast" | "fieldnorm"
+    ) || extension
+        .strip_suffix(".del")
+        .is_some_and(|stamp| !stamp.is_empty() && stamp.bytes().all(|b| b.is_ascii_digit()));
+    segment && known
 }
 
 fn is_link(meta: &std::fs::Metadata) -> bool {

@@ -1376,6 +1376,95 @@ fn reset_never_empties_a_directory_that_is_not_an_index() {
     assert!(!dir.path().join("files").exists());
 }
 
+/// Relecture de S4c, I4 : un arrêt brutal pendant le vidage ou la création du dossier le laisse
+/// sans `meta.json`, avec des fichiers de segment ou un temporaire du moteur. Il doit s'ouvrir
+/// (vidé, sans jeton : l'appelant reconstruit), sans quoi le serveur ne redémarre plus. Seules
+/// les formes de nom que le moteur pose sont admises : un identifiant de 32 chiffres
+/// hexadécimaux et une extension de segment, ou `.tmp` et six caractères (le temporaire
+/// d'`atomic_write`, bâti par `tempfile`). Toute autre forme reste refusée, rien de touché.
+#[test]
+fn a_directory_left_without_its_meta_by_a_crash_still_opens() {
+    let id = "0123456789abcdef0123456789abcdef";
+    let dir = TestDir::new();
+    for ext in [
+        "idx",
+        "pos",
+        "term",
+        "store",
+        "store.temp",
+        "fast",
+        "fieldnorm",
+        "7.del",
+    ] {
+        std::fs::write(dir.path().join(format!("{id}.{ext}")), b"reste").unwrap();
+    }
+    std::fs::write(dir.path().join(".managed.json"), b"[]").unwrap();
+    std::fs::write(dir.path().join(".tmpAb3xZ9"), b"{ coup").unwrap();
+    let (index, token) = open(dir.path());
+    assert_eq!(token, None);
+    assert!(!dir.path().join(format!("{id}.idx")).exists(), "vidé");
+    assert!(!dir.path().join(".tmpAb3xZ9").exists(), "vidé");
+    drop(index);
+
+    for foreign in [
+        format!("{id}.db"),
+        format!("{id}"),
+        format!("{id}.x.del"),
+        format!("{id}..del"),
+        format!("{}.idx", &id[..16]),
+        // Une majuscule, dans un autre nom : sous Windows, le même nom en majuscules serait le
+        // même fichier.
+        format!("F{}.idx", &id[1..]),
+        format!("g{}.idx", &id[1..]),
+        "notes.idx".to_string(),
+        ".tmp".to_string(),
+        ".tmpAb3xZ9x".to_string(),
+        ".tmpAb3x-9".to_string(),
+        "tmpAb3xZ9".to_string(),
+    ] {
+        let dir = TestDir::new();
+        std::fs::write(dir.path().join(format!("{id}.idx")), b"reste").unwrap();
+        std::fs::write(dir.path().join(&foreign), b"autre chose").unwrap();
+        let before = listing(dir.path());
+        refused_as_foreign(SearchIndex::open(dir.path()), dir.path());
+        refused_as_foreign(SearchIndex::reset(dir.path()), dir.path());
+        assert_eq!(listing(dir.path()), before, "{foreign}");
+    }
+    // Un dossier au nom d'un segment n'est pas un fichier du moteur.
+    let dir = TestDir::new();
+    std::fs::create_dir(dir.path().join(format!("{id}.idx"))).unwrap();
+    refused_as_foreign(SearchIndex::open(dir.path()), dir.path());
+}
+
+/// Relecture de S4c, I4 : `meta.json` part en dernier. Un vidage coupé en route laisse ainsi un
+/// dossier qui porte encore la marque d'un index, que le démarrage suivant vide de nouveau. Ici
+/// le vidage échoue sur un segment tenu ouvert sans partage : `meta.json` est encore là.
+#[cfg(windows)]
+#[test]
+fn a_wipe_cut_short_leaves_the_meta_for_the_next_one() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let dir = TestDir::new();
+    let (index, _) = open(dir.path());
+    index.put_entry(Uuid::now_v7(), None, "Titre", "").unwrap();
+    index.commit("jeton").unwrap();
+    index.close().unwrap();
+    let segment = listing(dir.path())
+        .into_iter()
+        .map(|(name, _)| name)
+        .find(|name| name.ends_with(".term"))
+        .expect("un fichier de segment");
+    // Lecture et écriture partagées, pas la suppression.
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(3)
+        .open(dir.path().join(&segment))
+        .unwrap();
+    assert!(SearchIndex::reset(dir.path()).is_err());
+    assert!(dir.path().join("meta.json").exists(), "retiré avant la fin");
+    drop(held);
+    assert_eq!(SearchIndex::reset(dir.path()).unwrap().token, None);
+}
+
 #[test]
 fn the_candidates_kept_for_a_long_prefix_are_bounded() {
     let b = Bench::new();
