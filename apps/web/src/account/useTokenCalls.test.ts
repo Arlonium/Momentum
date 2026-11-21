@@ -131,3 +131,32 @@ test("retry_after_a_page_reads_nothing", async () => {
   expect(hook.current).toMatchObject({ retrying: false, more: true });
   expect(hook.current.calls?.map((c) => c.id)).toEqual([9, 8]);
 });
+
+test("coming_back_to_the_tab_reads_nothing_again", async () => {
+  // Rien ne relit l'activité d'elle-même (R1466) : ni le retour sur l'onglet (`visibilitychange`), ni
+  // le focus rendu à la fenêtre. Une relecture en tête ferait bouger ce qui est sous le pointeur.
+  vi.mocked(tokenCalls).mockReset().mockResolvedValueOnce(page([9, 8], true)).mockResolvedValue(page([7], false));
+  const hook = await renderHook(() => useTokenCalls(t1, null), undefined);
+  await tick();
+  expect(hook.current.calls?.map((c) => c.id)).toEqual([9, 8]);
+  try {
+    for (const state of ["hidden", "visible"] as const) {
+      Object.defineProperty(document, "visibilityState", { configurable: true, get: () => state });
+      await settle(() => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await tick();
+    }
+    await settle(() => {
+      window.dispatchEvent(new FocusEvent("blur"));
+      window.dispatchEvent(new FocusEvent("focus"));
+    });
+    await tick();
+  } finally {
+    // L'état propre au document retiré, celui de jsdom revient.
+    delete (document as { visibilityState?: unknown }).visibilityState;
+  }
+  expect(tokenCalls).toHaveBeenCalledTimes(1);
+  expect(hook.current.calls?.map((c) => c.id)).toEqual([9, 8]);
+  expect(hook.current.more).toBe(true);
+});
