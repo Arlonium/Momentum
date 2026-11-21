@@ -244,6 +244,15 @@ impl Anchors {
     }
 }
 
+/// Un alias du bloc d'identifiant `id` qui se donne sans lire sa page (l'outil `search`, lot 5,
+/// Task M2) : `b` et les douze premiers caractères base32 de son hachage, ceux de [`id_key`]. Il se
+/// résout comme tout alias, par un début de hachage ([`Anchors::resolve`]) : plus long que celui
+/// que rend la page lue, il ne désigne deux blocs que si leurs hachages ont soixante bits
+/// communs, ou s'ils portent le même identifiant. `None` pour un identifiant vide.
+pub fn standalone_alias(id: &str) -> Option<String> {
+    (!id.is_empty()).then(|| format!("b{}", base32(&digest(id), KEY_CHARS)))
+}
+
 /// Vrai si l'empreinte d'identifiant `key` ([`id_key`]) commence par l'alias `alias` (ses douze
 /// premiers caractères au plus : les 64 bits n'en portent pas plus).
 pub(crate) fn key_matches_alias(key: u64, alias: &str) -> bool {

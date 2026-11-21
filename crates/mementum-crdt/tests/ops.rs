@@ -16,7 +16,8 @@ mod live;
 use std::collections::{BTreeMap, HashSet};
 
 use mementum_crdt::anchors::{
-    AnchorError, Anchors, BlockHashes, HashKey, Why, changed, hashes, id_key, is_alias, three_way,
+    AnchorError, Anchors, BlockHashes, HashKey, Why, changed, hashes, id_key, is_alias,
+    standalone_alias, three_way,
 };
 use mementum_crdt::ops::{
     self, Base, OpRefusal, Operation, Place, PlanContext, Reason, read_markdown,
@@ -305,6 +306,27 @@ fn aliases_are_stable_when_blocks_are_inserted_above() {
         assert_eq!(after.alias(id), before.alias(id), "{id}");
         assert_eq!(after.resolve(&before.alias(id).unwrap()), Ok(id));
     }
+}
+
+/// L'alias qui se donne sans lire la page (l'outil `search`, lot 5, Task M2) : `b` et les douze
+/// premiers caractères base32 du hachage, qui commencent comme l'alias de la page lue et désignent
+/// le même bloc, même quand deux blocs partagent quatre caractères de hachage.
+#[test]
+fn a_standalone_alias_designates_its_block_without_the_page() {
+    let (a, b) = colliding_ids(4);
+    let page = page_with(&format!("A ^{a}\n\nB ^{b}\n\nC ^p3\n"));
+    let anchors = Anchors::of(&page.read_blocks());
+    for id in [a.as_str(), b.as_str(), "p3"] {
+        let alone = standalone_alias(id).unwrap();
+        assert!(is_alias(&alone), "{alone}");
+        assert_eq!(alone, format!("b{}", &base32_digest(id)[..12]));
+        assert!(
+            alone.starts_with(&anchors.alias(id).unwrap()),
+            "{id} : {alone}"
+        );
+        assert_eq!(anchors.resolve(&alone), Ok(id));
+    }
+    assert_eq!(standalone_alias(""), None);
 }
 
 /// Un alias s'allonge autant qu'il faut pour être seul dans la page, et pas plus ; l'identifiant
