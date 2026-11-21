@@ -36,6 +36,10 @@ const COLD_START: Duration = Duration::from_secs(1);
 /// « Mémoire du serveur au repos < 150 Mo » (mégaoctets : 10⁶ octets).
 const IDLE_RSS: u64 = 150 * 1_000_000;
 
+/// `idle_close` de `SyncConfig` (30 s) : l'acteur d'une page sans connexion ni appel s'arrête
+/// au-delà. `idle_close_is_the_one_of_the_server` le relit.
+const IDLE_CLOSE: Duration = Duration::from_secs(30);
+
 /// Les mesures se font l'une après l'autre.
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -386,6 +390,147 @@ fn cold_start_and_memory_with_an_index_of_10000_pages() {
             );
         }
     }
+}
+
+/// Lot 5, Task X2 : « Mémoire du serveur au repos < 150 Mo » **après 500 lectures d'agent**. Un
+/// jeton (« Peut modifier », plafonds du débit relevés : ce n'est pas lui qu'on mesure) crée 50
+/// pages de 2 000 paragraphes, puis les lit 500 fois par `GET …/document?anchors=block` (sa
+/// première tranche, avec ses alias), chaque page dix fois, une écriture d'agent (`str_replace`)
+/// avant chaque relecture d'une même page : chaque lecture porte une révision neuve, dont les
+/// empreintes vont au cache des révisions servies (16 Mio au plus, R1226). La mémoire se lit **au
+/// repos**, une fois passé `idle_close` sans appel (les acteurs des pages arrêtés) : celle que le
+/// processus tient en propre (< 150 Mo, là où elle se lit, R924), et sa mémoire de travail ; et,
+/// sans budget, 2 s après la dernière lecture, quand les cinquante acteurs vivent encore (Ruling
+/// R1645 : environ 4,5 Ko par bloc d'une page ouverte).
+#[test]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+fn memory_after_500_agent_reads() {
+    release_only();
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    const PAGES: usize = 50;
+    const BLOCKS: usize = 2_000;
+    const READS: usize = 500;
+    let dir = tempfile::tempdir().unwrap();
+    let server = Server::start_with_env(
+        &dir.path().join("donnees"),
+        &[
+            ("MEMENTUM_TOKEN_CALLS_PER_MIN", "100000"),
+            ("MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN", "100000"),
+        ],
+    );
+    let password = "un mot de passe assez long";
+    let account =
+        serde_json::json!({ "email": "alice@exemple.fr", "name": "Alice", "password": password });
+    let signup = server.request(
+        "POST",
+        "/api/v1/auth/signup",
+        Some(&account.to_string()),
+        &[],
+    );
+    assert_eq!(signup.status, 201, "{}", signup.body);
+    let cookie = signup.session_cookie().expect("cookie de session");
+    let read: serde_json::Value = serde_json::from_str(&signup.body).unwrap();
+    let space = read["spaces"][0]["id"].as_str().unwrap().to_string();
+    let body = serde_json::json!({ "name": "agent", "level": "edit", "scope": "all", "password": password });
+    let reply = server.request(
+        "POST",
+        "/api/v1/tokens",
+        Some(&body.to_string()),
+        &[("Cookie", &cookie)],
+    );
+    assert_eq!(reply.status, 201, "{}", reply.body);
+    let read: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+    let bearer = format!("Bearer {}", read["token"].as_str().unwrap());
+    let auth = [("Authorization", bearer.as_str())];
+    let markdown = (1..=BLOCKS)
+        .map(|i| format!("Paragraphe {i} de la page de mesure, avec un peu de texte ordinaire."))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        + "\n";
+    let mut pages = Vec::new();
+    // Dix pages par lot : un corps reste sous 2 Mio.
+    for batch in 0..PAGES / 10 {
+        let list: Vec<serde_json::Value> = (0..10)
+            .map(|i| serde_json::json!({ "title": format!("Page {batch}-{i}"), "markdown": markdown }))
+            .collect();
+        let body = serde_json::json!({ "pages": list }).to_string();
+        let reply = server.request(
+            "POST",
+            &format!("/api/v1/spaces/{space}/pages/batch"),
+            Some(&body),
+            &auth,
+        );
+        assert_eq!(reply.status, 201, "{}", reply.body);
+        let read: serde_json::Value = serde_json::from_str(&reply.body).unwrap();
+        for page in read.as_array().expect("les pages créées") {
+            pages.push(page["id"].as_str().unwrap().to_string());
+        }
+    }
+    assert_eq!(pages.len(), PAGES);
+    let reading = Instant::now();
+    for i in 0..READS {
+        let page = &pages[i % PAGES];
+        if i >= PAGES {
+            let round = i / PAGES;
+            let body = serde_json::json!({ "operations": [{
+                "op": "str_replace",
+                "old": format!("Paragraphe {round} de"),
+                "new": format!("Paragraphe {round} revu de"),
+            }]})
+            .to_string();
+            let reply = server.request(
+                "POST",
+                &format!("/api/v1/pages/{page}/operations"),
+                Some(&body),
+                &auth,
+            );
+            assert_eq!(reply.status, 200, "{}", reply.body);
+        }
+        let reply = server.request(
+            "GET",
+            &format!("/api/v1/pages/{page}/document?anchors=block"),
+            None,
+            &auth,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+    }
+    let read_in = reading.elapsed();
+    // Hors du repos : les acteurs des pages lues vivent encore (`idle_close`, 30 s sans
+    // connexion ni appel), chacun avec sa page en mémoire.
+    thread::sleep(Duration::from_secs(2));
+    let working = memory_of(server.pid());
+    // Au repos : `idle_close` passé, les acteurs arrêtés.
+    thread::sleep(IDLE_CLOSE + Duration::from_secs(3));
+    let used = memory_of(server.pid());
+    println!(
+        "MESURE après {READS} lectures d'agent de pages de {BLOCKS} blocs ({read_in:?}, une \
+         écriture d'agent avant chaque relecture) : 2 s après, les {PAGES} acteurs vivants, \
+         mémoire de travail {:.1} Mo, en propre {} Mo ; au repos ({IDLE_CLOSE:?} plus tard), \
+         mémoire de travail {:.1} Mo, en propre {} Mo",
+        mb(working.rss),
+        own_mb(working),
+        mb(used.rss),
+        own_mb(used),
+    );
+    server.kill();
+    if let Some(own) = used.own {
+        assert!(
+            own < IDLE_RSS,
+            "mémoire tenue en propre après {READS} lectures d'agent : {own} octets (budget \
+             {IDLE_RSS})"
+        );
+    }
+}
+
+/// L'attente de [`memory_after_500_agent_reads`] suit `idle_close` : sans cela, la mémoire « au
+/// repos » se lirait les acteurs encore vivants.
+#[test]
+fn idle_close_is_the_one_of_the_server() {
+    assert_eq!(
+        IDLE_CLOSE,
+        mementum_sync::SyncConfig::default().idle_close,
+        "`IDLE_CLOSE` (tests/budgets.rs) doit valoir `idle_close` de `SyncConfig`"
+    );
 }
 
 #[test]
