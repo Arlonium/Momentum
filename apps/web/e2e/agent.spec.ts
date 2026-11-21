@@ -358,6 +358,25 @@ test("an_agent_edits_while_a_human_types_and_nothing_is_lost", async ({ browser 
   // chacune.
   const crossing = new Set([2, 9, 16]);
   const crossings: number[] = [];
+  // La frappe suit l'agent, par tranches de dix : la tranche k part quand l'appel k est lancé (la
+  // retenue posée, pour un appel croisé). Chaque appel a donc des frappes en vol, et un appel croisé a
+  // les siennes pendant la retenue, quelle que soit la vitesse du coureur : libre, la frappe pouvait
+  // finir avant le troisième appel croisé sur un coureur lent, qui attendait alors des frappes qui ne
+  // venaient plus (D9 de la passe de fin du lot 5 : `sentWhileHeld` à 0 sur la CI).
+  const calls = points.length * 2;
+  expect(calls).toBe(20);
+  const launched = Array.from({ length: calls }, () => {
+    let go!: () => void;
+    const at = new Promise<void>((resolve) => (go = resolve));
+    return { at, go };
+  });
+  const slice = typed.length / calls;
+  const typing = (async () => {
+    for (const [k, call] of launched.entries()) {
+      await call.at;
+      await p.keyboard.type(typed.slice(k * slice, (k + 1) * slice), { delay: 15 });
+    }
+  })();
   const agentWork = (async () => {
     let n = 0;
     for (const [i, point] of points.entries()) {
@@ -366,8 +385,9 @@ test("an_agent_edits_while_a_human_types_and_nothing_is_lost", async ({ browser 
         { op: "str_replace", old: point, new: done },
         { op: "insert", after: anchors.get(point), markdown: `Ajout ${i + 1}.\n` },
       ]) {
-        const crossed = crossing.has(n++);
+        const crossed = crossing.has(n);
         if (crossed) await frames.hold();
+        launched[n++].go();
         const result = await agent.call("update_page", {
           page: pageId,
           base_revision: revision,
@@ -384,7 +404,7 @@ test("an_agent_edits_while_a_human_types_and_nothing_is_lost", async ({ browser 
       }
     }
   })();
-  await Promise.all([p.keyboard.type(typed, { delay: 15 }), agentWork]);
+  await Promise.all([typing, agentWork]);
   expect(conflicts).toEqual([]);
   expect(crossings).toHaveLength(3);
 
