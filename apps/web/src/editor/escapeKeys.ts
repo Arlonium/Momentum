@@ -9,8 +9,8 @@
 // prennent eux-mêmes (ils sont ouverts, et `OverrideEscape` leur laissait déjà la touche) ; le menu
 // de la poignée, la fenêtre d'un bloc, le panneau des commentaires, la fenêtre de recherche et la
 // fenêtre de l'historique ont le focus quand on l'y tape. Une fenêtre (`dialog`) qui contient un
-// éditeur, l'aperçu d'une version, se ferme désormais par Échap tapé dans cet éditeur : la touche
-// n'y est plus retenue.
+// éditeur, l'aperçu d'une version, se fermait déjà par Échap tapé dans cet éditeur (sonde dans
+// Chromium), et se ferme toujours : la touche n'y est plus retenue (`preventDefault`).
 //
 // Le seul geste que `OverrideEscape` rendait et qu'il faut garder : la barre de mise en forme, qui
 // paraît sur du texte sélectionné, se fermait (le focus parti, la barre partait). Ici, Échap réduit la
