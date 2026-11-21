@@ -23,7 +23,7 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use common::*;
 use mementum_server::SignupMode;
-use mementum_store::{TokenLevel, TokenScope, VersionReason};
+use mementum_store::{TokenLevel, TokenScope};
 use mementum_sync::testkit::Client;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -229,7 +229,7 @@ async fn keystroke(writer: &Client, reader: &Client, block: &str) -> Duration {
 }
 
 /// Des frappes, une toutes les [`PACE`], jusqu'à ce que `done` le dise (au moins deux : la
-/// première, d'après la connexion, est jugée à part).
+/// première d'une série qui suit la connexion est jugée à part, [`judged`]).
 async fn keystrokes_until(
     writer: &Client,
     reader: &Client,
@@ -244,8 +244,25 @@ async fn keystrokes_until(
     times
 }
 
-/// Ce que dit une série de frappes, la première à part, et le dépassement du budget au p95.
-fn judged(what: &str, mut times: Vec<Duration>, over: &mut Vec<String>) -> String {
+/// Ce que dit une série de frappes, et le dépassement du budget au p95. La première frappe d'une
+/// série qui suit la connexion (`after_connection`) est jugée à part (R488) ; dans une série qui
+/// en suit une autre, elle y entre comme les autres.
+fn judged(
+    what: &str,
+    mut times: Vec<Duration>,
+    after_connection: bool,
+    over: &mut Vec<String>,
+) -> String {
+    if !after_connection {
+        let p95 = rank(&mut times, 95);
+        if p95 >= KEYSTROKE_BUDGET {
+            over.push(format!(
+                "{what} : p95 {p95:?} (budget {KEYSTROKE_BUDGET:?}), {}",
+                said(&mut times)
+            ));
+        }
+        return said(&mut times);
+    }
     let first = times.remove(0);
     let p95 = rank(&mut times, 95);
     if p95 >= KEYSTROKE_BUDGET {
@@ -267,15 +284,26 @@ fn ids(client: &Client) -> Vec<String> {
     client.blocks().into_iter().map(|b| b.id).collect()
 }
 
-/// Les versions `before_agent` que la page garde.
-async fn before_agent_versions(t: &TestApp, page: Uuid) -> usize {
-    t.store
-        .list_versions(page)
-        .await
-        .unwrap()
-        .iter()
-        .filter(|v| v.reason == VersionReason::BeforeAgent)
-        .count()
+/// Pose un déclencheur témoin qui note chaque version `before_agent` coupée, dans la transaction
+/// qui l'écrit : la purge (vingt gardées au plus, R1234) ne la retire pas du compte.
+async fn watch_before_agent_cuts(t: &TestApp) {
+    exec_sql(
+        &t.db_path(),
+        "CREATE TABLE before_agent_cuts (n INTEGER PRIMARY KEY AUTOINCREMENT, node TEXT NOT NULL); \
+         CREATE TRIGGER before_agent_cut AFTER INSERT ON doc_versions \
+         WHEN NEW.reason = 'before_agent' \
+         BEGIN INSERT INTO before_agent_cuts (node) VALUES (NEW.node_id); END;",
+    )
+    .await;
+}
+
+/// Les versions `before_agent` coupées dans la page depuis [`watch_before_agent_cuts`].
+async fn before_agent_cuts(t: &TestApp, page: Uuid) -> i64 {
+    query_i64(
+        &t.db_path(),
+        &format!("SELECT COUNT(*) FROM before_agent_cuts WHERE node = '{page}'"),
+    )
+    .await
 }
 
 /// La frappe d'une personne dans une page de 10 000 blocs **pendant qu'un agent y écrit au débit
@@ -325,10 +353,11 @@ async fn keystroke_seen_under_150ms_while_an_agent_edits_the_page_in_a_loop() {
         "{TOKEN_MINUTE} str_replace d'un agent en {:?} (appel : {}) ; frappe : {}",
         started.elapsed(),
         said(&mut calls),
-        judged("pendant les str_replace", seen, &mut over),
+        judged("pendant les str_replace", seen, true, &mut over),
     ));
 
     // 2. Une lecture puis un `replace_block`, soixante fois.
+    watch_before_agent_cuts(&t).await;
     let agent = Agent::of(&t, olga.id).await;
     let done = Arc::new(AtomicBool::new(false));
     let rounds = TOKEN_MINUTE / 2;
@@ -352,17 +381,17 @@ async fn keystroke_seen_under_150ms_while_an_agent_edits_the_page_in_a_loop() {
     let started = Instant::now();
     let seen = keystrokes_until(&writer, &reader, &typed, || done.load(Ordering::Relaxed)).await;
     let mut calls = calls.await.unwrap();
-    let versions = before_agent_versions(&t, page).await;
+    let cuts = before_agent_cuts(&t, page).await;
     lines.push(format!(
-        "{rounds} lectures et replace_block d'un agent en {:?} (replace_block : {} ; {versions} \
-         versions before_agent gardées) ; frappe : {}",
+        "{rounds} lectures et replace_block d'un agent en {:?} (replace_block : {} ; {cuts} \
+         versions before_agent coupées) ; frappe : {}",
         started.elapsed(),
         said(&mut calls),
-        judged("pendant les replace_block", seen, &mut over),
+        judged("pendant les replace_block", seen, false, &mut over),
     ));
-    assert!(
-        versions >= rounds.min(20),
-        "chaque remplacement devait couper une version before_agent : {versions}"
+    assert_eq!(
+        cuts, rounds as i64,
+        "chaque remplacement devait couper une version before_agent"
     );
     println!(
         "MESURE frappe d'une personne dans une page de {BLOCKS} blocs pendant qu'un agent y écrit \
@@ -421,9 +450,14 @@ async fn keystroke_seen_under_150ms_while_an_agent_creates_pages_in_a_loop() {
          pendant que l'indexeur les relit ({:?} de plus) : {}",
         PAGES * TOKEN_MINUTE,
         said(&mut calls),
-        judged("pendant les créations", seen, &mut over),
+        judged("pendant les créations", seen, true, &mut over),
         started.elapsed() - created,
-        judged("pendant l'indexation des pages créées", indexing, &mut over),
+        judged(
+            "pendant l'indexation des pages créées",
+            indexing,
+            false,
+            &mut over
+        ),
     );
     assert!(over.is_empty(), "{}", over.join("\n"));
 }
@@ -445,6 +479,7 @@ async fn keystroke_seen_under_150ms_while_three_tokens_of_an_account_write() {
     let (writer, reader) = two_tabs(&t, &olga, page).await;
     let blocks = ids(&writer);
     let typed = blocks[0].clone();
+    watch_before_agent_cuts(&t).await;
     let (first, second, third) = (
         Agent::of(&t, olga.id).await,
         Agent::of(&t, olga.id).await,
@@ -514,7 +549,13 @@ async fn keystroke_seen_under_150ms_while_three_tokens_of_an_account_write() {
         said(&mut edits),
         said(&mut replaces),
         said(&mut creations),
-        judged("pendant trois jetons du compte", seen, &mut over),
+        judged("pendant trois jetons du compte", seen, true, &mut over),
+    );
+    // La personne tape sans cesse : chaque remplacement du deuxième jeton coupe sa version.
+    assert_eq!(
+        before_agent_cuts(&t, page).await,
+        (share / 2) as i64,
+        "chaque remplacement devait couper une version before_agent"
     );
     assert!(over.is_empty(), "{}", over.join("\n"));
 }
