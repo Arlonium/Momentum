@@ -2249,6 +2249,17 @@ button.tree-toggle:hover {
 }
 
 /* Le jeton montré, et les commandes qui branchent Claude Code. */
+.mm-token-keep {
+  margin: 2px 0 0 24px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-token-field {
+  display: block;
+  margin-top: 6px;
+}
+
 .mm-token-text {
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 13px;
