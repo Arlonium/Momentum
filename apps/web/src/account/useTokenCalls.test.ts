@@ -35,6 +35,8 @@ const page = (ids: number[], more: boolean): TokenCalls => ({
   purged: 0,
 });
 
+const t1 = { id: "t1", busyCount: 0, callsPurged: 0 };
+
 /** Laisse partir les lectures demandées (elles partent au tour suivant). */
 const tick = () => settle(() => new Promise((done) => setTimeout(done, 5)));
 
@@ -46,7 +48,7 @@ test("a_lost_session_reads_what_was_asked_again_when_the_account_comes_back", as
     .mockResolvedValueOnce(page([9, 8], true))
     .mockRejectedValueOnce(unauthenticated())
     .mockResolvedValueOnce(page([7], false));
-  const hook = await renderHook(() => useTokenCalls("t1", null, () => login.promise), undefined);
+  const hook = await renderHook(() => useTokenCalls(t1, null, () => login.promise), undefined);
   await tick();
   // La première lecture trouve la session perdue : rien n'est dit, rien ne repart avant le compte.
   expect(tokenCalls).toHaveBeenCalledTimes(1);
@@ -77,7 +79,7 @@ test("a_failed_read_says_why_and_waits_for_a_gesture", async () => {
     .mockResolvedValueOnce(page([9, 8], true))
     .mockRejectedValueOnce(new ApiError(500, "internal", "erreur interne du serveur"))
     .mockResolvedValueOnce(page([7], true));
-  const hook = await renderHook(() => useTokenCalls("t1", "refused"), undefined);
+  const hook = await renderHook(() => useTokenCalls(t1, "refused"), undefined);
   await tick();
   expect(hook.current).toMatchObject({ calls: null, error: "Le serveur Mementum ne répond pas." });
   await tick();
@@ -104,7 +106,7 @@ test("a_failed_read_says_why_and_waits_for_a_gesture", async () => {
 test("asking_for_more_twice_reads_one_page", async () => {
   const answer = deferred<TokenCalls>();
   vi.mocked(tokenCalls).mockReset().mockResolvedValueOnce(page([9, 8], true)).mockReturnValueOnce(answer.promise);
-  const hook = await renderHook(() => useTokenCalls("t1", null), undefined);
+  const hook = await renderHook(() => useTokenCalls(t1, null), undefined);
   await tick();
   await settle(() => hook.current.loadMore());
   await settle(() => hook.current.loadMore());
@@ -114,4 +116,18 @@ test("asking_for_more_twice_reads_one_page", async () => {
   await tick();
   expect(tokenCalls).toHaveBeenCalledTimes(2);
   expect(hook.current.calls?.map((c) => c.id)).toEqual([9, 8, 7, 6]);
+});
+
+test("retry_after_a_page_reads_nothing", async () => {
+  // « Réessayer » ne vaut que pour une première lecture qui a échoué : une page lue, il ne lit ni elle
+  // ni la suite (la lecture ne lit la suite que demandée).
+  vi.mocked(tokenCalls).mockReset().mockResolvedValueOnce(page([9, 8], true)).mockResolvedValue(page([7], false));
+  const hook = await renderHook(() => useTokenCalls(t1, null), undefined);
+  await tick();
+  expect(hook.current.calls?.map((c) => c.id)).toEqual([9, 8]);
+  await settle(() => hook.current.retry());
+  await tick();
+  expect(tokenCalls).toHaveBeenCalledTimes(1);
+  expect(hook.current).toMatchObject({ retrying: false, more: true });
+  expect(hook.current.calls?.map((c) => c.id)).toEqual([9, 8]);
 });

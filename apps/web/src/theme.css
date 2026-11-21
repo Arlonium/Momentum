@@ -2154,7 +2154,9 @@ button.tree-toggle:hover {
 
 /* L'activité d'un jeton (lot 5, Task C2), dépliée sous sa ligne, sur toute la largeur. Les boutons
    de la ligne : « Révoquer », puis « Activité », toujours à la même place. La liste des appels défile
-   en dedans, et son pied (« Afficher plus d'appels ») reste sous elle (R1094). */
+   en dedans, et son pied (« Afficher plus d'appels ») reste sous elle (R1094). Leur hauteur est gardée
+   avant leur arrivée (`--mm-token-calls-reserve` : la liste au plus haut, et son pied), pour que la
+   ligne du dessous ne bouge pas sans geste (R1477). */
 .mm-token {
   flex-wrap: wrap;
 }
@@ -2174,6 +2176,9 @@ button.tree-toggle:hover {
 }
 
 .mm-token-activity {
+  --mm-token-calls-max: 22rem;
+  /* Le pied : sa marge et la hauteur d'un `.mm-button-small`. */
+  --mm-token-calls-reserve: calc(var(--mm-token-calls-max) + 36px);
   flex: 1 0 100%;
   min-width: 0;
   padding: 4px 0 8px;
@@ -2193,7 +2198,8 @@ button.tree-toggle:hover {
 }
 
 .mm-token-calls-zone {
-  max-height: 22rem;
+  box-sizing: border-box;
+  max-height: var(--mm-token-calls-max);
   overflow-y: auto;
   border: 1px solid var(--mm-popover-divider);
   border-radius: 6px;

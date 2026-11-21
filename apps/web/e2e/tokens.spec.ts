@@ -217,7 +217,7 @@ test("the_activity_of_a_token_tells_its_calls", async ({ browser }) => {
   await expect(calls.nth(0).locator(".mm-token-call-outcome")).toHaveText("Refusé");
   await expect(calls.nth(0).locator(".mm-token-call-code")).toHaveText("not_found");
   await expect(calls.nth(0)).toContainText("GET /api/v1/pages/{id}");
-  await expect(calls.nth(0)).toContainText("une page que tu ne vois plus");
+  await expect(calls.nth(0)).toContainText("une page que tu ne vois pas");
   await expect(calls.nth(1).locator(".mm-token-call-outcome")).toHaveText("Réussi");
   await expect(calls.nth(1)).toContainText("Projet suivi");
   const shown = await line.innerHTML();
@@ -239,4 +239,90 @@ test("the_activity_of_a_token_tells_its_calls", async ({ browser }) => {
   await toggle.click();
   await expect(line.locator(".mm-token-activity")).toHaveCount(0);
   await expect(toggle).toBeFocused();
+});
+
+test("the_first_page_of_an_activity_moves_nothing_below", async ({ browser }) => {
+  // Lot 5, tour de correction de C2 (R1477) : la hauteur de l'activité est gardée avant l'arrivée de
+  // ses appels. Le bouton « Activité » du jeton du dessous ne bouge ni quand la première page arrive,
+  // ni quand une autre issue est relue, même plus courte.
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const spaceId = (await firstSpace(api)).id;
+  const create = async (name: string) => {
+    const created = await api.post("/api/v1/tokens", {
+      data: { name, level: "read", scope: "all", canTrash: false, password: PASSWORD },
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    return (await created.json()) as { token: string; info: { id: string } };
+  };
+  // Le plus récent vient en tête de la liste : celui qui a servi est au-dessus, puis celui qui ne
+  // servira qu'une fois la liste lue.
+  await create("Agent du dessous");
+  const fresh = await create("Agent neuf");
+  const used = await create("Agent qui a servi");
+  const client = await agent();
+  /** Deux appels réussis par `token`, attendus au journal (il s'écrit par paquets). */
+  const twoCalls = async (token: { token: string; info: { id: string } }) => {
+    for (let i = 0; i < 2; i++) {
+      expect(await readTree(client, spaceId, token.token)).toEqual({ status: 200, error: null });
+    }
+    await expect
+      .poll(async () => ((await (await api.get(`/api/v1/tokens/${token.info.id}/calls`)).json()) as { calls: unknown[] }).calls.length)
+      .toBe(2);
+  };
+  await twoCalls(used);
+
+  const p = await newUser(browser, account);
+  // Les lectures de l'activité attendent que le test les relâche, une à une.
+  const held: (() => void)[] = [];
+  await p.route("**/api/v1/tokens/*/calls*", async (route) => {
+    await new Promise<void>((done) => held.push(done));
+    await route.continue();
+  });
+  const release = async () => {
+    await expect.poll(() => held.length).toBe(1);
+    held.shift()!();
+  };
+  await p.goto("/account/tokens");
+  const upper = p.locator("li[data-token-id]").filter({ hasText: "Agent qui a servi" });
+  const lower = p.locator("li[data-token-id]").filter({ hasText: "Agent du dessous" });
+  const below = lower.getByRole("button", { name: "Activité" });
+  const top = async () => (await below.boundingBox())!.y;
+  expect((await upper.boundingBox())!.y).toBeLessThan((await lower.boundingBox())!.y);
+
+  // Dépliée : la place est prise tout de suite, pendant la lecture.
+  await upper.getByRole("button", { name: "Activité" }).click();
+  await expect(upper.getByText("Chargement…")).toBeVisible();
+  const waiting = await top();
+  await release();
+  const calls = upper.locator("li[data-call-id]");
+  await expect(calls).toHaveCount(2);
+  expect(await top()).toBe(waiting);
+
+  // Une autre issue, plus courte (aucun refus) : la hauteur reste, pendant la lecture et après, et le
+  // filtre ne bouge pas (la phrase des comptes, au-dessus, reste).
+  const filter = upper.getByLabel("Issue");
+  const filterAt = async () => (await filter.boundingBox())!.y;
+  const filterBefore = await filterAt();
+  await filter.selectOption("refused");
+  await expect(upper.getByText("Chargement…")).toBeVisible();
+  expect(await top()).toBe(waiting);
+  expect(await filterAt()).toBe(filterBefore);
+  await release();
+  await expect(upper.getByText("Aucun appel refusé.")).toBeVisible();
+  expect(await top()).toBe(waiting);
+  expect(await filterAt()).toBe(filterBefore);
+
+  // Un jeton qui n'avait pas servi quand la liste a été lue : rien n'est gardé pour sa première page,
+  // qui le pousse en arrivant ; mais une autre issue, plus courte, garde la hauteur qu'il avait.
+  await twoCalls(fresh);
+  const middle = p.locator("li[data-token-id]").filter({ hasText: "Agent neuf" });
+  await middle.getByRole("button", { name: "Activité" }).click();
+  await release();
+  await expect(middle.locator("li[data-call-id]")).toHaveCount(2);
+  const grown = await top();
+  await middle.getByLabel("Issue").selectOption("refused");
+  await release();
+  await expect(middle.getByText("Aucun appel refusé.")).toBeVisible();
+  expect(await top()).toBe(grown);
 });

@@ -5,7 +5,7 @@ import type { Me, TokenCall, TokenCalls, TokenInfo } from "@mementum/protocol";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
-import { listTokens, tokenCalls } from "../api";
+import { ApiError, listTokens, tokenCalls } from "../api";
 import { SessionContext } from "../session/session";
 import { deferred, until } from "../test/hooks";
 import { space } from "../test/pages";
@@ -245,14 +245,96 @@ test("a_page_one_no_longer_sees_has_no_title", async () => {
   await until(host, () => shownCalls("a").length === 3, "l'activité");
   const activity = activityOf("a")!;
   const line = (id: number) => activity.querySelector<HTMLElement>(`li[data-call-id="${id}"]`)!;
-  expect(plain(line(3))).toContain("une page que tu ne vois plus");
+  expect(plain(line(3))).toContain("une page que tu ne vois pas");
   // Ni son titre, ni son identifiant : rien de la page.
   expect(activity.innerHTML).not.toContain("page-qu-on-ne-voit-plus");
   // Une page vue : son titre, venu d'ailleurs, isolé.
   const title = line(2).querySelector<HTMLElement>(".mm-token-call-page .mm-isolate")!;
   expect(title.textContent).toBe("Projet");
   expect(title.getAttribute("dir")).toBe("auto");
-  expect(plain(line(2))).not.toContain("ne vois plus");
+  expect(plain(line(2))).not.toContain("ne vois pas");
   // Un appel qui ne nomme aucune page n'en dit rien.
   expect(line(1).querySelector(".mm-token-call-page")).toBeNull();
+});
+
+test("a_successful_retry_gives_the_focus_to_the_list", async () => {
+  // La première lecture échoue ; « Réessayer », grisé pendant le nouvel essai, garde le focus, puis
+  // part avec la page lue : la liste prend le focus, jamais `body` (R1478).
+  await rendered([token("a"), token("b")]);
+  vi.mocked(tokenCalls).mockRejectedValueOnce(new ApiError(0, null, "Le serveur Mementum ne répond pas."));
+  await click(toggleOf("a"));
+  await until(host, () => buttonNamed(activityOf("a")!, "Réessayer") !== null, "le refus");
+  const retry = buttonNamed(activityOf("a")!, "Réessayer")!;
+  retry.focus();
+  const again = deferred<TokenCalls>();
+  vi.mocked(tokenCalls).mockReturnValueOnce(again.promise);
+  await click(retry);
+  await until(host, () => vi.mocked(tokenCalls).mock.calls.length === 2, "le nouvel essai");
+  expect(retry.getAttribute("aria-disabled")).toBe("true");
+  expect(document.activeElement).toBe(retry);
+  // Un autre clic pendant l'essai n'en demande pas un autre.
+  await click(retry);
+  await act(async () => again.resolve(answer([call(2), call(1)])));
+  await until(host, () => shownCalls("a").length === 2, "la page lue");
+  expect(tokenCalls).toHaveBeenCalledTimes(2);
+  expect(document.activeElement).toBe(activityOf("a")!.querySelector(".mm-token-calls-zone"));
+
+  // Une page vide : il n'y a pas de liste, le filtre prend le focus.
+  vi.mocked(tokenCalls).mockRejectedValueOnce(new ApiError(0, null, "Le serveur Mementum ne répond pas."));
+  await click(toggleOf("b"));
+  await until(host, () => buttonNamed(activityOf("b")!, "Réessayer") !== null, "le refus");
+  buttonNamed(activityOf("b")!, "Réessayer")!.focus();
+  vi.mocked(tokenCalls).mockResolvedValueOnce(answer([]));
+  await click(buttonNamed(activityOf("b")!, "Réessayer")!);
+  await until(host, () => activityOf("b")!.textContent!.includes("Aucun appel pour l'instant."), "la page vide");
+  expect(document.activeElement).toBe(activityOf("b")!.querySelector("select"));
+});
+
+test("a_refused_page_of_more_is_said_under_its_button", async () => {
+  // Le refus de la suite se dit sous « Afficher plus d'appels » : au-dessus, il pousserait le bouton
+  // sous le pointeur.
+  await rendered([token("a")]);
+  vi.mocked(tokenCalls).mockResolvedValueOnce(answer([call(9), call(8)], { more: true }));
+  await click(toggleOf("a"));
+  await until(host, () => shownCalls("a").length === 2, "la première page");
+  vi.mocked(tokenCalls).mockRejectedValueOnce(new ApiError(500, "internal", "erreur interne du serveur"));
+  const more = buttonNamed(activityOf("a")!, "Afficher plus d'appels")!;
+  await click(more);
+  await until(host, () => activityOf("a")!.querySelector('[role="alert"]') !== null, "le refus");
+  const alert = activityOf("a")!.querySelector('[role="alert"]')!;
+  expect(alert.textContent).toBe("La suite n'a pas pu être lue. erreur interne du serveur");
+  expect(buttonNamed(activityOf("a")!, "Afficher plus d'appels")).toBe(more);
+  expect(more.compareDocumentPosition(alert) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+test("the_counts_stay_when_the_outcome_changes", async () => {
+  // Les comptes sont ceux du jeton : ceux de la liste d'abord, puis ceux de chaque réponse ; une autre
+  // issue ne les retire pas pendant sa lecture, si bien que le filtre, dessous, ne bouge pas (R1476).
+  await rendered([token("a", { busyCount: 5, callsPurged: 7, lastUsedAt: 1_800_000_050_000 })]);
+  const first = deferred<TokenCalls>();
+  vi.mocked(tokenCalls).mockReturnValueOnce(first.promise);
+  await click(toggleOf("a"));
+  const lead = () => plain(activityOf("a")!.querySelector(".mm-token-activity-lead"));
+  // Avant toute réponse : les comptes de la liste.
+  expect(lead()).toContain("7 appels plus anciens ne sont plus gardés.");
+  expect(lead()).toContain("5 appels refusés par le débit");
+  await act(async () => first.resolve(answer([call(1)], { busyCount: 6, purged: 7 })));
+  await until(host, () => shownCalls("a").length === 1, "la première page");
+  expect(lead()).toContain("6 appels refusés par le débit");
+
+  // Une autre issue : pendant sa lecture, la phrase reste telle quelle.
+  const refused = deferred<TokenCalls>();
+  vi.mocked(tokenCalls).mockReturnValueOnce(refused.promise);
+  const filter = activityOf("a")!.querySelector("select")!;
+  const before = lead();
+  await act(async () => {
+    filter.value = "refused";
+    filter.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await until(host, () => vi.mocked(tokenCalls).mock.calls.length === 2, "la relecture");
+  expect(shownCalls("a")).toEqual([]);
+  expect(lead()).toBe(before);
+  await act(async () => refused.resolve(answer([], { busyCount: 6, purged: 7 })));
+  await until(host, () => activityOf("a")!.textContent!.includes("Aucun appel refusé."), "les refus");
+  expect(lead()).toBe(before);
 });

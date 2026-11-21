@@ -12,31 +12,41 @@
 // suite). Une lecture qui échoue garde ce qui est montré et dit pourquoi, tel que le serveur le dit ;
 // elle ne se refait pas d'elle-même (« Réessayer », ou « Afficher plus » de nouveau).
 //
-// Les comptes des appels refusés par le débit et des lignes purgées sont ceux de la première lecture :
-// la suite ne les change pas, une phrase de plus au-dessus de la liste ferait bouger ce qui est sous
-// le pointeur.
+// Les comptes des appels refusés par le débit et des lignes purgées sont ceux du jeton, pas d'une
+// issue : ils partent de ceux de la liste (`TokenInfo`), sont remplacés par ceux de chaque réponse,
+// et restent d'une issue à l'autre, pendant la relecture comprise (R1476). La phrase qui les dit,
+// au-dessus du filtre, ne disparaît donc pas quand on change d'issue : le filtre ne bouge pas.
 import type { TokenCall, TokenCallOutcome } from "@mementum/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isSessionLost, tokenCalls } from "../api";
 import { scheduleRereads, SESSION_LOST, waitForAccount } from "../rereads";
 import { messageOf } from "../session/forms";
 
+/** Le jeton dont on lit l'activité, et ses comptes tels que la liste les a lus. */
+export type ActivityToken = {
+  id: string;
+  busyCount: number;
+  callsPurged: number;
+};
+
 export type TokenCallsRead = {
   /** Les appels lus, le plus récent d'abord ; `null` : la première page n'est pas encore lue. */
   calls: TokenCall[] | null;
   /** Des appels plus anciens restent à lire. */
   more: boolean;
-  /** Les appels refusés par le débit, comptés sans ligne (R1244). */
+  /** Les appels refusés par le débit, comptés sans ligne (R1244), d'après la dernière réponse. */
   busyCount: number;
-  /** Les lignes que la purge a retirées (R1244). */
+  /** Les lignes que la purge a retirées (R1244), d'après la dernière réponse. */
   purged: number;
   /** Le message de la dernière lecture si elle a échoué, tel que le serveur le dit. */
   error: string | null;
   /** La suite est demandée et pas encore lue. */
   loadingMore: boolean;
+  /** Un « Réessayer » a demandé la première page, pas encore lue. */
+  retrying: boolean;
   /** Demande la page qui suit la dernière ligne lue. */
   loadMore(): void;
-  /** Refait une première lecture qui a échoué. */
+  /** Refait une première lecture qui a échoué ; sans effet une fois une page lue. */
   retry(): void;
 };
 
@@ -45,11 +55,13 @@ type Loaded = {
   key: string;
   calls: TokenCall[] | null;
   more: boolean;
-  busyCount: number;
-  purged: number;
   error: string | null;
   loadingMore: boolean;
+  retrying: boolean;
 };
+
+/** Les comptes d'un jeton, quelle que soit l'issue lue. */
+type Counts = { tokenId: string; busyCount: number; purged: number };
 
 const keyOf = (tokenId: string, outcome: TokenCallOutcome | null) => `${tokenId}/${outcome ?? "all"}`;
 
@@ -57,19 +69,26 @@ const fresh = (key: string): Loaded => ({
   key,
   calls: null,
   more: false,
-  busyCount: 0,
-  purged: 0,
   error: null,
   loadingMore: false,
+  retrying: false,
+});
+
+const countsOf = (token: ActivityToken): Counts => ({
+  tokenId: token.id,
+  busyCount: token.busyCount,
+  purged: token.callsPurged,
 });
 
 export function useTokenCalls(
-  tokenId: string,
+  token: ActivityToken,
   outcome: TokenCallOutcome | null,
   afterLogin?: () => Promise<void>,
 ): TokenCallsRead {
+  const tokenId = token.id;
   const key = keyOf(tokenId, outcome);
   const [loaded, setLoaded] = useState<Loaded>(() => fresh(key));
+  const [counts, setCounts] = useState<Counts>(() => countsOf(token));
   const options = useRef({ afterLogin });
   options.current = { afterLogin };
   /** Demande la suite ; refait une première lecture. Remplacés à chaque jeton ou issue. */
@@ -96,36 +115,38 @@ export function useTokenCalls(
         });
         if (schedule.stopped) return;
         wantMore = false;
-        show(
-          shown.calls === null
-            ? {
-                key,
-                calls: page.calls,
-                more: page.more,
-                busyCount: page.busyCount,
-                purged: page.purged,
-                error: null,
-                loadingMore: false,
-              }
-            : { ...shown, calls: [...shown.calls, ...page.calls], more: page.more, error: null, loadingMore: false },
-        );
+        setCounts({ tokenId, busyCount: page.busyCount, purged: page.purged });
+        show({
+          ...shown,
+          calls: shown.calls === null ? page.calls : [...shown.calls, ...page.calls],
+          more: page.more,
+          error: null,
+          loadingMore: false,
+          retrying: false,
+        });
       } catch (e) {
         if (schedule.stopped) return;
         // Session perdue : la connexion est demandée par-dessus l'application ; la même lecture
         // repart au retour du compte, la suite toujours demandée.
         if (isSessionLost(e)) return SESSION_LOST;
         wantMore = false;
-        show({ ...shown, error: messageOf(e), loadingMore: false });
+        show({ ...shown, error: messageOf(e), loadingMore: false, retrying: false });
       }
     }, waitForAccount(options));
     actions.current = {
       loadMore: () => {
+        // Défense en profondeur : la lecture ne lit de toute façon qu'une page par demande.
         if (schedule.stopped || shown.calls === null || !shown.more || wantMore) return;
         wantMore = true;
         show({ ...shown, loadingMore: true });
         schedule.request(true);
       },
-      retry: () => schedule.request(true),
+      retry: () => {
+        if (schedule.stopped || shown.retrying) return;
+        // Une page déjà lue : la lecture ne lit rien (elle ne lit la suite que demandée).
+        if (shown.calls === null) show({ ...shown, retrying: true });
+        schedule.request(true);
+      },
     };
     schedule.request(true);
     return () => {
@@ -137,9 +158,11 @@ export function useTokenCalls(
   const loadMore = useCallback(() => actions.current.loadMore(), []);
   const retry = useCallback(() => actions.current.retry(), []);
   const current = loaded.key === key ? loaded : fresh(key);
-  const { calls, more, busyCount, purged, error, loadingMore } = current;
+  const { calls, more, error, loadingMore, retrying } = current;
+  // Un autre jeton (le composant n'en change pas, mais le hook le permet) repart de ses comptes.
+  const { busyCount, purged } = counts.tokenId === tokenId ? counts : countsOf(token);
   return useMemo(
-    () => ({ calls, more, busyCount, purged, error, loadingMore, loadMore, retry }),
-    [calls, more, busyCount, purged, error, loadingMore, loadMore, retry],
+    () => ({ calls, more, busyCount, purged, error, loadingMore, retrying, loadMore, retry }),
+    [calls, more, busyCount, purged, error, loadingMore, retrying, loadMore, retry],
   );
 }
