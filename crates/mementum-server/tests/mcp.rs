@@ -1486,3 +1486,70 @@ async fn a_tool_call_whose_client_left_leaves_a_line_with_its_tool() {
     );
 }
 
+/// Une page qu'on ne voit pas, ou hors de la portée du jeton, répond exactement comme une page qui
+/// n'existe pas, par chaque outil qui vise une page (Review Focus de M2 : rien d'une page n'entre
+/// dans le texte d'une erreur).
+#[tokio::test]
+async fn a_page_out_of_reach_answers_like_a_missing_page() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let secret = team
+        .page(
+            None,
+            "Secrète",
+            &[(Subject::User(team.olga.id), Level::Full)],
+        )
+        .await;
+    let open = page_with(&team, "Ouverte", "Un\n").await;
+    let other = page_with(&team, "Autre", "Deux\n").await;
+    let (all, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Edit,
+        TokenScope::All,
+        false,
+    )
+    .await;
+    let (narrow, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Edit,
+        TokenScope::Pages {
+            space: team.space,
+            pages: vec![open],
+        },
+        false,
+    )
+    .await;
+    let missing = Uuid::now_v7();
+    let calls = |page: Uuid| {
+        let p = page.to_string();
+        [
+            ("fetch", json!({ "id": p })),
+            (
+                "update_page",
+                json!({ "page": p, "operations": [{ "op": "insert", "position": "end", "markdown": "Non\n" }] }),
+            ),
+            (
+                "manage_pages",
+                json!({ "action": "rename", "page": p, "title": "Non" }),
+            ),
+            ("manage_pages", json!({ "action": "duplicate", "page": p })),
+            (
+                "create_pages",
+                json!({ "space": "Équipe", "parent": p, "pages": [{ "title": "Non" }] }),
+            ),
+        ]
+    };
+    for (token, hidden) in [(&all, secret), (&narrow, other)] {
+        let mcp = Mcp::new(&t, token, Era::V2026);
+        for ((tool, unseen), (_, unknown)) in calls(hidden).into_iter().zip(calls(missing)) {
+            let unseen = mcp.call(tool, unseen).await;
+            let unknown = mcp.call(tool, unknown).await;
+            assert!(unseen.is_error, "{tool} : {}", unseen.text);
+            assert_eq!(unseen.text, unknown.text, "{tool}");
+            assert!(!unseen.text.contains("Secrète") && !unseen.text.contains("Autre"));
+        }
+    }
+    assert_eq!(mmd_of(&team, other).await, "Deux\n");
+}
