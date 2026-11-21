@@ -2327,6 +2327,17 @@ button.tree-toggle:hover {
   color: var(--mm-text-secondary);
 }
 
+/* Le risque d'une page piégée (LA-c), avant le niveau et la portée. */
+.mm-token-warning {
+  margin: 0;
+  padding: 8px 10px;
+  border: 1px solid var(--mm-warning-border);
+  border-radius: 6px;
+  background: var(--mm-warning-soft);
+  color: var(--mm-warning);
+  font-size: 13px;
+}
+
 .mm-token-choice-text {
   display: flex;
   flex-direction: column;

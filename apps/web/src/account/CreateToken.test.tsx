@@ -140,6 +140,48 @@ test("the_screen_says_an_agent_creates_at_the_root_and_never_moves_a_page", asyn
   expect(text).toContain("ne supprime rien pour de bon");
 });
 
+test("the_scopes_go_from_the_narrowest_and_the_space_shown_is_the_default", async () => {
+  // Le plan (LA-c, R1500 corrigé) : « des pages » avant « un espace », avant « tous mes espaces ». La
+  // portée cochée d'abord reste l'espace affiché (le plan n'en dit pas d'autre, R1450).
+  await opened();
+  const scopes = radios("scope");
+  expect(scopes.map((input) => input.value)).toEqual(["pages", "space", "all"]);
+  expect(scopes.map(labelOf)).toEqual([
+    "Des pages de « Pro », avec leurs sous-pages",
+    "Un espace",
+    "Tous mes espaces",
+  ]);
+  expect(scopes.find((input) => input.checked)?.value).toBe("space");
+  expect(dialog().querySelector<HTMLSelectElement>('select[aria-label="Espace du jeton"]')!.value).toBe("pro");
+  await act(async () => root.unmount());
+  root = createRoot(host);
+
+  // Sans espace affiché : « Des pages » est grisé, et la portée cochée est « Tous mes espaces ».
+  await opened(null);
+  expect(radios("scope").map((input) => [input.value, input.disabled, input.checked])).toEqual([
+    ["pages", true, false],
+    ["space", false, false],
+    ["all", false, true],
+  ]);
+});
+
+test("the_screen_warns_of_a_trapped_page", async () => {
+  // LA-c : le texte d'une page lue par l'agent peut le pousser à agir avec les droits du jeton ; la
+  // portée est la seule barrière. L'écran le dit avant les choix, et chaque groupe de choix le cite.
+  await opened();
+  const warning = dialog().querySelector<HTMLElement>(".mm-token-warning")!;
+  expect(warning.textContent).toContain("Le texte d'une page peut tromper un agent qui la lit");
+  expect(warning.textContent).toContain("avec les droits de ce jeton");
+  expect(warning.textContent).toContain("la portée la plus étroite qui suffit");
+  expect(warning.textContent).toContain("« Lecture » s'il n'a rien à écrire");
+  // Avant le niveau et la portée, dans l'ordre du formulaire.
+  const levels = dialog().querySelectorAll("fieldset")[0];
+  expect(warning.compareDocumentPosition(levels) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  for (const fieldset of dialog().querySelectorAll("fieldset")) {
+    expect(fieldset.getAttribute("aria-describedby")).toBe(warning.id);
+  }
+});
+
 test("the_scope_picker_only_offers_pages_of_the_tree", async () => {
   // L'arbre affiché : celui de « Pro », sans la page à la corbeille.
   publishPages("pro", [

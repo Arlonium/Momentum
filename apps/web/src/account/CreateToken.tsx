@@ -2,11 +2,14 @@
 // (`TokenCreated`), dans la même fenêtre.
 //
 // Ce qui se choisit : un nom ; un niveau, « Lecture » ou « Modification », et rien au-dessus (R1218) ;
-// une portée, tous les espaces du compte, un espace, ou des pages d'un espace avec leurs sous-pages
-// (R1219) ; la corbeille, permise ou non ; une échéance (90 jours par défaut, décision L1) ; et le mot
-// de passe actuel, que la création redemande (décision L2). Le serveur fait foi : ses refus
-// s'affichent tels qu'il les dit, et un mot de passe faux (`401 invalid_credentials`) n'est pas une
-// session perdue.
+// une portée, proposée de la plus étroite à la plus large : des pages d'un espace avec leurs
+// sous-pages, un espace, ou tous les espaces du compte (R1219, R1664), l'espace affiché coché d'abord
+// (R1450) ; la corbeille, permise ou non ; une échéance (90 jours par défaut, décision L1) ; et le mot
+// de passe actuel, que la création redemande (décision L2). Le serveur fait foi : ses refus s'affichent
+// tels qu'il les dit, et un mot de passe faux (`401 invalid_credentials`) n'est pas une session perdue.
+//
+// Avant ces choix, l'écran dit le risque d'une page piégée (LA-c, R1664) : le texte d'une page peut
+// pousser l'agent à agir avec les droits du jeton, et la portée est la seule barrière.
 //
 // Les pages d'une portée « pages » sont celles de l'arbre que montre la barre latérale, et rien
 // d'autre (`findPages`, R570) : aucune lecture du serveur ne part d'ici, et une page que le compte ne
@@ -139,6 +142,7 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
   const levelName = useId();
   const scopeName = useId();
   const expiryId = useId();
+  const warningId = useId();
   const nameRef = useRef<HTMLInputElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
   const levelRef = useRef<HTMLInputElement>(null);
@@ -338,7 +342,13 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
                 value={name}
                 onChange={(e) => setName(e.target.value)}
               />
-              <fieldset className="mm-token-choices">
+              <p id={warningId} className="mm-token-warning">
+                Le texte d'une page peut tromper un agent qui la lit, et le pousser à agir avec les droits
+                de ce jeton : recopier ce qu'il lit dans une page qu'il peut modifier, par exemple. La
+                portée est la seule barrière : choisis la portée la plus étroite qui suffit, et
+                «&nbsp;Lecture&nbsp;» s'il n'a rien à écrire.
+              </p>
+              <fieldset className="mm-token-choices" aria-describedby={warningId}>
                 <legend>Niveau</legend>
                 {LEVELS.map((item, i) => (
                   <Choice
@@ -354,40 +364,8 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
                   />
                 ))}
               </fieldset>
-              <fieldset className="mm-token-choices">
+              <fieldset className="mm-token-choices" aria-describedby={warningId}>
                 <legend>Portée</legend>
-                <Choice
-                  inputRef={scopeRef}
-                  type="radio"
-                  name={`${scopeName}-scope`}
-                  value="all"
-                  checked={scope === "all"}
-                  onChange={() => setScope("all")}
-                  label="Tous mes espaces"
-                />
-                <Choice
-                  type="radio"
-                  name={`${scopeName}-scope`}
-                  value="space"
-                  checked={scope === "space"}
-                  disabled={spaces.length === 0}
-                  onChange={() => setScope("space")}
-                  label="Un espace"
-                />
-                {scope === "space" && (
-                  <select
-                    className="mm-select mm-select-boxed mm-token-space"
-                    aria-label="Espace du jeton"
-                    value={spaceId}
-                    onChange={(e) => setSpaceId(e.target.value)}
-                  >
-                    {spaces.map((item) => (
-                      <option key={item.id} value={item.id}>
-                        {item.name} ({ROLE_LABELS[item.role]})
-                      </option>
-                    ))}
-                  </select>
-                )}
                 <Choice
                   type="radio"
                   name={`${scopeName}-scope`}
@@ -422,6 +400,39 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
                     onToggle={toggle}
                   />
                 )}
+                <Choice
+                  inputRef={scope === "space" ? scopeRef : undefined}
+                  type="radio"
+                  name={`${scopeName}-scope`}
+                  value="space"
+                  checked={scope === "space"}
+                  disabled={spaces.length === 0}
+                  onChange={() => setScope("space")}
+                  label="Un espace"
+                />
+                {scope === "space" && (
+                  <select
+                    className="mm-select mm-select-boxed mm-token-space"
+                    aria-label="Espace du jeton"
+                    value={spaceId}
+                    onChange={(e) => setSpaceId(e.target.value)}
+                  >
+                    {spaces.map((item) => (
+                      <option key={item.id} value={item.id}>
+                        {item.name} ({ROLE_LABELS[item.role]})
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <Choice
+                  inputRef={scope === "all" ? scopeRef : undefined}
+                  type="radio"
+                  name={`${scopeName}-scope`}
+                  value="all"
+                  checked={scope === "all"}
+                  onChange={() => setScope("all")}
+                  label="Tous mes espaces"
+                />
               </fieldset>
               <p className="mm-token-hint">
                 Avec «&nbsp;Modification&nbsp;», un agent modifie les pages de sa portée, et crée des

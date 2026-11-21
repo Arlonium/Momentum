@@ -63,7 +63,17 @@ test("a_token_is_created_copied_used_and_revoked", async ({ browser }) => {
   await p.getByRole("button", { name: "Créer un jeton" }).click();
   const form = p.getByRole("dialog", { name: "Créer un jeton" });
   await form.getByLabel("Nom du jeton").fill("Claude Code");
-  // La portée par défaut : l'espace ouvert. Le niveau par défaut : « Lecture ».
+  // Le risque d'une page piégée, avant les choix (LA-c) ; les portées de la plus étroite à la plus
+  // large (R1500 corrigé). La portée par défaut : l'espace ouvert. Le niveau par défaut : « Lecture ».
+  await expect(form.locator(".mm-token-warning")).toContainText("Le texte d'une page peut tromper un agent");
+  const scopes = form.getByRole("group", { name: "Portée" }).getByRole("radio");
+  expect(await scopes.evaluateAll((inputs) => inputs.map((input) => (input as HTMLInputElement).value))).toEqual([
+    "pages",
+    "space",
+    "all",
+  ]);
+  await expect(form.getByRole("radio", { name: "Un espace" })).toBeChecked();
+  await expect(form.getByRole("radio", { name: "Lecture", exact: true })).toBeChecked();
   await form.getByLabel("Mot de passe actuel").fill(PASSWORD);
   await form.getByRole("button", { name: "Créer le jeton" }).click();
 
