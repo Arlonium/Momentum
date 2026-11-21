@@ -9,7 +9,7 @@ import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError, createToken, listTokens, revokeToken } from "../api";
 import { SessionContext } from "../session/session";
 import { navigate, tokensPath, usePathname } from "../router";
-import { renderHook, until } from "../test/hooks";
+import { deferred, renderHook, until } from "../test/hooks";
 import { space } from "../test/pages";
 import AccountTokens from "./AccountTokens";
 import { announceTokensChanged } from "./tokensChanged";
@@ -386,4 +386,34 @@ test("leaving_with_a_shown_token_asks_first", async () => {
   const after = new Event("beforeunload", { cancelable: true });
   window.dispatchEvent(after);
   expect(after.defaultPrevented).toBe(false);
+});
+
+test("retrying_the_list_keeps_the_focus_off_body", async () => {
+  // La première lecture échoue : « Réessayer », grisé pendant le nouvel essai, garde le focus, puis part
+  // avec la liste lue ; le titre de la liste prend le focus, jamais `body` (Task C2, R1478).
+  vi.mocked(listTokens).mockRejectedValueOnce(new ApiError(0, null, "Le serveur Mementum ne répond pas."));
+  await rendered([]);
+  const retry = buttonNamed(host, "Réessayer")!;
+  retry.focus();
+  const again = deferred<TokenInfo[]>();
+  vi.mocked(listTokens).mockReturnValueOnce(again.promise);
+  await click(retry);
+  await until(host, () => vi.mocked(listTokens).mock.calls.length === 2, "le nouvel essai");
+  expect(retry.getAttribute("aria-disabled")).toBe("true");
+  expect(document.activeElement).toBe(retry);
+  await click(retry);
+  await act(async () => again.resolve([token("a")]));
+  await until(host, () => lines().length === 1, "la liste lue");
+  expect(listTokens).toHaveBeenCalledTimes(2);
+  expect(document.activeElement?.textContent).toBe("Tes jetons");
+
+  // Une relecture échoue, la liste reste ; son « Réessayer » réussi rend le focus de même.
+  vi.mocked(listTokens).mockRejectedValueOnce(new ApiError(0, null, "Le serveur Mementum ne répond pas."));
+  await act(async () => announceTokensChanged());
+  await until(host, () => buttonNamed(host, "Réessayer") !== null, "le refus de la relecture");
+  buttonNamed(host, "Réessayer")!.focus();
+  vi.mocked(listTokens).mockResolvedValueOnce([token("a")]);
+  await click(buttonNamed(host, "Réessayer")!);
+  await until(host, () => buttonNamed(host, "Réessayer") === null, "la liste relue");
+  expect(document.activeElement?.textContent).toBe("Tes jetons");
 });

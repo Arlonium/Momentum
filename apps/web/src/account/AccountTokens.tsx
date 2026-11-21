@@ -23,15 +23,9 @@ import { useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
 import { Confirm } from "../ui/Confirm";
 import { CreateToken, type TokenDraft } from "./CreateToken";
+import { NBSP, quoted } from "./quoted";
 import { TokenActivity } from "./TokenActivity";
 import { useTokens } from "./useTokens";
-
-/** Isole un texte venu d'ailleurs dans une chaîne (un titre, un nom accessible) : jamais en littéral. */
-const FSI = String.fromCharCode(0x2068);
-const PDI = String.fromCharCode(0x2069);
-const NBSP = String.fromCharCode(0xa0);
-/** « nom », le nom isolé : pour une chaîne, là où un élément `dir` ne peut pas l'être. */
-const quoted = (text: string) => `«${NBSP}${FSI}${text}${PDI}${NBSP}»`;
 
 const day = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long", year: "numeric" });
 const moment = new Intl.DateTimeFormat("fr-FR", {
@@ -88,7 +82,7 @@ function ScopeText({ token }: { token: TokenInfo }) {
       {named.map((p, i) => (
         <span key={p.id}>
           {i > 0 && ", "}
-          {p.title === null ? "une page que tu ne vois plus" : <Quoted text={p.title || "Sans titre"} />}
+          {p.title === null ? "une page que tu ne vois pas" : <Quoted text={p.title || "Sans titre"} />}
         </span>
       ))}
       {count > NAMED_PAGES && ` et ${count - NAMED_PAGES} de plus`}
@@ -221,6 +215,10 @@ function TokenList({ tokens, error, reread, afterLogin }: ListProps) {
   const [revokeError, setRevokeError] = useState<string | null>(null);
   /** Le jeton dont la ligne prend le focus, son bouton « Révoquer » parti avec la révocation. */
   const [landing, setLanding] = useState<{ id: string } | null>(null);
+  /** Un « Réessayer » a demandé la lecture qui est en route : il reste là, grisé, et garde le focus. */
+  const [retrying, setRetrying] = useState(false);
+  /** Un « Réessayer » a le focus : parti avec la lecture réussie, il le laisserait sur `body` (R339). */
+  const retryFocused = useRef(false);
 
   const shown = held === null || tokens === null ? (tokens ?? []) : heldTokens(held, tokens);
   /** Ce qui est montré au dernier rendu : ce que le gel garde. */
@@ -272,6 +270,38 @@ function TokenList({ tokens, error, reread, afterLogin }: ListProps) {
     (line?.querySelector<HTMLElement>(".mm-token-name") ?? headingRef.current)?.focus();
   }, [landing]);
 
+  // La lecture réussie retire « Réessayer » : s'il avait le focus, le titre de la liste le prend.
+  useEffect(() => {
+    if (error !== null || !retryFocused.current) return;
+    retryFocused.current = false;
+    const active = document.activeElement;
+    if (active === null || active === document.body) headingRef.current?.focus({ preventScroll: true });
+  }, [error, tokens]);
+
+  const retry = async () => {
+    if (retrying) return;
+    setRetrying(true);
+    await reread();
+    setRetrying(false);
+  };
+  const retryButton = (
+    <button
+      type="button"
+      className="mm-button"
+      // Grisé sans être retiré pendant le nouvel essai : il garde le focus.
+      aria-disabled={retrying || undefined}
+      onFocus={() => {
+        retryFocused.current = true;
+      }}
+      onBlur={() => {
+        retryFocused.current = false;
+      }}
+      onClick={() => void retry()}
+    >
+      Réessayer
+    </button>
+  );
+
   const revoke = async () => {
     if (revoking === null || busy) return;
     const target = revoking;
@@ -302,11 +332,7 @@ function TokenList({ tokens, error, reread, afterLogin }: ListProps) {
     content = (
       <>
         <FormError message={`La liste des jetons n'a pas pu être lue. ${error}`} />
-        <p className="mm-settings-actions">
-          <button type="button" className="mm-button" onClick={() => void reread()}>
-            Réessayer
-          </button>
-        </p>
+        <p className="mm-settings-actions">{retryButton}</p>
       </>
     );
   } else if (tokens === null) {
@@ -348,11 +374,7 @@ function TokenList({ tokens, error, reread, afterLogin }: ListProps) {
       {tokens !== null && error !== null && (
         <>
           <FormError message={`La liste des jetons n'a pas pu être relue. ${error}`} />
-          <p className="mm-settings-actions mm-settings-reload">
-            <button type="button" className="mm-button" onClick={() => void reread()}>
-              Réessayer
-            </button>
-          </p>
+          <p className="mm-settings-actions mm-settings-reload">{retryButton}</p>
         </>
       )}
       <FormError message={revokeError} />
