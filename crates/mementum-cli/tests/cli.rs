@@ -222,9 +222,9 @@ fn cli_set_password_recovers_account() {
             .request("GET", "/api/v1/me", None, &[("Authorization", &bearer)])
             .status
     };
-    // `GET /me` n'est pas ouvert aux jetons (Ruling R1342) : `403`, et non `401`, dit que le
-    // jeton vit.
-    assert_eq!(me_by_token(&server), 403);
+    // `GET /me` répond à un jeton depuis la Task S7 (sans adresse e-mail, Ruling R1388) : `200`,
+    // et non `401`, dit que le jeton vit.
+    assert_eq!(me_by_token(&server), 200);
 
     // Pendant que le serveur tourne. Le mot de passe est la première ligne
     // de l'entrée standard, sans sa fin de ligne ; la suite ne compte pas.
