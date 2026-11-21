@@ -46,16 +46,24 @@
 - Un alias se résout au bloc de la page dont le hachage commence ainsi. Aucun : `stale_anchor` (le
   bloc n'existe plus, ou a été recréé sous un autre identifiant : relis la page). Plusieurs :
   `ambiguous_anchor` (un bloc arrivé depuis partage son début : relis la page avec ses ancres, tu
-  recevras un alias plus long).
+  recevras un alias plus long). Une exception : un `from` ambigu de `fetch` répond aujourd'hui
+  `stale_anchor`, avec un message qui dit que l'ancre « désigne plusieurs blocs » ; la conduite à
+  tenir est la même (relire la page avec ses ancres).
 - **L'identifiant entier d'un bloc** est accepté à la place de son alias, sauf s'il a lui-même la
   forme d'un alias : une ancre de cette forme ne se lit que comme un alias.
 - `<block>` écrit toujours le vrai identifiant du bloc, même avec les ancres, et ne reçoit pas
   d'alias.
 - **Les ancres d'un MMD écrit** : `replace_page` reconnaît un alias (ou l'identifiant) d'un bloc de
-  la page lue, et garde ce bloc ; un alias périmé ou ambigu y est refusé ; un identifiant qui n'est
-  ni l'un ni l'autre est oublié, et le bloc est neuf. Les blocs qu'insèrent `insert` et `replace_block` reçoivent des identifiants neufs,
-  quoi que porte leur MMD ; `replace_block` donne l'identifiant du bloc remplacé au premier bloc de
-  premier niveau de son type dans le MMD neuf (les fils de commentaires gardent leur bloc).
+  la page lue, et garde ce bloc ; un alias ambigu y est refusé (`ambiguous_anchor`) ; un alias
+  périmé y est refusé (`stale_anchor`), sauf en `rebase` pour un bloc qu'un autre a retiré depuis ta
+  lecture : écrit tel que tu l'avais lu, et sans sous-blocs, il est jeté (le retrait de l'autre
+  tient) ; changé, c'est un conflit (`revision_conflict`). Un identifiant qui n'est ni un alias ni
+  un identifiant de la page est oublié. Un bloc écrit sans ancre (ou dont l'ancre a été oubliée)
+  reprend l'identifiant du bloc courant identique, liste de frères par liste de frères, s'il y en a
+  un, et sinon un identifiant neuf : une page récrite à l'identique garde ses identifiants. Les
+  blocs qu'insèrent `insert` et `replace_block` reçoivent des identifiants neufs, quoi que porte
+  leur MMD ; `replace_block` donne l'identifiant du bloc remplacé au premier bloc de premier niveau
+  de son type dans le MMD neuf (les fils de commentaires gardent leur bloc).
 - **`revision`** est une poignée opaque (`r_` suivi de 16 chiffres hexadécimaux), rendue à chaque
   lecture et à chaque écriture. On la redonne à `update_page` (`base_revision`) : si les blocs que
   l'appel touche ont changé depuis, il est refusé (`revision_conflict`) avec les blocs à jour.
@@ -66,9 +74,11 @@
   tranche. Marques d'une tranche :
   - `<unloaded id="bk7qa"/>` : un bloc trop gros a été rendu avec ceux de ses sous-blocs qui
     tiennent ; la lecture reprend à ce sous-bloc ;
-  - `<unloaded id="bk7qa" bytes=N/>` (ou `<unloaded bytes=N/>`) : un bloc sans enfant dont le texte
-    seul dépasse 48 Kio ; il ne se lit pas par `fetch`, et ne se change que par `replace_block` ou
-    `delete_block` ;
+  - `<unloaded id="bk7qa" bytes=N/>` (ou `<unloaded bytes=N/>`) : un bloc dont le texte seul ne
+    tient pas dans la tranche demandée (`limit`, 24 Kio par défaut), qu'il ait des sous-blocs ou non ;
+    la lecture reprend à son premier sous-bloc, ou au bloc suivant. Relis-le avec `from` (son alias)
+    et `limit` 49 152 ; au-delà de 48 Kio environ, il ne se lit pas par `fetch`, et ne se change que
+    par `replace_block` ou `delete_block` ;
   - `<unloaded blocks=N/>` : des blocs sans alias à eux (sans identifiant, ou d'un identifiant porté
     deux fois) qui ne tenaient pas ; ils ne se lisent pas par `fetch`.
 - **Les tranches mises bout à bout ne sont pas le MMD de la page** : chaque bloc y est rendu avec ses
@@ -231,7 +241,9 @@ quelconque (Obsidian, Notion) est un autre convertisseur, prévu plus tard.
 - **Les contenus protégés** : une opération qui retirerait un bloc `<page>`, `<database>`,
   `<synced>` ou `<block>`, ou un bloc qui porte un fil de commentaires, est refusée
   (`protected_content`) sauf si elle porte `allow_deleting_content`.
-- **Les bornes** : 12 000 blocs par page, lignes de tableau comprises ; une écriture estimée à plus
+- **Les bornes** : 12 000 blocs, lignes de tableau comprises, par page pour `create_pages` et
+  `replace_page`, et, pour `update_page`, sur l'ensemble des blocs que les opérations d'un appel
+  écrivent (au-delà, découpe-les en plusieurs appels) ; une écriture estimée à plus
   de 8 s est refusée (`too_long_to_write`, à découper en opérations plus petites) ; 100 niveaux
   d'imbrication ; 2 000 000 caractères par MMD, et 2 Mio de corps par appel.
 
