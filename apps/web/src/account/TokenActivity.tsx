@@ -1,6 +1,7 @@
 // L'activité d'un jeton d'API (lot 5, Task C2), dépliée sous sa ligne dans l'écran « Jetons d'API » :
-// ses appels, le plus récent d'abord (date à la seconde, issue et code du refus, outil ou route, page
-// par son titre si le compte la voit encore, blocs touchés), lus par cinquante (`useTokenCalls`). Au-
+// ses appels, le plus récent d'abord (date à la seconde, issue et code du refus, outil ou route, un
+// autre message MCP en mots, `toolLabel`, R1551 ; page par son titre si le compte la voit encore,
+// blocs touchés), lus par cinquante (`useTokenCalls`). Au-
 // dessus, ce que le journal ne montre pas : les appels refusés par le débit, comptés sans ligne, et les
 // lignes que la purge a retirées (R1244). Un filtre par issue (réussis, refusés, en erreur) relit
 // l'activité depuis le début, sous cette issue.
@@ -55,6 +56,33 @@ const OUTCOME_LABELS: Record<TokenCallOutcome, string> = {
   refused: "Refusé",
   error: "En erreur",
 };
+
+/**
+ * Les messages MCP qui ouvrent une connexion d'agent (le serveur écrit leur méthode, R1551) : Claude
+ * Code en envoie trois avant son premier outil (`server/discover`, `tools/list`, `resources/list`).
+ */
+const CONNECTION_METHODS = new Set([
+  "server/discover",
+  "initialize",
+  "notifications/initialized",
+  "ping",
+  "tools/list",
+  "resources/list",
+  "resources/templates/list",
+]);
+
+/**
+ * Ce que l'écran dit de l'outil d'un appel (recette du lot 5, E2, R1551) : un outil MCP par son nom,
+ * une route REST telle quelle ; un autre message MCP en mots, jamais « POST /mcp » (une ligne écrite
+ * avant que le serveur dise la méthode, ou d'un message qu'il n'a pas lu, est un « échange »).
+ */
+function toolLabel(call: TokenCall): string {
+  if (call.surface !== "mcp") return call.tool;
+  if (CONNECTION_METHODS.has(call.tool)) return "Connexion de l'agent";
+  if (call.tool === "resources/read") return "Lecture de la spécification";
+  if (call.tool === "POST /mcp" || call.tool === "POST /mcp/readonly") return "Échange de l'agent";
+  return call.tool;
+}
 
 /** « 1 appel …», « 2 appels … » : `one` et `many` suivent le nombre. */
 function counted(n: number, one: string, many: string): string {
@@ -261,7 +289,7 @@ function CallLine({ call }: { call: TokenCall }) {
       </span>
       <span className="mm-token-call-what">
         <span className="mm-token-call-tool mm-isolate" dir="auto">
-          {call.tool}
+          {toolLabel(call)}
         </span>
         {call.pageId !== null && (
           <span className="mm-token-call-page">

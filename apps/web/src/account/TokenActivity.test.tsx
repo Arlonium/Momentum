@@ -232,6 +232,44 @@ test("refused_and_busy_calls_and_purged_lines_are_told", async () => {
   expect(plain(activityOf("a"))).not.toContain("débit");
 });
 
+test("an_mcp_message_that_is_not_a_tool_call_is_told_in_words", async () => {
+  // Recette du lot 5, E2 (R1551) : une connexion de Claude Code laisse trois lignes avant son premier
+  // outil (quatre s'il lit la spécification), que l'écran disait « POST /mcp ». Le serveur écrit
+  // maintenant la méthode ; l'écran la dit en mots, et garde le nom d'un outil tel quel. Une ligne
+  // d'avant (« POST /mcp ») se dit en mots aussi ; une route REST reste la route.
+  await rendered([token("a")]);
+  vi.mocked(tokenCalls).mockResolvedValueOnce(
+    answer([
+      call(8, { surface: "mcp", tool: "server/discover" }),
+      call(7, { surface: "mcp", tool: "tools/list" }),
+      call(6, { surface: "mcp", tool: "resources/list" }),
+      call(5, { surface: "mcp", tool: "resources/read" }),
+      call(4, { surface: "mcp", tool: "POST /mcp" }),
+      call(3, { surface: "mcp", tool: "create_pages", pageId: "reunion", pageTitle: "Réunion" }),
+      call(2, { surface: "mcp", tool: "POST /mcp/readonly", outcome: "refused", code: "invalid_request" }),
+      call(1, { surface: "rest", tool: "POST /api/v1/pages" }),
+    ]),
+  );
+  await click(toggleOf("a"));
+  await until(host, () => shownCalls("a").length === 8, "l'activité");
+  const activity = activityOf("a")!;
+  const tool = (id: number) =>
+    activity.querySelector<HTMLElement>(`li[data-call-id="${id}"] .mm-token-call-tool`)!.textContent;
+  expect([8, 7, 6, 5, 4, 3, 2, 1].map(tool)).toEqual([
+    "Connexion de l'agent",
+    "Connexion de l'agent",
+    "Connexion de l'agent",
+    "Lecture de la spécification",
+    "Échange de l'agent",
+    "create_pages",
+    "Échange de l'agent",
+    "POST /api/v1/pages",
+  ]);
+  // La page qu'un `create_pages` a créée, par son titre.
+  expect(plain(activity.querySelector(`li[data-call-id="3"]`)!)).toContain("Réunion");
+  expect(activity.textContent).not.toContain("POST /mcp");
+});
+
 test("a_page_one_no_longer_sees_has_no_title", async () => {
   await rendered([token("a")]);
   vi.mocked(tokenCalls).mockResolvedValueOnce(
