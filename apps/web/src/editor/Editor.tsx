@@ -73,6 +73,7 @@ import { dismissNotice } from "./editorNotice";
 import { shownUrl } from "./files";
 import { fixtureInput, replaceNewPage } from "./fixtures";
 import { arrival } from "./arrival";
+import { BLUR_ON_ESCAPE, escapeKeys } from "./escapeKeys";
 import { followBlock } from "./followBlock";
 import { useArrival } from "./goToBlock";
 import type { BlockTarget } from "../router";
@@ -121,6 +122,9 @@ type Props = {
  * `linkBound` : un lien de plus de 16 Kio, que le serveur refuserait, n'est pas posé (R495).
  * `redoKeys` : « rétablir » sans rien à rétablir ne retombe pas sur l'annulation (R731, R732).
  * `arrival` : le bloc où l'on arrive (`goToBlock`) est surligné un instant, sans rien écrire.
+ * `escapeKeys`, et `OverrideEscape` de BlockNote retirée : Échap dans le texte, sans menu ouvert, ne
+ * fait rien (le focus ne tombe plus sur `body`) ; sur du texte sélectionné, il ferme la barre de mise
+ * en forme sans perdre le focus (question 37 de la recette du lot 4).
  * `resolveFileUrl` : une image, une vidéo ou un son ne sont chargés que d'une adresse permise
  * (`shownUrl`, `files.ts`), jamais de l'adresse du document telle quelle ; un bloc sans adresse ne
  * charge rien (`about:blank` y écrivait une erreur de console par bloc vide). Rien pour envoyer : seul
@@ -131,7 +135,8 @@ export const EDITOR_OPTIONS = {
   resolveFileUrl: async (url: string) => (url === "" ? "" : shownUrl(url)),
   dictionary: DICTIONARY,
   dropCursor: multiColumnDropCursor,
-  extensions: [syntaxHighlighter, followBlock, linkBound, redoKeys, arrival],
+  extensions: [syntaxHighlighter, followBlock, linkBound, redoKeys, arrival, escapeKeys],
+  disableExtensions: [BLUR_ON_ESCAPE],
 };
 
 export function Editor({

@@ -732,10 +732,12 @@ for (const [name, typed, menu] of [
   });
 }
 
-// Défaut du produit vu en écrivant les tests ci-dessus, antérieur au lot 4 : Échap dans le texte de
-// l'éditeur, sans menu ouvert, retire le focus de l'éditeur et le laisse sur `body` (la règle du
-// client : le focus ne tombe jamais sur `body`). La frappe suivante ne va nulle part.
-test.fixme("escape_in_the_text_of_the_editor_keeps_the_focus_off_body", async ({ browser }) => {
+// Échap dans le texte de l'éditeur, sans menu ouvert, ne fait rien (question 37 de la recette du lot
+// 4, choix (a), R1143) : le curseur reste où il est, et la frappe suivante s'y écrit. BlockNote 0.57
+// retirait le focus de l'éditeur (son extension `OverrideEscape`), et le laissait sur `body`. Avec du
+// texte sélectionné, Échap ferme la barre de mise en forme, comme avant, sans perdre le focus : la
+// sélection se réduit à sa fin.
+test("escape_in_the_text_of_the_editor_keeps_the_focus_off_body", async ({ browser }) => {
   const account = await signUpAccount();
   const api = await apiAs(account);
   const home = await createPage(api, { title: `Accueil ${unique()}` });
@@ -748,4 +750,23 @@ test.fixme("escape_in_the_text_of_the_editor_keeps_the_focus_off_body", async ({
   expect(await focusOnBody(p)).toBe(false);
   await p.keyboard.type("!");
   await expect(block).toHaveText("Début!");
+
+  // « but » sélectionné : la barre de mise en forme paraît ; Échap la ferme, le curseur à la fin de
+  // la sélection, et rien n'est remplacé.
+  await expect(async () => {
+    await p.evaluate(() => {
+      const selection = document.getSelection()!;
+      if (String(selection) === "but") return;
+      const first = document.querySelector(".mm-editor .bn-block-content")!;
+      const text = document.createTreeWalker(first, NodeFilter.SHOW_TEXT).nextNode()!;
+      selection.setBaseAndExtent(text, "Dé".length, text, "Début".length);
+    });
+    await expect(p.getByRole("button", { name: "Créer un lien" })).toBeVisible({ timeout: 2_000 });
+  }).toPass({ timeout: 20_000 });
+  await p.keyboard.press("Escape");
+  await expect(p.getByRole("button", { name: "Créer un lien" })).toHaveCount(0);
+  expect(await focusOnBody(p)).toBe(false);
+  await p.keyboard.type("?");
+  await expect(block).toHaveText("Début?!");
+  await expect.poll(() => getMmd(api, home.id)).toBe("Début?!\n");
 });
