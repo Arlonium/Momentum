@@ -2424,6 +2424,104 @@ mod known_limits {
             ],
         );
     }
+
+    /// Passe de fin du lot 5 (défaut D13 de son compte rendu ; trouvé par l'essai hostile avec
+    /// écritures d'agent, graines 6260, 8404 et 15555 de la voie du journal) : un bloc `unknown`
+    /// qu'un client a marqué `foreign = true`, et dont `data` n'est pas le JSON d'un nœud étranger,
+    /// se lit tel quel ; mais l'écriture par différence le récrit en nœud étranger, si bien que
+    /// toute écriture du serveur, même ailleurs dans la page, change ce bloc, et que l'arbre
+    /// qu'elle rend (`DiffWritten::blocks`, que l'acteur rend à l'agent et affirme égal à la page en
+    /// debug, « l'arbre écrit ») n'est pas la page relue. Les routes retirent `foreign` d'un MMD
+    /// (R33, `unknown_not_foreign`) : seul un client qui écrit l'attribut lui-même y mène.
+    #[test]
+    fn a_foreign_mark_set_by_a_client_on_data_that_is_no_node_is_rewritten_by_any_write() {
+        // Une page de deux paragraphes, et le bloc `b_x` qu'un client y ajoute, marqué étranger.
+        let marked = || {
+            let page = page_with(
+                "Un
+
+Deux
+",
+            );
+            let client = Doc::with_options(Options {
+                client_id: yrs::ClientID::new(7),
+                offset_kind: OffsetKind::Utf16,
+                ..Options::default()
+            });
+            let fragment = client.get_or_insert_xml_fragment(FRAGMENT);
+            client
+                .transact_mut()
+                .apply_update(Update::decode_v1(&page.encode_state()).unwrap())
+                .unwrap();
+            let update = {
+                let mut txn = client.transact_mut();
+                let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+                    panic!("la racine");
+                };
+                let container =
+                    group.push_back(&mut txn, XmlElementPrelim::empty("blockContainer"));
+                container.insert_attribute(&mut txn, "id", "b_x");
+                let unknown = container.push_back(&mut txn, XmlElementPrelim::empty("unknown"));
+                unknown.insert_attribute(&mut txn, "originalType", "future_widget");
+                unknown.insert_attribute(&mut txn, "data", "eyJ4IjoxfQ==");
+                unknown.insert_attribute(&mut txn, "foreign", true);
+                txn.encode_update_v1()
+            };
+            page.apply_client_update(&update)
+                .expect("la garde admet l'attribut");
+            page
+        };
+        let foreign = |blocks: &[Block]| {
+            blocks
+                .iter()
+                .find(|b| b.id == "b_x")
+                .and_then(|b| b.props.get("data").cloned())
+        };
+        let data = Some(mementum_md::PropValue::Str("eyJ4IjoxfQ==".into()));
+        let mut unmet = Vec::new();
+        // Une écriture ailleurs dans la page : le texte du premier paragraphe.
+        let page = marked();
+        let mut blocks = page.read_blocks();
+        assert_eq!(
+            foreign(&blocks),
+            data,
+            "le bloc se lit tel que le client l'a écrit"
+        );
+        let Content::Inline(content) = &mut blocks[0].content else {
+            panic!("un paragraphe");
+        };
+        content.push(Inline::Text {
+            text: " et plus".into(),
+            styles: Default::default(),
+        });
+        page.write_diff(&blocks).unwrap();
+        if foreign(&page.read_blocks()) != data {
+            unmet.push("un bloc que l'écriture ne touche pas est récrit".to_string());
+        }
+        // Une écriture qui déplace le bloc en tête, comme un `move_block` d'agent.
+        let page = marked();
+        let mut blocks = page.read_blocks();
+        let moved = blocks.pop().unwrap();
+        blocks.insert(0, moved);
+        let written = page.write_diff(&blocks).unwrap();
+        let now = page.read_blocks();
+        if written
+            .blocks
+            .as_deref()
+            .is_some_and(|b| b != now.as_slice())
+        {
+            unmet.push("l'arbre rendu par l'écriture n'est pas la page relue".to_string());
+        }
+        known_limit(
+            "D13 : un bloc `unknown` marqué `foreign` par un client, dont `data` n'est pas un nœud, \
+             est récrit par toute écriture du serveur",
+            &unmet,
+            &[
+                "un bloc que l'écriture ne touche pas est récrit".to_string(),
+                "l'arbre rendu par l'écriture n'est pas la page relue".to_string(),
+            ],
+        );
+    }
 }
 
 /// Task S4 du lot 5, tour de correction : l'écriture rend l'arbre qu'elle a écrit, identifiants des
