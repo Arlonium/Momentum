@@ -5,8 +5,8 @@ mod common;
 
 use common::{Fixture, account, break_table, exec_sql, fresh, int, new_user, page, repair, texts};
 use mementum_store::{
-    MAX_BEFORE_AGENT, MAX_BEFORE_RESTORE, MAX_VERSIONS, StoreError, Unversioned, VersionReason,
-    Writer,
+    MAX_BEFORE_AGENT, MAX_BEFORE_RESTORE, MAX_VERSIONS, NewNode, StoreError, Unversioned,
+    VersionReason, Writer,
 };
 use uuid::Uuid;
 
@@ -808,4 +808,43 @@ async fn unversioned_says_when_part_of_the_slice_escapes_it() {
     let lost = store.unversioned(id).await.unwrap();
     assert!(lost.unknown_writers);
     assert!(lost.tokens.is_empty());
+}
+
+/// Task S4 du lot 5, tour de correction (R1234, règle 2) : une page née avec son document (une
+/// duplication, une page créée avec son contenu) qu'aucune version ne garde ne dit pas qui l'a
+/// écrit : la tranche compte comme écrite par d'autres, même sans écriture au journal ; une page
+/// sans document non ; une version, coupée ensuite, la garde.
+#[tokio::test]
+async fn a_page_born_with_its_document_counts_as_written_by_others() {
+    let f = fresh().await;
+    let born = f
+        .store
+        .create_node(NewNode {
+            doc: Some(b"document".to_vec()),
+            ..page(&f.space, None, None, "Née avec son document")
+        })
+        .await
+        .unwrap()
+        .id;
+    let unversioned = f.store.unversioned(born).await.unwrap();
+    assert!(unversioned.unknown_writers, "{unversioned:?}");
+    assert_eq!(
+        unversioned.since, None,
+        "rien n'a été écrit depuis sa naissance"
+    );
+    assert!(unversioned.written_by_others(Uuid::now_v7()));
+
+    let bare = f
+        .store
+        .create_node(page(&f.space, None, None, "Sans document"))
+        .await
+        .unwrap()
+        .id;
+    assert!(!f.store.unversioned(bare).await.unwrap().unknown_writers);
+
+    f.store
+        .put_version(born, 0, b"document", &[], VersionReason::Periodic)
+        .await
+        .unwrap();
+    assert!(!f.store.unversioned(born).await.unwrap().unknown_writers);
 }

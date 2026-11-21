@@ -122,7 +122,9 @@ pub struct Unversioned {
     pub others: bool,
     /// Une partie de la tranche n'est plus qu'un instantané plus récent que la dernière version
     /// (la compaction a purgé son journal) : ni ses comptes ni ses jetons ne sont plus connus. La
-    /// règle de R1234 (« au doute, couper ») la tient pour écrite par d'autres.
+    /// règle de R1234 (« au doute, couper ») la tient pour écrite par d'autres. Vrai aussi pour une
+    /// page qu'aucune version ne garde et qui a un document de `seq` 0 (née avec son contenu, ou
+    /// vide) : on ne sait pas qui l'a écrit (Task S4 du lot 5, tour de correction).
     pub unknown_writers: bool,
 }
 
@@ -462,6 +464,11 @@ impl Store {
         let compacted = snapshot
             .filter(|(seq, _)| *seq > versioned)
             .map(|(_, at)| at);
+        // Task S4 du lot 5, tour de correction : une page née avec son document (l'instantané de
+        // `seq` 0 : une duplication, une page créée avec son contenu, et la page vide d'une
+        // création ordinaire), qu'aucune version ne garde, ne dit pas qui a écrit ce document :
+        // au doute, couper (R1234, règle 2).
+        let born_unversioned = latest.is_none() && snapshot.is_some_and(|(seq, _)| seq == 0);
         let since = match (compacted, journal) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
@@ -473,7 +480,7 @@ impl Store {
             tokens,
             agent_authors,
             others,
-            unknown_writers: compacted.is_some(),
+            unknown_writers: compacted.is_some() || born_unversioned,
         })
     }
 }
