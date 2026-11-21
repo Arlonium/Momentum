@@ -483,3 +483,97 @@ async fn account_changed_takes_no_turn() {
     assert_eq!(changed, [Some(StatusCode::CONFLICT); 2]);
     assert_eq!(witness.await.unwrap(), StatusCode::CREATED);
 }
+
+/// Lot 5, Task X2 (Ruling R1640, qui tranche R1359) : les écritures des jetons d'un compte
+/// attendent dans une voie de la file à elles, distincte de celle de sa session. Le tour
+/// d'écriture tenu, un jeton d'Olga met huit renommages en file, puis sa session un renommage de
+/// sa propre page ; le tour rendu, la file sert les voies tour à tour : le renommage de la session
+/// est validé après une écriture du jeton au plus. Dans la voie du compte, il les attendait toutes
+/// (une rafale de 120 renommages par un jeton faisait attendre 200 ms un renommage de la session,
+/// sur le disque rapide du poste de développement ; registre du lot 5, « Task X2 »). L'ordre se lit
+/// dans la base, par un déclencheur témoin.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_token_burst_never_queues_ahead_of_its_session() {
+    use tower::ServiceExt;
+    const BURST: usize = 8;
+    let t = common::sync::open_app().await;
+    let olga = t.account("Olga").await;
+    let own = olga
+        .create(serde_json::json!({ "title": "À moi" }))
+        .await
+        .id;
+    let mut renamed = Vec::new();
+    for i in 0..BURST {
+        let title = format!("Cible {i}");
+        renamed.push(olga.create(serde_json::json!({ "title": title })).await.id);
+    }
+    let (token, _) = common::api_token(
+        &t.store,
+        olga.id,
+        mementum_store::TokenLevel::Edit,
+        mementum_store::TokenScope::All,
+        false,
+    )
+    .await;
+    exec_sql(
+        &t.db_path(),
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_title AFTER UPDATE OF title ON nodes \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.title); END;",
+    )
+    .await;
+    // Rien d'autre en file que ce que le test y met (l'indexeur écrit après chaque création).
+    t.indexer.settled().await;
+    let rename = |page: &str, title: String| {
+        let mut request = json_request(
+            Method::PATCH,
+            &format!("/api/v1/pages/{page}"),
+            &serde_json::json!({ "title": title }),
+        );
+        request
+            .headers_mut()
+            .insert(header::HOST, "localhost".parse().unwrap());
+        request
+    };
+    let queued = async |at_least: usize| {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while t.store.queued_writes() < at_least {
+            assert!(tokio::time::Instant::now() < deadline, "file : {at_least}");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    };
+    let held = t.store.hold_writes().await;
+    let mut calls = Vec::new();
+    for (i, page) in renamed.iter().enumerate() {
+        let request = common::with_bearer(rename(page, format!("Jeton {i}")), &token);
+        let router = t.router.clone();
+        calls.push(tokio::spawn(async move {
+            router.oneshot(request).await.unwrap().status()
+        }));
+    }
+    queued(BURST).await;
+    let mut request = rename(&own, "Session".to_string());
+    let cookie = olga.browser.cookie().unwrap();
+    request
+        .headers_mut()
+        .insert(header::COOKIE, cookie.parse().unwrap());
+    let router = t.router.clone();
+    calls.push(tokio::spawn(async move {
+        router.oneshot(request).await.unwrap().status()
+    }));
+    queued(BURST + 1).await;
+    drop(held);
+    for call in calls {
+        assert_eq!(call.await.unwrap(), StatusCode::OK);
+    }
+    let before = query_i64(
+        &t.db_path(),
+        "SELECT COUNT(*) FROM witness WHERE what LIKE 'Jeton %' \
+         AND n < (SELECT n FROM witness WHERE what = 'Session')",
+    )
+    .await;
+    assert!(
+        before <= 1,
+        "le renommage de la session a attendu {before} écritures du jeton"
+    );
+}

@@ -305,9 +305,9 @@ impl AuthUser {
     }
 
     /// La part de l'appel dans les gardes par compte (une recherche à la fois, deux écritures
-    /// par page, une duplication à la fois) : le compte pour une session ; pour tout jeton du
-    /// compte, une part à eux, distincte de celle de sa session (Ruling R1242). Un identifiant
-    /// tiré du compte, qu'aucun compte ne porte.
+    /// par page, une duplication à la fois) et dans la file d'écriture du store (sa voie) : le
+    /// compte pour une session ; pour tout jeton du compte, une part à eux, distincte de celle de
+    /// sa session (Rulings R1242, R1640). Un identifiant tiré du compte, qu'aucun compte ne porte.
     pub(crate) fn party(&self) -> Uuid {
         match self.via {
             Via::Session => self.id,
@@ -751,7 +751,10 @@ impl FromRequestParts<AppState> for AuthUser {
                 user.id,
                 "en-tête X-Mementum-Account",
             )?;
-            mementum_store::attribute_writes_to(user.id);
+            // Les écritures d'un jeton attendent dans la voie de la part des jetons du compte,
+            // distincte de celle de sa session (lot 5, Task X2, Ruling R1640, qui tranche R1359) :
+            // une rafale d'un agent ne passe pas devant ce que tape la personne.
+            mementum_store::attribute_writes_to(user.party());
             return Ok(user);
         }
         // Un jeton qui n'est pas passé par la porte ne retombe jamais sur la session.
