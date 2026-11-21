@@ -233,26 +233,7 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
                 None => "sans adresse publique".to_string(),
             };
             let report = reindex::reindex(&data_dir, text_only, origin, announce_backup).await?;
-            let written = format!(
-                "{} entrées écrites dans l'index de recherche ({} validations)",
-                report.entries, report.commits
-            );
-            match report.pages {
-                Some((projected, 0)) => println!(
-                    "réindexation finie ({address}) : {projected} pages relues depuis leur \
-                     document et projetées, {written}"
-                ),
-                Some((projected, unreadable)) => println!(
-                    "réindexation finie ({address}) : {} pages relues depuis leur document, \
-                     {written} ; {unreadable} d'entre elles ne se relisent pas : elles sortent \
-                     de l'index, et le journal les nomme",
-                    projected + unreadable
-                ),
-                None => println!(
-                    "index de recherche refait depuis les tables, sans relire aucun document : \
-                     {written}"
-                ),
-            }
+            println!("{}", summary(&address, &report));
             if without_origin {
                 // Sur la sortie d'erreur, quel que soit le niveau des journaux, après le résumé.
                 eprintln!(
@@ -265,6 +246,59 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             Ok(())
         }
     }
+}
+
+/// Le résumé de `mementum reindex`, sur la sortie standard, accordé au nombre : zéro et un au
+/// singulier, comme en français (recette du lot 4, G2). `address` dit l'adresse publique retenue.
+fn summary(address: &str, report: &reindex::Report) -> String {
+    let written = format!(
+        "{} dans l'index de recherche ({})",
+        agreed(report.entries, "entrée écrite", "entrées écrites"),
+        agreed(report.commits, "validation", "validations")
+    );
+    let reread = |pages: u64| {
+        agreed(
+            pages,
+            "page relue depuis son document",
+            "pages relues depuis leur document",
+        )
+    };
+    match report.pages {
+        Some((projected, 0)) => format!(
+            "réindexation finie ({address}) : {}, {written}",
+            agreed(
+                projected,
+                "page relue depuis son document et projetée",
+                "pages relues depuis leur document et projetées",
+            )
+        ),
+        Some((projected, unreadable)) => {
+            let total = projected + unreadable;
+            let lost = match (total, unreadable) {
+                (1, _) => "elle ne se relit pas : elle sort de l'index, et le journal la nomme"
+                    .to_string(),
+                (_, 1) => "1 d'entre elles ne se relit pas : elle sort de l'index, et le journal \
+                           la nomme"
+                    .to_string(),
+                _ => format!(
+                    "{unreadable} d'entre elles ne se relisent pas : elles sortent de l'index, et \
+                     le journal les nomme"
+                ),
+            };
+            format!(
+                "réindexation finie ({address}) : {}, {written} ; {lost}",
+                reread(total)
+            )
+        }
+        None => format!(
+            "index de recherche refait depuis les tables, sans relire aucun document : {written}"
+        ),
+    }
+}
+
+/// `count` suivi de `one` (zéro ou un) ou de `many`.
+fn agreed(count: u64, one: &str, many: &str) -> String {
+    format!("{count} {}", if count <= 1 { one } else { many })
 }
 
 /// La commande vient de migrer la base : dire où est celle d'avant, sur la sortie d'erreur,
@@ -343,7 +377,73 @@ fn init_tracing() {
 mod tests {
     use std::fmt;
 
-    use super::report;
+    use super::{report, summary};
+    use crate::reindex::Report;
+
+    fn done(pages: Option<(u64, u64)>, entries: u64, commits: u64) -> String {
+        summary(
+            "adresse publique : https://notes.exemple.fr",
+            &Report {
+                pages,
+                entries,
+                commits,
+            },
+        )
+    }
+
+    /// Recette du lot 4, G2 : le résumé s'accorde au nombre, zéro et un au singulier, comme en
+    /// français ; il disait « (1 validations) ».
+    #[test]
+    fn the_summary_agrees_with_its_counts() {
+        assert_eq!(
+            done(Some((1, 0)), 1, 1),
+            "réindexation finie (adresse publique : https://notes.exemple.fr) : 1 page relue \
+             depuis son document et projetée, 1 entrée écrite dans l'index de recherche (1 \
+             validation)"
+        );
+        assert_eq!(
+            done(Some((9, 0)), 194, 2),
+            "réindexation finie (adresse publique : https://notes.exemple.fr) : 9 pages relues \
+             depuis leur document et projetées, 194 entrées écrites dans l'index de recherche (2 \
+             validations)"
+        );
+        assert_eq!(
+            done(Some((0, 0)), 0, 0),
+            "réindexation finie (adresse publique : https://notes.exemple.fr) : 0 page relue \
+             depuis son document et projetée, 0 entrée écrite dans l'index de recherche (0 \
+             validation)"
+        );
+        // Des pages qui ne se relisent pas : une seule, puis plusieurs.
+        assert_eq!(
+            done(Some((0, 1)), 0, 1),
+            "réindexation finie (adresse publique : https://notes.exemple.fr) : 1 page relue \
+             depuis son document, 0 entrée écrite dans l'index de recherche (1 validation) ; elle \
+             ne se relit pas : elle sort de l'index, et le journal la nomme"
+        );
+        assert_eq!(
+            done(Some((2, 1)), 5, 1),
+            "réindexation finie (adresse publique : https://notes.exemple.fr) : 3 pages relues \
+             depuis leur document, 5 entrées écrites dans l'index de recherche (1 validation) ; 1 \
+             d'entre elles ne se relit pas : elle sort de l'index, et le journal la nomme"
+        );
+        assert_eq!(
+            done(Some((1, 2)), 5, 2),
+            "réindexation finie (adresse publique : https://notes.exemple.fr) : 3 pages relues \
+             depuis leur document, 5 entrées écrites dans l'index de recherche (2 validations) ; 2 \
+             d'entre elles ne se relisent pas : elles sortent de l'index, et le journal les nomme"
+        );
+        // `--text-only`.
+        assert_eq!(
+            done(None, 1, 1),
+            "index de recherche refait depuis les tables, sans relire aucun document : 1 entrée \
+             écrite dans l'index de recherche (1 validation)"
+        );
+        assert_eq!(
+            done(None, 194, 3),
+            "index de recherche refait depuis les tables, sans relire aucun document : 194 \
+             entrées écrites dans l'index de recherche (3 validations)"
+        );
+    }
 
     /// Une erreur qui recopie le message de sa source, et la rend comme cause, à la manière de
     /// `StoreError::Sqlx`.
