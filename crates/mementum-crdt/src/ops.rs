@@ -7,7 +7,9 @@
 //! nomme par son rang. Le plan est l'arbre de blocs que l'écriture donnera ; [`PageDoc::apply`]
 //! l'écrit **par différence** avec les blocs lus (`write_diff_over`, Task S2) : ce qui ne change
 //! pas n'est pas touché, et ce que l'écriture garde des frappes concurrentes est celui de
-//! l'écriture par différence (limite LA-a). Le plan appliqué est exactement le plan vérifié.
+//! l'écriture par différence (limite LA-a). Le plan appliqué est le plan vérifié, au nommage
+//! près : un bloc qui n'a pas d'identifiant, neuf ou que la page portait ainsi, en reçoit un à
+//! l'écriture (Rulings R1337, R1512 ; défaut D6 de la passe de fin).
 //!
 //! - `str_replace` cherche `old` dans le **texte brut** de chaque bloc (`mementum_md::block_text` :
 //!   une mention ou une formule y valent `U+FFFC`, un saut de ligne `\n`), jamais à cheval sur deux
