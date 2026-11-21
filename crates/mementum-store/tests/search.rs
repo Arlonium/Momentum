@@ -1795,3 +1795,53 @@ async fn a_reprojection_does_not_move_a_page_edit() {
         }]
     );
 }
+
+/// Rulings R1246, R1265 (relecture de S1) : la date d'une page s'écrit dans la transaction de
+/// l'indexeur qui note son `seq`, pas dans une autre. Une date que la base refuse (un déclencheur
+/// de panne sur `page_edits`, à son insertion, puis à sa mise à jour) fait échouer l'indexation, et
+/// rien n'en reste : ni le `seq` noté, ni les blocs, ni l'outbox, ni la date d'avant.
+#[tokio::test]
+async fn a_page_edit_is_written_in_the_transaction_of_the_indexer() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let page = new_page(&f, "P").await;
+    let snapshot = async || {
+        (
+            state(&f.db, page).await,
+            indexed(&f.db, page).await,
+            outbox(&f.db).await,
+            f.store.page_edits_of(&[page]).await.unwrap(),
+        )
+    };
+    let refused = async |seq: i64, text: &str| {
+        let rows = [row("b", text)];
+        let views: Vec<IndexedBlock<'_>> = rows.iter().map(Row::view).collect();
+        f.store.index_page(page, seq, &views, false).await.is_err()
+    };
+
+    // Sa première date : l'insertion refusée.
+    let seq = f
+        .store
+        .append_updates(page, &[b"a"], Some(alice.id))
+        .await
+        .unwrap();
+    let before = snapshot().await;
+    break_table(&f.db, "INSERT", "page_edits", "1").await;
+    assert!(refused(seq, "texte").await);
+    assert_eq!(snapshot().await, before);
+    repair(&f.db).await;
+    index(&f.store, page, seq, &[row("b", "texte")]).await;
+
+    // Une date neuve : la mise à jour refusée.
+    let next = f
+        .store
+        .append_updates(page, &[b"b"], Some(alice.id))
+        .await
+        .unwrap();
+    let before = snapshot().await;
+    assert_eq!(before.3[0].edited_seq, seq);
+    break_table(&f.db, "UPDATE", "page_edits", "1").await;
+    assert!(refused(next, "texte neuf").await);
+    assert_eq!(snapshot().await, before);
+    repair(&f.db).await;
+}

@@ -824,17 +824,23 @@ async fn purged_calls_are_counted() {
         .collect();
     f.store.append_calls(&ok, &[]).await.unwrap();
     assert_eq!(state().await.calls_purged, 12);
-    // Des appels écrits dans le désordre : la dernière utilisation ne recule pas.
+    // Les sept plus anciens partent (T0 + 1 000 à T0 + 1 006).
+    let newest = T0 + 1_000 + MAX_KEPT_CALLS as i64 + 6;
+    let after_ok: Vec<i64> = (T0 + 1_007..=newest).collect();
+    assert_eq!(kept(&f.db, made.id, true).await, after_ok);
+    // Des appels écrits dans le désordre : la dernière utilisation ne recule pas, et la purge
+    // suit l'ordre d'écriture, pas les dates (R1269) : l'appel daté T0 + 1, écrit le dernier,
+    // reste, et c'est le plus anciennement écrit (T0 + 1 007) qui part.
     f.store
         .append_calls(&[call(made.id, T0 + 1, CallOutcome::Ok)], &[])
         .await
         .unwrap();
     let now = state().await;
     assert_eq!(now.calls_purged, 13);
-    assert_eq!(
-        now.last_used_at,
-        Some(T0 + 1_000 + MAX_KEPT_CALLS as i64 + 6)
-    );
+    assert_eq!(now.last_used_at, Some(newest));
+    let mut last_ok: Vec<i64> = (T0 + 1_008..=newest).collect();
+    last_ok.push(T0 + 1);
+    assert_eq!(kept(&f.db, made.id, true).await, last_ok);
     assert_eq!(
         int(&f.db, "SELECT COUNT(*) FROM token_calls").await,
         (MAX_KEPT_CALLS + MAX_KEPT_REFUSALS) as i64
@@ -947,4 +953,194 @@ async fn calls_are_written_in_their_own_lane() {
         ],
         "{order:?}"
     );
+}
+
+/// Un paquet du journal qui nomme un jeton disparu (purgé depuis, ou un identifiant inconnu)
+/// n'échoue pas (relecture de S1) : ses lignes et ses comptes sont laissés, ceux des autres jetons
+/// s'écrivent, et la dernière utilisation du jeton vivant est posée.
+#[tokio::test]
+async fn a_batch_naming_a_vanished_token_writes_the_others() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let purged = f
+        .store
+        .create_token(token(alice.id, "Parti", TokenScope::All, T0))
+        .await
+        .unwrap();
+    f.store.revoke_token(alice.id, purged.id, T0).await.unwrap();
+    let later = T0 + DEAD_TOKEN_KEPT_MS;
+    let live = f
+        .store
+        .create_token(token(alice.id, "Vivant", TokenScope::All, later))
+        .await
+        .unwrap();
+    assert_eq!(
+        int(
+            &f.db,
+            &format!("SELECT COUNT(*) FROM api_tokens WHERE id = '{}'", purged.id)
+        )
+        .await,
+        0,
+        "la création d'un jeton a purgé le jeton mort"
+    );
+    let unknown = Uuid::now_v7();
+    f.store
+        .append_calls(
+            &[
+                call(purged.id, later + 1, CallOutcome::Ok),
+                call(live.id, later + 2, CallOutcome::Ok),
+                call(unknown, later + 3, CallOutcome::Refused),
+            ],
+            &[Busy {
+                token_id: unknown,
+                count: 4,
+                at: later + 4,
+            }],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        texts(&f.db, "SELECT token_id FROM token_calls").await,
+        [Some(live.id.to_string())]
+    );
+    let state = &f.store.tokens_of(alice.id, later).await.unwrap()[0];
+    assert_eq!(state.id, live.id);
+    assert_eq!(state.last_used_at, Some(later + 2));
+}
+
+/// Ruling R1271 (relecture de S1) : le changement de mot de passe purge aussi les jetons morts du
+/// compte, dans sa transaction : un jeton mort depuis plus de quatre-vingt-dix jours part, avec son
+/// journal. Le changement date sa révocation à l'horloge du système, bien après `T0` (2023).
+#[tokio::test]
+async fn changing_the_password_purges_the_dead_tokens() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let dead = async || {
+        let old = f
+            .store
+            .create_token(token(alice.id, "Ancien", TokenScope::All, T0))
+            .await
+            .unwrap();
+        f.store
+            .append_calls(&[call(old.id, T0, CallOutcome::Ok)], &[])
+            .await
+            .unwrap();
+        f.store.revoke_token(alice.id, old.id, T0).await.unwrap();
+        assert_eq!(int(&f.db, "SELECT COUNT(*) FROM api_tokens").await, 1);
+        assert_eq!(int(&f.db, "SELECT COUNT(*) FROM token_calls").await, 1);
+    };
+    dead().await;
+    assert!(
+        f.store
+            .change_password(alice.id, "pas-un-hachage", "neuf", [8; 32], i64::MAX)
+            .await
+            .unwrap()
+    );
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM api_tokens").await, 0);
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM token_calls").await, 0);
+
+    dead().await;
+    f.store.set_password(alice.id, "encore").await.unwrap();
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM api_tokens").await, 0);
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM token_calls").await, 0);
+}
+
+/// Ruling R1270 (relecture de S1) : un jeton mort depuis quatre-vingt-dix jours ou plus ne se
+/// révoque plus : introuvable, comme un jeton inconnu, sans rien écrire, même échu sans avoir été
+/// révoqué. La veille, il se révoquait encore.
+#[tokio::test]
+async fn a_token_dead_for_ninety_days_cannot_be_revoked() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let mut expiring = token(alice.id, "Échu", TokenScope::All, T0);
+    expiring.expires_at = Some(T0 + 1_000);
+    let made = f.store.create_token(expiring).await.unwrap();
+    let forgotten = T0 + 1_000 + DEAD_TOKEN_KEPT_MS;
+    assert!(matches!(
+        f.store.revoke_token(alice.id, made.id, forgotten).await,
+        Err(StoreError::NotFound)
+    ));
+    assert_eq!(
+        int(
+            &f.db,
+            "SELECT COUNT(*) FROM api_tokens WHERE revoked_at IS NOT NULL"
+        )
+        .await,
+        0
+    );
+    assert!(
+        f.store
+            .revoke_token(alice.id, made.id, forgotten - 1)
+            .await
+            .unwrap()
+    );
+}
+
+/// Ruling R1273 (relecture de S1) : révoquer un jeton échu, pas encore révoqué, lui pose sa date
+/// de révocation (`true`) ; une seconde fois, rien (`false`). Sa mort reste son échéance : il ne se
+/// lit plus quatre-vingt-dix jours après elle, même si sa révocation est plus récente.
+#[tokio::test]
+async fn revoking_an_expired_token_dates_its_revocation() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let mut expiring = token(alice.id, "Échu", TokenScope::All, T0);
+    expiring.expires_at = Some(T0 + 1_000);
+    let made = f.store.create_token(expiring).await.unwrap();
+    assert!(
+        f.store
+            .revoke_token(alice.id, made.id, T0 + 5_000)
+            .await
+            .unwrap()
+    );
+    let listed = f.store.tokens_of(alice.id, T0 + 5_000).await.unwrap();
+    assert_eq!(listed[0].revoked_at, Some(T0 + 5_000));
+    assert_eq!(listed[0].expires_at, Some(T0 + 1_000));
+    assert!(
+        !f.store
+            .revoke_token(alice.id, made.id, T0 + 6_000)
+            .await
+            .unwrap()
+    );
+    let after = T0 + 1_000 + DEAD_TOKEN_KEPT_MS;
+    assert_eq!(
+        f.store.tokens_of(alice.id, after - 1).await.unwrap().len(),
+        1
+    );
+    assert!(f.store.tokens_of(alice.id, after).await.unwrap().is_empty());
+}
+
+/// La liste des jetons d'un compte (relecture de S1) : les vivants d'abord, du plus récemment
+/// créé au plus anciennement, puis les morts, du plus récemment mort au plus anciennement, quelle
+/// que soit leur création.
+#[tokio::test]
+async fn tokens_are_listed_living_first_and_newest_first() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let mut ids = Vec::new();
+    for (i, name) in ["a", "b", "c", "d"].into_iter().enumerate() {
+        let made = f
+            .store
+            .create_token(token(alice.id, name, TokenScope::All, T0 + 5 * i as i64))
+            .await
+            .unwrap();
+        ids.push(made.id);
+    }
+    // « d », créé le dernier, meurt avant « a ».
+    f.store
+        .revoke_token(alice.id, ids[3], T0 + 20)
+        .await
+        .unwrap();
+    f.store
+        .revoke_token(alice.id, ids[0], T0 + 30)
+        .await
+        .unwrap();
+    let names: Vec<String> = f
+        .store
+        .tokens_of(alice.id, T0 + 40)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| t.name)
+        .collect();
+    assert_eq!(names, ["c", "b", "a", "d"]);
 }
