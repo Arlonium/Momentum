@@ -4,7 +4,7 @@
 //!
 //! | Route | Il faut | Réponse |
 //! |---|---|---|
-//! | `POST /mcp`, un message JSON-RPC | un jeton d'API, jamais une session | la réponse du protocole (`mementum-mcp`), dans la révision de la requête (2026-07-28, ou 2025-11-25) : `200` et un résultat (le refus d'un outil est un résultat `isError`, jamais une erreur JSON-RPC), `202` pour une notification, `400` ou `404` pour une erreur JSON-RPC qui ne se lit pas ou une méthode inconnue (R1406, R1407) ; sans jeton, `401 invalid_token` (avec `WWW-Authenticate: Bearer`), le cookie n'étant pas lu ; `GET` et `DELETE` : `405` |
+//! | `POST /mcp`, un message JSON-RPC | un jeton d'API, jamais une session | la réponse du protocole (`mementum-mcp`), dans la révision de la requête (2026-07-28, ou 2025-11-25) : `200` et un résultat (le refus d'un outil est un résultat `isError`, jamais une erreur JSON-RPC), `202` pour une notification, et pour une erreur JSON-RPC le statut que dit la règle `statuses` de `spec/mcp/messages.json` (R1406, R1407 : `400` pour ce qui empêche de lire la requête, `404` pour une méthode inconnue en 2026-07-28, `200` pour une méthode inconnue en 2025-11-25 et pour une erreur des params d'une méthode servie) ; sans jeton, `401 invalid_token` (avec `WWW-Authenticate: Bearer`), le cookie n'étant pas lu ; `GET` et `DELETE` : `405` |
 //! | `POST /mcp/readonly` | un jeton d'API | la même, avec les seuls outils de lecture : un outil d'écriture y est un outil inconnu (`-32602`), jamais appelé |
 //!
 //! **Un outil n'a aucun droit à lui** : chacun lit ses arguments (bornés par `mementum-mcp`),
@@ -17,7 +17,13 @@
 //! entier (R1439). Le débit des jetons est jugé par la porte (`auth.rs`) : un appel d'outil qu'il
 //! refuse, d'un corps annoncé de 64 Kio au plus, est un résultat `token_busy`, avec
 //! `retry_after_seconds`, sans rien faire de l'appel (Rulings R1240, R1434) ; au-delà, le `429`
-//! HTTP, sans lire le corps.
+//! HTTP, sans lire le corps. **Les méthodes hors outils** (`initialize`, `ping`, `server/discover`,
+//! `tools/list`, `resources/list`, `resources/read`) restent servies au-delà du débit, sans être
+//! comptées (correction groupée, défaut O3, Ruling R1525) : leurs réponses sont fixes, écrites
+//! dans le binaire (la spécification MMD comprise), et ne lisent rien de la base ni de l'instance ;
+//! les refuser couperait un client qui se reconnecte pendant qu'il attend son délai. Le coût d'une
+//! boucle qui les redemande (environ 22 Ko par `resources/read`) attend les plafonds généraux du
+//! lot 7.
 //!
 //! **Ce que l'outil lit seul** : le nom d'un espace (sans casse, parmi ceux que le jeton ouvre ; un
 //! espace hors de la portée répond comme un nom inconnu), l'espace implicite d'un jeton qui n'en
