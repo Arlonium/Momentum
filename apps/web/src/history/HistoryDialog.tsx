@@ -2,8 +2,8 @@
 // (`PageMenu`), chargée à la demande. À gauche, la liste : « Version actuelle », puis chaque
 // version, la plus récente d'abord, dans l'ordre du serveur (sa date, « il y a… », les comptes
 // qui l'ont modifiée, chacun suivi de « (par un agent) » s'il l'a fait par un jeton d'API, « avant
-// une restauration » pour ce qu'une restauration a remplacé, « gardée avant qu'un agent la
-// modifie » pour ce qu'un agent a remplacé, lot 5). Le jeton lui-même n'est jamais nommé : son nom
+// une restauration » pour ce qu'une restauration a remplacé, « gardée avant qu'un agent modifie
+// la page » pour ce qu'un agent a remplacé, lot 5). Le jeton lui-même n'est jamais nommé : son nom
 // n'est montré qu'à son propriétaire, dans l'activité du jeton (Task C2). À
 // droite, l'aperçu de celle qu'on choisit, en lecture seule, dans le même éditeur que la page
 // (`VersionPreview`, qui n'écrit jamais). En bas, « Restaurer cette version ».
@@ -97,9 +97,9 @@ const BY_AGENT = " (par un agent)";
 
 /**
  * L'étiquette d'une version coupée avant qu'un agent remplace ce qu'elle garde (lot 5, R1234).
- * Elle ne dit pas « par un agent », réservé à la mention d'un auteur (recette du lot 5, E4, R1552).
+ * Elle ne dit pas « par un agent », réservé à la mention d'un auteur (recette du lot 5, E4, R1552, R1692).
  */
-const BEFORE_AGENT = "gardée avant qu'un agent la modifie";
+const BEFORE_AGENT = "gardée avant qu'un agent modifie la page";
 
 const NOBODY: RosterUser[] = [];
 

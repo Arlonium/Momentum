@@ -223,7 +223,7 @@ test("a_before_agent_version_says_what_it_keeps", async () => {
   await opened({ versions: [replaced, v2, v1] });
   const [, agent, restore, ordinary] = items();
   const tags = (item: Element) => [...item.querySelectorAll(".mm-history-tag")].map((tag) => tag.textContent);
-  expect(tags(agent)).toEqual(["gardée avant qu'un agent la modifie"]);
+  expect(tags(agent)).toEqual(["gardée avant qu'un agent modifie la page"]);
   expect(agent.querySelector(".mm-history-names")!.textContent).toBe("Bruno (par un agent)");
   expect(tags(agent).join(" ")).not.toContain("par un agent");
   expect(tags(restore)).toEqual(["avant une restauration"]);
