@@ -381,6 +381,26 @@ impl AppState {
         }))
     }
 
+    /// Ce que voit le compte de l'appel dans l'espace, sans la restriction d'un jeton : `space`
+    /// lui-même pour une session ; pour un jeton, le calcul de son compte. Pour dire où une page se
+    /// range dans la barre latérale de la personne (la section d'une page de la racine : un jeton à
+    /// racines voit toutes les siennes dans « Partagé »), jamais pour permettre : les droits d'un
+    /// jeton restent ceux de `space` (recette du lot 5, F1, Ruling R1548).
+    pub(crate) async fn sidebar_access(
+        &self,
+        user: &AuthUser,
+        space: &Arc<SpaceAccess>,
+        space_id: Uuid,
+    ) -> Result<Arc<SpaceAccess>, ApiError> {
+        if user.token().is_none() {
+            return Ok(Arc::clone(space));
+        }
+        Ok(self
+            .account_access(user, space_id)
+            .await?
+            .map_or_else(|| Arc::clone(space), |(account, _)| account))
+    }
+
     /// Le calcul du compte de `user`, `account`, fait à la révision `rev`, restreint au jeton
     /// `token` : gardé dans le cache des accès sous la forme du jeton (`TokenGrant::shape` : le
     /// compte, le niveau, l'interdit, les racines), l'espace et la révision du calcul qu'il

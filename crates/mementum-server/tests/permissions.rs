@@ -1846,7 +1846,8 @@ async fn overtaken_patch_naming_the_old_parent_becomes_a_move() {
 ///
 /// La requête a bien décidé avant l'écriture concurrente : elle range la page après une page
 /// de racine que Mona ne voit plus ensuite. Arrivée après, elle aurait reçu `422
-/// invalid_after`.
+/// invalid_after`. Ce témoin est de la section où Mona voit la page (« Espace » sous une ligne
+/// `members`, « Partagé » sinon) : une sœur d'une autre section est refusée (Ruling R1548).
 async fn root_move_overtaken(
     above: impl FnOnce(&Team<'_>) -> Vec<(Subject, Level)>,
     meanwhile: impl FnOnce(&Team<'_>, Uuid) -> String,
@@ -1855,14 +1856,20 @@ async fn root_move_overtaken(
     let t = open_app().await;
     let team = Team::new(&t).await;
     let (olga, mona) = (&team.olga, &team.mona);
-    let parent = team.page(None, "Parent", &above(&team)).await;
+    let above = above(&team);
+    let in_space = above
+        .iter()
+        .any(|(subject, _)| *subject == Subject::Members);
+    let parent = team.page(None, "Parent", &above).await;
     let page = team.page(Some(parent), "Page", &[]).await;
-    let seen_before = [user(olga, Level::Full), user(mona, Level::Read)];
-    let witness = team.page(None, "Témoin", &seen_before).await;
-    let unseen = format!(
-        "DELETE FROM acl WHERE node_id = '{witness}' AND subject = '{}'",
+    let through = if in_space {
+        Subject::Members
+    } else {
         Subject::User(mona.id)
-    );
+    };
+    let seen_before = [user(olga, Level::Full), (through, Level::Read)];
+    let witness = team.page(None, "Témoin", &seen_before).await;
+    let unseen = format!("DELETE FROM acl WHERE node_id = '{witness}' AND subject = '{through}'");
 
     let id = page.to_string();
     let body = json!({ "parentId": null, "afterId": witness.to_string() });

@@ -126,15 +126,15 @@ fn named(members: Vec<mementum_store::Member>) -> Vec<MemberName> {
 
 /// Le plan d'un espace tel que l'appel le voit (l'outil `fetch` d'un espace, et `workspace_info`
 /// d'un espace nommé) : les pages hors corbeille, dans l'ordre de l'arbre, chacune avec sa
-/// profondeur (0 à la racine de ce que l'appel voit), jusqu'à `max_depth` et `max` lignes au
-/// plus ; vrai s'il y en a d'autres. Mené par la route de l'arbre (`GET …/tree`).
+/// profondeur (0 à la racine de ce que l'appel voit) et sa section, jusqu'à `max_depth` et `max`
+/// lignes au plus ; vrai s'il y en a d'autres. Mené par la route de l'arbre (`GET …/tree`).
 pub(crate) async fn space_plan(
     state: &AppState,
     user: &AuthUser,
     space_id: Uuid,
     max: usize,
     max_depth: usize,
-) -> Result<(Vec<(usize, SearchAncestor)>, bool), ApiError> {
+) -> Result<(Vec<(usize, SearchAncestor, types::Section)>, bool), ApiError> {
     let tree = crate::routes::pages::tree(
         axum::extract::State(state.clone()),
         user.clone(),
@@ -168,6 +168,7 @@ pub(crate) async fn space_plan(
                 id: node.id.clone(),
                 title: node.title.clone(),
             },
+            node.section,
         ));
         if let Some(children) = by_parent.get(&Some(node.id.clone())) {
             if depth < max_depth {

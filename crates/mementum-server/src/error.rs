@@ -123,12 +123,14 @@ impl ApiError {
     }
 
     /// `422 invalid_after` : la même réponse pour un id inconnu, mal formé, d'une page qui
-    /// n'est pas sœur à l'endroit visé, ou d'une page que la personne ne voit pas.
+    /// n'est pas sœur à l'endroit visé (à la racine : d'une autre section, Ruling R1548), ou d'une
+    /// page que la personne ne voit pas.
     pub fn invalid_after() -> ApiError {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::InvalidAfter,
-            "afterId ne désigne pas une page sœur à l'endroit visé (null : en tête)",
+            "afterId ne désigne pas une page sœur à l'endroit visé : sous la même page parente et, \
+             à la racine, dans la même section (null : en tête)",
         )
     }
 

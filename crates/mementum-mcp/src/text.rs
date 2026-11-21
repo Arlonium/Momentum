@@ -105,6 +105,9 @@ pub struct OutlineLine {
     pub depth: usize,
     pub id: String,
     pub title: String,
+    /// La section de la barre latérale (« Espace », « Partagé », « Privé ») d'une page de la
+    /// racine : `move` ne range une page qu'après une sœur de sa section (Ruling R1548).
+    pub section: Option<String>,
 }
 
 /// Le plan d'un espace (`fetch` d'un espace).
@@ -562,8 +565,13 @@ pub fn outline(outline: &Outline) -> ToolOutput {
         one_line(&outline.space_name, ITEM_BYTES)
     ));
     let shown = lines.list(&outline.lines, MAX_OUTLINE_LINES, |line| {
+        let section = line
+            .section
+            .as_deref()
+            .map(|section| format!(", section {}", one_line(section, 20)))
+            .unwrap_or_default();
         format!(
-            "{}- {} ({})",
+            "{}- {} ({}{section})",
             "  ".repeat(line.depth.min(20)),
             one_line(&line.title, ITEM_BYTES),
             id(&line.id)
@@ -1092,7 +1100,10 @@ static HINTS: [(&str, Hint); 32] = [
     ),
     (
         "invalid_after",
-        says("La page nommée par after n'est pas une sœur de la page : vérifie son identifiant."),
+        says(
+            "La page nommée par after n'est pas une sœur de la page : relis le plan de l'espace \
+             (fetch de l'espace) et nomme une page de même page parente et de même section.",
+        ),
     ),
     (
         "title_too_long",

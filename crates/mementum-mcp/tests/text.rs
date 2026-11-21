@@ -171,6 +171,7 @@ fn all_outputs(long: &str, item: &str, count: usize) -> Vec<ToolOutput> {
                     depth: i,
                     id: item.into(),
                     title: item.into(),
+                    section: Some(item.into()),
                 })
                 .collect(),
             truncated: true,

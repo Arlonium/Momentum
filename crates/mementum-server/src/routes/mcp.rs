@@ -232,6 +232,15 @@ fn details(served: &Served, seen: Seen) -> CallDetails {
     details
 }
 
+/// Le nom d'une section, comme la barre latérale le dit.
+fn section_word(section: crate::types::Section) -> &'static str {
+    match section {
+        crate::types::Section::Space => "Espace",
+        crate::types::Section::Shared => "Partagé",
+        crate::types::Section::Private => "Privé",
+    }
+}
+
 /// Le nom d'une erreur JSON-RPC de la réponse, s'il y en a une.
 fn rpc_error(reply: &Reply) -> Option<String> {
     let code = reply.body.as_ref()?.pointer("/error/code")?.as_i64()?;
@@ -542,10 +551,13 @@ impl Tools<'_> {
             space_name: space.name,
             lines: lines
                 .into_iter()
-                .map(|(depth, page)| OutlineLine {
+                .map(|(depth, page, section)| OutlineLine {
                     depth,
                     id: page.id,
                     title: page.title,
+                    // La section d'une page de la racine : une page ne se range qu'après une sœur
+                    // de la sienne (Ruling R1548).
+                    section: (depth == 0).then(|| section_word(section).to_string()),
                 })
                 .collect(),
             truncated: more,
@@ -706,7 +718,7 @@ impl Tools<'_> {
                         .collect(),
                     pages: pages
                         .into_iter()
-                        .map(|(_, page)| PageRef {
+                        .map(|(_, page, _)| PageRef {
                             id: page.id,
                             title: page.title,
                         })
@@ -818,8 +830,13 @@ fn refusal_of(error: &ApiError, counted: Counted) -> Refusal {
         ErrorCode::InvalidParent => "« parent » ne désigne pas une page que ton jeton voit, dans \
                                      l'espace visé (son identifiant ou son adresse)"
             .to_string(),
-        ErrorCode::InvalidAfter => "« after » ne désigne pas une page sœur de la page à ranger ; \
-                                    sans « after », elle passe en premier"
+        // Une sœur à la racine est de la même section (Ruling R1548) : le plan de l'espace la dit.
+        ErrorCode::InvalidAfter => "« after » ne désigne pas une page sœur de la page à ranger : \
+                                    une page sous la même page parente et, à la racine de \
+                                    l'espace, dans la même section (Espace, Partagé ou Privé, \
+                                    que le plan de l'espace dit) ; move ne change jamais une \
+                                    page de page parente ni de section ; sans « after », elle \
+                                    passe en premier"
             .to_string(),
         // Un message de route qui cite l'entrée de l'agent (un `old`, une ancre, une adresse, une
         // ligne de MMD) la met entre « et » (R434) ; où finit la citation ne se lit pas (elle peut

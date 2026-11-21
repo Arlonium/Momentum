@@ -51,6 +51,7 @@
 //! entre-temps, et le client réessaierait.
 
 use std::cmp::Reverse;
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
@@ -422,7 +423,7 @@ async fn planned_move(
     user: &AuthUser,
     node: &Node,
     access: &NodeAccess,
-    space: &SpaceAccess,
+    space: &Arc<SpaceAccess>,
     body: &UpdatePage,
 ) -> Result<Option<Move>, ApiError> {
     if body.parent_id.is_none() && body.after_id.is_none() {
@@ -437,27 +438,19 @@ async fn planned_move(
         None => node.parent_id,
         Some(_) => named_parent.map(|(parent, _)| parent),
     };
-    // La place parmi les enfants de ce parent, lue après les droits : un frère que la
-    // personne ne voit pas est refusé comme un id inconnu.
-    let place = || {
-        let after = match &body.after_id {
-            None => Some(Sibling::Last),
-            Some(None) => None,
-            Some(Some(raw)) => {
-                let (sibling, _) = seen_in(space, raw).ok_or_else(ApiError::invalid_after)?;
-                Some(Sibling::Node(sibling))
-            }
-        };
+    // La place parmi les enfants de ce parent, lue après les droits ([`sibling_after`]).
+    let shown_under = named_parent.map(|(parent, _)| parent);
+    let place = async || {
         Ok::<_, ApiError>(Place {
             parent_id: parent,
-            after,
+            after: sibling_after(state, user, space, node, shown_under, &body.after_id).await?,
             from: Some(node.parent_id),
         })
     };
     if parent == node.parent_id {
         permit(access, Action::Reorder)?;
         return Ok(Some(Move {
-            place: place()?,
+            place: place().await?,
             root_grant: None,
             changes_parent: false,
             access: Some(*access),
@@ -495,11 +488,44 @@ async fn planned_move(
         }
     };
     Ok(Some(Move {
-        place: place()?,
+        place: place().await?,
         root_grant,
         changes_parent: true,
         access,
     }))
+}
+
+/// Le frère après lequel ranger `node` (`after_id` du corps : absent, en dernier ; `null`, en tête),
+/// sous la page parente nommée `shown_under` ou sous la sienne. Un frère que la personne ne voit
+/// pas est refusé comme un id inconnu (`422 invalid_after`) ; un frère d'une autre section de sa
+/// barre latérale aussi (recette du lot 5, F1, Ruling R1548) : à la racine, les pages des trois
+/// sections sont sœurs pour le store, si bien qu'une page de « Privé » rangée après une page
+/// d'« Espace » changeait de place parmi toutes les pages de la racine sans bouger dans aucune
+/// section, et la route répondait comme d'un déplacement fait. La section est celle de la barre
+/// latérale du compte, pas celle d'un jeton à racines, qui voit toutes les siennes dans
+/// « Partagé ». Sous une même page parente visible, toutes les pages ont la section de leur plus
+/// haut ancêtre visible : la règle ne refuse rien de plus que le store.
+async fn sibling_after(
+    state: &AppState,
+    user: &AuthUser,
+    space: &Arc<SpaceAccess>,
+    node: &Node,
+    shown_under: Option<Uuid>,
+    after_id: &Option<Option<String>>,
+) -> Result<Option<Sibling>, ApiError> {
+    let raw = match after_id {
+        None => return Ok(Some(Sibling::Last)),
+        Some(None) => return Ok(None),
+        Some(Some(raw)) => raw,
+    };
+    let (sibling, _) = seen_in(space, raw).ok_or_else(ApiError::invalid_after)?;
+    let sidebar = state.sidebar_access(user, space, node.space_id).await?;
+    let section = |id| sidebar.node(id).map(|access| access.section);
+    let wanted = section(shown_under.unwrap_or(node.id));
+    if wanted.is_none() || section(sibling) != wanted {
+        return Err(ApiError::invalid_after());
+    }
+    Ok(Some(Sibling::Node(sibling)))
 }
 
 /// `POST /api/v1/pages/{id}/trash` : met la page à la corbeille, et ses sous-pages avec elle

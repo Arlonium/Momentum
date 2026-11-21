@@ -1261,7 +1261,7 @@ async fn fetch_takes_a_page_address() {
 
 /// `fetch` d'un espace (son nom, ou son identifiant) en dessine le plan tel que le jeton le voit :
 /// une page qu'il ne voit pas n'y est pas, et un jeton de pages n'y voit que les siennes, à la
-/// racine de ce qu'il voit.
+/// racine de ce qu'il voit. Une page de la racine dit sa section (Ruling R1548).
 #[tokio::test]
 async fn fetch_of_a_space_draws_its_tree_as_the_token_sees_it() {
     let t = open_app().await;
@@ -1292,7 +1292,9 @@ async fn fetch_of_a_space_draws_its_tree_as_the_token_sees_it() {
         plan.ok();
         let content = plan.content().unwrap();
         assert!(
-            content.contains(&format!("\n- Publique ({public})\n  - Enfant ({child})")),
+            content.contains(&format!(
+                "\n- Publique ({public}, section Espace)\n  - Enfant ({child})"
+            )),
             "{content}"
         );
         assert!(!content.contains("Secrète"), "{content}");
@@ -1321,7 +1323,7 @@ async fn fetch_of_a_space_draws_its_tree_as_the_token_sees_it() {
     plan.ok();
     let content = plan.content().unwrap();
     assert!(
-        content.contains(&format!("\n- Enfant ({child})")),
+        content.contains(&format!("\n- Enfant ({child}, section Partagé)")),
         "{content}"
     );
     assert!(!content.contains("Publique"), "{content}");
@@ -2062,6 +2064,110 @@ async fn a_route_refusal_names_the_fields_of_the_tool() {
             assert!(!refused.text.contains(route_name), "{}", refused.text);
         }
     }
+}
+
+/// La place de chaque page de la racine de l'espace d'équipe, par titre.
+async fn root_positions(t: &TestApp, team: &Team<'_>) -> Vec<(String, String)> {
+    let mut roots: Vec<(String, String)> = t
+        .store
+        .list_nodes(team.space)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.parent_id.is_none())
+        .map(|n| (n.title, n.position))
+        .collect();
+    roots.sort();
+    roots
+}
+
+/// `move` « après » une page de la racine d'une autre section (recette du lot 5, F1, Ruling R1548) :
+/// la page « Privé » rangée après une page d'« Espace » changeait de place parmi toutes les pages de
+/// la racine, sans bouger dans la barre latérale, et l'outil disait « move fait ». Refusé
+/// `invalid_after` par l'outil comme par la route, sans rien écrire, que le jeton ouvre l'espace ou
+/// les deux pages seulement (où toutes deux sont « Partagé » pour lui : c'est la barre latérale du
+/// compte qui juge) ; le refus dit ce qu'`after` désigne. Dans la même section, la page se range.
+#[tokio::test]
+async fn moving_after_a_page_of_another_section_is_refused() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let create = |title: &str, section: &str| {
+        team.mona
+            .create(json!({ "spaceId": team.space, "title": title, "section": section }))
+    };
+    let mine = create("Mienne", "private").await;
+    let mine_too = create("Mienne aussi", "private").await;
+    let shared = create("Commune", "space").await;
+    let before = root_positions(&t, &team).await;
+
+    let route = team
+        .mona
+        .patch(&mine.id, json!({ "afterId": shared.id }))
+        .await;
+    route.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_after");
+    assert!(route.text().contains("section"), "{}", route.text());
+
+    let space = TokenScope::Space(team.space);
+    let roots = TokenScope::Pages {
+        space: team.space,
+        pages: {
+            let mut pages = vec![
+                Uuid::parse_str(&mine.id).unwrap(),
+                Uuid::parse_str(&shared.id).unwrap(),
+            ];
+            pages.sort();
+            pages
+        },
+    };
+    for scope in [space, roots] {
+        let (token, _) = api_token(&t.store, team.mona.id, TokenLevel::Edit, scope, false).await;
+        let mcp = Mcp::new(&t, &token, Era::V2026);
+        let moved = mcp
+            .call(
+                "manage_pages",
+                json!({ "action": "move", "page": mine.id, "after": shared.id }),
+            )
+            .await;
+        moved.refused("invalid_after");
+        assert!(moved.head().contains("section"), "{}", moved.text);
+    }
+    assert_eq!(
+        root_positions(&t, &team).await,
+        before,
+        "aucun refus n'écrit"
+    );
+
+    // Dans sa section, la page se range après sa sœur.
+    let (token, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Edit,
+        TokenScope::Space(team.space),
+        false,
+    )
+    .await;
+    let mcp = Mcp::new(&t, &token, Era::V2026);
+    // Le plan de l'espace dit la section de chaque page de la racine : de quoi choisir `after`.
+    let plan = mcp
+        .call("fetch", json!({ "id": team.space.to_string() }))
+        .await;
+    let plan = plan.ok().content().unwrap();
+    for (page, section) in [(&mine, "Privé"), (&shared, "Espace")] {
+        let line = format!("- {} ({}, section {section})", page.title, page.id);
+        assert!(plan.contains(&line), "{line} manque : {plan}");
+    }
+    let moved = mcp
+        .call(
+            "manage_pages",
+            json!({ "action": "move", "page": mine.id, "after": mine_too.id }),
+        )
+        .await;
+    assert!(!moved.is_error, "{}", moved.text);
+    let after = root_positions(&t, &team).await;
+    let place = |roots: &[(String, String)], title: &str| {
+        roots.iter().find(|(t, _)| t == title).unwrap().1.clone()
+    };
+    assert!(place(&after, "Mienne") > place(&after, "Mienne aussi"));
 }
 
 /// Les filtres de `search` mènent la route : `created_by` par nom (sans casse) ou par
