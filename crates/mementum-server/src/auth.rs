@@ -295,6 +295,21 @@ impl From<User> for AuthUser {
     }
 }
 
+/// La part des jetons du compte `account` ([`AuthUser::party`] d'un appel par jeton) : un
+/// identifiant tiré du compte, qu'aucun compte ne porte. Ce qui révoque les jetons d'un compte
+/// (`DELETE /api/v1/tokens/{id}`, le changement de mot de passe) écrit dans cette voie de la file
+/// d'écriture (lot 5, tour de correction de X2, Ruling R1658) : la révocation passe après les
+/// écritures que ses jetons y ont déjà mises en file, comme avant R1640.
+pub(crate) fn tokens_party(account: Uuid) -> Uuid {
+    let digest = Sha256::new()
+        .chain_update(b"mementum:jetons:")
+        .chain_update(account.as_bytes())
+        .finalize();
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    Uuid::from_bytes(bytes)
+}
+
 impl AuthUser {
     /// Le jeton de l'appel, s'il est venu par un jeton d'API.
     pub(crate) fn token(&self) -> Option<&TokenGrant> {
@@ -311,15 +326,7 @@ impl AuthUser {
     pub(crate) fn party(&self) -> Uuid {
         match self.via {
             Via::Session => self.id,
-            Via::Token(_) => {
-                let digest = Sha256::new()
-                    .chain_update(b"mementum:jetons:")
-                    .chain_update(self.id.as_bytes())
-                    .finalize();
-                let mut bytes = [0u8; 16];
-                bytes.copy_from_slice(&digest[..16]);
-                Uuid::from_bytes(bytes)
-            }
+            Via::Token(_) => tokens_party(self.id),
         }
     }
 }

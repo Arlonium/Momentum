@@ -221,7 +221,9 @@ pub(crate) async fn revoke(
     let user = caller?.user;
     let id = token_id(path)?;
     to_completion(async move {
-        match state.store.revoke_token(user.id, id, now_ms()).await {
+        // Dans la voie des jetons du compte, derrière ce qu'ils y ont mis en file (R1658).
+        let revoking = state.store.revoke_token(user.id, id, now_ms());
+        match mementum_store::writes_by(Some(auth::tokens_party(user.id)), revoking).await {
             Ok(revoked) => {
                 if revoked {
                     tracing::info!(user_id = %user.id, token_id = %id, "jeton d'API révoqué");

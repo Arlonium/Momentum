@@ -577,3 +577,128 @@ async fn a_token_burst_never_queues_ahead_of_its_session() {
         "le renommage de la session a attendu {before} écritures du jeton"
     );
 }
+
+/// Ce qui révoque les jetons d'Olga : `DELETE /api/v1/tokens/{id}` du jeton, ou le changement de
+/// son mot de passe, par sa session.
+#[derive(Clone, Copy)]
+enum Revocation {
+    Route,
+    PasswordChange,
+}
+
+/// Lot 5, tour de correction de X2 (Ruling R1658) : la révocation d'un jeton attend dans la voie
+/// des jetons du compte, derrière les écritures qu'ils y ont déjà mises en file, comme avant R1640.
+/// Le tour d'écriture tenu, le jeton met deux renommages en file, puis la session d'Olga révoque ;
+/// le tour rendu, les deux renommages sont validés avant la révocation, rien après (un déclencheur
+/// témoin numérote les validations). Dans la voie de la session, servie tour à tour avec celle des
+/// jetons, la révocation passait entre les deux.
+async fn a_revocation_waits_behind_the_writes_its_tokens_queued(by: Revocation) {
+    use tower::ServiceExt;
+    const QUEUED: usize = 2;
+    let t = common::sync::open_app().await;
+    let olga = t.account("Olga").await;
+    let mut renamed = Vec::new();
+    for i in 0..QUEUED {
+        let title = format!("Cible {i}");
+        renamed.push(olga.create(serde_json::json!({ "title": title })).await.id);
+    }
+    let (token, token_id) = common::api_token(
+        &t.store,
+        olga.id,
+        mementum_store::TokenLevel::Edit,
+        mementum_store::TokenScope::All,
+        false,
+    )
+    .await;
+    exec_sql(
+        &t.db_path(),
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_title AFTER UPDATE OF title ON nodes \
+         BEGIN INSERT INTO witness (what) VALUES (NEW.title); END; \
+         CREATE TRIGGER witness_revoked AFTER UPDATE OF revoked_at ON api_tokens \
+         WHEN NEW.revoked_at IS NOT NULL \
+         BEGIN INSERT INTO witness (what) VALUES ('révocation'); END;",
+    )
+    .await;
+    t.indexer.settled().await;
+    let queued = async |at_least: usize| {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while t.store.queued_writes() < at_least {
+            assert!(tokio::time::Instant::now() < deadline, "file : {at_least}");
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    };
+    let held = t.store.hold_writes().await;
+    let mut calls = Vec::new();
+    for (i, page) in renamed.iter().enumerate() {
+        let mut request = common::with_bearer(
+            json_request(
+                Method::PATCH,
+                &format!("/api/v1/pages/{page}"),
+                &serde_json::json!({ "title": format!("Jeton {i}") }),
+            ),
+            &token,
+        );
+        request
+            .headers_mut()
+            .insert(header::HOST, "localhost".parse().unwrap());
+        let router = t.router.clone();
+        calls.push(tokio::spawn(async move {
+            router.oneshot(request).await.unwrap().status()
+        }));
+    }
+    queued(QUEUED).await;
+    let mut request = match by {
+        Revocation::Route => Request::delete(format!("/api/v1/tokens/{token_id}"))
+            .body(Body::empty())
+            .unwrap(),
+        Revocation::PasswordChange => json_request(
+            Method::POST,
+            "/api/v1/auth/password",
+            &serde_json::json!({ "current": common::PASSWORD, "new": "un autre mot de passe assez long" }),
+        ),
+    };
+    let cookie = olga.browser.cookie().unwrap();
+    request
+        .headers_mut()
+        .insert(header::HOST, "localhost".parse().unwrap());
+    request
+        .headers_mut()
+        .insert(header::COOKIE, cookie.parse().unwrap());
+    let router = t.router.clone();
+    let revoking = tokio::spawn(async move { router.oneshot(request).await.unwrap().status() });
+    queued(QUEUED + 1).await;
+    drop(held);
+    for call in calls {
+        assert_eq!(call.await.unwrap(), StatusCode::OK);
+    }
+    let revoked = revoking.await.unwrap();
+    assert!(revoked.is_success(), "{revoked}");
+    let order = query_i64(
+        &t.db_path(),
+        "SELECT COUNT(*) FROM witness WHERE what LIKE 'Jeton %' \
+         AND n < (SELECT n FROM witness WHERE what = 'révocation')",
+    )
+    .await;
+    let after = query_i64(
+        &t.db_path(),
+        "SELECT COUNT(*) FROM witness WHERE what LIKE 'Jeton %' \
+         AND n > (SELECT n FROM witness WHERE what = 'révocation')",
+    )
+    .await;
+    assert_eq!(
+        (order, after),
+        (QUEUED as i64, 0),
+        "renommages du jeton validés avant puis après la révocation"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_revocation_waits_behind_the_writes_its_token_queued() {
+    a_revocation_waits_behind_the_writes_its_tokens_queued(Revocation::Route).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_password_change_waits_behind_the_writes_its_tokens_queued() {
+    a_revocation_waits_behind_the_writes_its_tokens_queued(Revocation::PasswordChange).await;
+}

@@ -410,15 +410,16 @@ async fn new_password(
         // vérifié (Ruling R120) ; les sessions du compte sont supprimées et la
         // sienne ouverte dans la même transaction.
         let (token, session) = auth::new_token();
-        let Some(revoked) = writer
-            .store
-            .change_password(
-                user_id,
-                &verified,
-                &password_hash,
-                session,
-                now_ms() + SESSION_TTL_MS,
-            )
+        // La transaction révoque aussi les jetons du compte : elle attend dans leur voie, derrière
+        // ce qu'ils y ont mis en file (R1658).
+        let changing = writer.store.change_password(
+            user_id,
+            &verified,
+            &password_hash,
+            session,
+            now_ms() + SESSION_TTL_MS,
+        );
+        let Some(revoked) = mementum_store::writes_by(Some(auth::tokens_party(user_id)), changing)
             .await
             .map_err(internal)?
         else {
