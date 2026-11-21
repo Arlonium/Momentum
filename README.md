@@ -197,7 +197,7 @@ Le dossier `spike/` est le **prototype jetable** de la phase 0 : on en garde les
 | Temps réel | **Yjs** (CRDT) pour le texte des pages, confirmé par la phase 0 face à Loro ; journal d'opérations dont le serveur fait autorité pour l'arbre, les bases et les permissions |
 | Organisation du contenu | **Espaces** façon Notion (demande d'Alex du 2026-11-09, confirmée par Lenny le 2026-11-10 ; ils remplacent les organisations et les coffres façon Obsidian) : un compte a plusieurs espaces (« Perso », « Pro »), on invite quelqu'un dans l'espace ou sur une page, et les jetons d'API portent sur un espace ou sur des pages |
 | Autonomie | Pas de miroir en fichiers ; **import Notion et vault Obsidian dès la phase 1**, export complet sans perte |
-| IA | **Serveur MCP dès la phase 1** ; agents en mode suggestion par défaut ; IA indépendante du fournisseur (Claude, GPT, Mistral ou 100 % local via Ollama) |
+| IA | **Serveur MCP dès la phase 1** (livré au lot 5) ; agents en mode suggestion par défaut (avec la phase 3 : la phase 1 n'a que l'écriture directe) ; IA indépendante du fournisseur (Claude, GPT, Mistral ou 100 % local via Ollama) |
 | Design | Direction **A « Papier »**, la plus proche de Notion pour ne pas dépayser |
 
 La liste complète, avec les raisons, est dans la conception, §12 et §13.
