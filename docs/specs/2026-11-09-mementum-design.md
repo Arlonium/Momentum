@@ -1080,7 +1080,7 @@ Limites connues laissées par le lot 4 (les numéros L-a à L-s sont ceux du pla
 - **R998** : un lien écrit avec l'adresse publique entière compte comme rétrolien sous l'adresse que le serveur connaissait à l'indexation ; changer d'adresse publique demande `mementum reindex` ;
 - **R1055** : savoir si une page vue est en retard lit encore toute la file de l'indexeur (100 ms quand 100 000 pages y sont), au plus une fois par seconde et par espace, et jamais au repos (lot 7) ;
 - **R1081, R1116** : la fenêtre de recherche ouverte ne suit pas l'arbre (une page renommée, jetée ou fermée garde sa ligne jusqu'à la frappe suivante), et rien ne pousse un rétrolien neuf (il paraît au retour sur l'onglet) ;
-- **R1143** (défaut antérieur au lot, vu à la Task X1, non corrigé) : Échap dans le texte de l'éditeur, sans menu ouvert, laisse le focus sur `body` ;
+- **R1143** (défaut antérieur au lot, vu à la Task X1) : Échap dans le texte de l'éditeur, sans menu ouvert, laissait le focus sur `body` ; **corrigé après la recette (R1584)** : il ne fait plus rien (question 37, choix (a), confirmé par Lenny le 2026-11-21) ;
 - **R139, R243** : la migration `0005` peut changer jusqu'à la clôture du lot 4 ; elle a changé trois fois en route (`8600ad9`, `6f093e8`, `865338c`) : une base ouverte par un binaire du lot 4 d'avant le dernier changement est refusée, sans être modifiée, et le refus nomme la copie à reprendre (R840).
 
 ---
