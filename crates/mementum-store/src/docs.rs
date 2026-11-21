@@ -113,6 +113,34 @@ impl Store {
                 .ok_or(StoreError::NotFound)?;
                 Ok(row.get(0))
             }
+            // Une écriture par jeton d'API relit le jeton dans la transaction qui écrit (lot 5,
+            // Task S7, Ruling R1356) : une écriture d'agent qui attendait son tour pendant qu'on
+            // révoquait le jeton n'arrive pas après la révocation. Une transaction à elle, verrou
+            // d'écriture pris d'emblée : rien ne passe entre la relecture et l'insertion. Seul un
+            // jeton que sa ligne dit mort est refusé (Ruling R1381) : le serveur n'écrit que pour
+            // un jeton que la porte a lu vivant, et sa ligne ne part qu'avec la purge, quatre-vingt-
+            // dix jours après sa mort.
+            _ if token.is_some() => {
+                let mut tx = self.write_in(Lane::Page(node_id)).await?;
+                let dead = sqlx::query(concat!(
+                    "SELECT 1 FROM api_tokens WHERE id = ?1 AND ",
+                    crate::tokens::dead_token!()
+                ))
+                .bind(token)
+                .bind(now)
+                .fetch_optional(&mut **tx)
+                .await?
+                .is_some();
+                if dead {
+                    return Err(StoreError::TokenRevoked);
+                }
+                let mut seq = 0;
+                for update in updates {
+                    seq = append(&mut **tx, &id, update, actor, token, now).await?;
+                }
+                tx.commit().await?;
+                Ok(seq)
+            }
             // Une seule instruction est déjà atomique : le chemin de chaque frappe ne paie pas
             // une transaction explicite. La voie de la page, dans la file d'écriture : celle de
             // son acteur, qui écrit chaque frappe.

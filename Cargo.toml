@@ -31,6 +31,7 @@ http-body-util = "0.1.5"
 mementum-acl = { path = "crates/mementum-acl" }
 mementum-crdt = { path = "crates/mementum-crdt" }
 mementum-md = { path = "crates/mementum-md" }
+mementum-mcp = { path = "crates/mementum-mcp" }
 mementum-schema = { path = "crates/mementum-schema" }
 mementum-search = { path = "crates/mementum-search" }
 mementum-server = { path = "crates/mementum-server" }

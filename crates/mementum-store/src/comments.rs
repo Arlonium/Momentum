@@ -554,6 +554,25 @@ impl Store {
         Ok(threads)
     }
 
+    /// Les identifiants des blocs de la page qui portent un fil, résolu ou non (lot 5, Task S7,
+    /// Ruling R1571 : un bloc commenté est un contenu qu'une opération d'agent ne retire que sous
+    /// `allow_deleting_content`). Lus par l'index des fils de la page, sans leurs messages.
+    pub async fn commented_blocks(
+        &self,
+        node_id: Uuid,
+    ) -> Result<std::collections::HashSet<String>, StoreError> {
+        Ok(sqlx::query(
+            "SELECT DISTINCT block_id FROM comment_threads \
+             WHERE node_id = ? AND block_id IS NOT NULL",
+        )
+        .bind(node_id.to_string())
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| r.get::<String, _>(0))
+        .collect())
+    }
+
     /// Ouvre un fil sur la page, attaché au bloc `block_id` s'il est donné, avec son premier
     /// message, écrit par `author` ; les deux ensemble, ou rien. `NotFound` si la page ou le
     /// compte n'existe pas.

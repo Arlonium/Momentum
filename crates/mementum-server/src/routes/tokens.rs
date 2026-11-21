@@ -93,6 +93,27 @@ pub(crate) async fn list(
     ))
 }
 
+/// Le jeton `token` de `user`, tel que la liste le montre (lot 5, Task S7 : `GET /api/v1/me` par
+/// ce jeton, Ruling R1247) ; ses pages et son espace nommés seulement si `user` (restreint au
+/// jeton) les voit. `None` s'il ne se lit plus (révoqué entre-temps et parti).
+pub(crate) async fn token_info(
+    state: &AppState,
+    user: &AuthUser,
+    token: Uuid,
+) -> Result<Option<TokenInfo>, ApiError> {
+    let now = now_ms();
+    let rows: Vec<TokenRow> = state
+        .store
+        .tokens_of(user.id, now)
+        .await
+        .map_err(internal)?
+        .into_iter()
+        .filter(|row| row.id == token)
+        .collect();
+    let named = Named::read(state, user, &rows).await?;
+    Ok(rows.first().map(|row| info(row, &named, now)))
+}
+
 /// `POST /api/v1/tokens` : `201`, [`TokenCreated`]. Refus dans l'ordre de la tête du module.
 pub(crate) async fn create(
     State(state): State<AppState>,

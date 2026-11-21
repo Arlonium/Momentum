@@ -49,12 +49,19 @@ macro_rules! live {
     };
 }
 
+/// La même règle, pour une écriture d'ailleurs dans le crate qui relit un jeton (le journal d'une
+/// page, lot 5, Task S7) : jamais une expression récrite.
+pub(crate) use live as live_token;
+
 /// Mort, le jeton l'est à l'instant lié en `?2`.
 macro_rules! dead {
     () => {
         "(revoked_at IS NOT NULL OR expires_at <= ?2)"
     };
 }
+
+/// La même règle, pour le journal d'une page (lot 5, Task S7).
+pub(crate) use dead as dead_token;
 
 /// Quand un jeton mort est mort : la plus tôt de sa révocation et de son échéance (`NULL` pour un
 /// jeton sans l'une ni l'autre).

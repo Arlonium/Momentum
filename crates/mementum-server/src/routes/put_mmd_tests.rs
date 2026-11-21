@@ -111,9 +111,13 @@ fn put(
             State(state),
             who,
             Ok(Path(page.to_string())),
+            axum::http::HeaderMap::new(),
             Ok(Bytes::from(mmd)),
         )
         .await
+        // Lot 5, Task S7 : la réponse porte l'`ETag` de l'état écrit ; ces tests n'en lisent que
+        // le statut.
+        .map(|response| response.status())
     })
 }
 

@@ -44,7 +44,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Notify, mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::actor::agent::{Edit, EditRefusal, Edited, PageRead, Step, VersionGate, Versioned};
+use crate::actor::agent::{
+    Edit, EditRefusal, Edited, MmdWrite, PageRead, Step, VersionGate, Versioned,
+};
 use crate::actor::{self, Broadcast, Command, Commands, Event, Joined, Membership, Outcome};
 use crate::long_work::off_the_engine;
 use crate::protocol;
@@ -455,9 +457,27 @@ impl Hub {
         blocks: Vec<Block>,
         actor: Option<Uuid>,
     ) -> Result<(), SyncError> {
+        self.write_blocks_at(node_id, blocks, actor, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// [`Hub::write_blocks`], qui juge d'abord, dans la commande qui écrit, que la page est encore
+    /// à la révision `expected` que l'auteur a lue (`PUT /mmd` avec `If-Match`, lot 5, Task S7) :
+    /// sinon rien n'est écrit, et [`MmdWrite::Mismatch`] rend la révision courante. Écrite (ou rien
+    /// à écrire), [`MmdWrite::Written`] rend la révision de la page après elle, sortie de la même
+    /// commande.
+    pub async fn write_blocks_at(
+        &self,
+        node_id: Uuid,
+        blocks: Vec<Block>,
+        actor: Option<Uuid>,
+        expected: Option<String>,
+    ) -> Result<MmdWrite, SyncError> {
         self.call(node_id, |reply| Command::Write {
             blocks: blocks.clone(),
             actor,
+            expected: expected.clone(),
             reply,
         })
         .await?

@@ -27,6 +27,10 @@ pub struct ApiError {
     retry_after: Option<u64>,
     /// La réponse porte `WWW-Authenticate: Bearer` (`401 invalid_token`, Ruling R1215).
     bearer: bool,
+    /// Des champs de plus dans le corps (lot 5, Task S7 : le rang et la raison d'une opération
+    /// refusée, la révision courante d'un conflit) : jamais `error` ni `message`.
+    /// En boîte : le refus ordinaire reste petit (`clippy::result_large_err`).
+    extra: Option<Box<serde_json::Map<String, serde_json::Value>>>,
 }
 
 impl ApiError {
@@ -40,7 +44,19 @@ impl ApiError {
             },
             retry_after: None,
             bearer: false,
+            extra: None,
         }
+    }
+
+    /// Le refus, avec le champ `key` de plus dans son corps.
+    pub(crate) fn with(mut self, key: &str, value: impl serde::Serialize) -> ApiError {
+        debug_assert!(!matches!(key, "error" | "message" | "line"));
+        if let Ok(value) = serde_json::to_value(value) {
+            self.extra
+                .get_or_insert_with(Default::default)
+                .insert(key.to_string(), value);
+        }
+        self
     }
 
     /// Le code de l'erreur.
@@ -726,6 +742,120 @@ impl ApiError {
         )
     }
 
+    /// `422 mode_unavailable` : seul le mode `direct` est servi (lot 5, Ruling R1211).
+    pub fn mode_unavailable() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::ModeUnavailable,
+            "seul le mode « direct » est servi : les suggestions et les branches viendront plus \
+             tard ; retire « mode », ou mets « direct » ; rien n'a été écrit",
+        )
+    }
+
+    /// `422 revision_required` : une opération qui remplace ou retire des blocs demande la
+    /// révision de la dernière lecture (Ruling R1231).
+    pub fn revision_required(index: usize) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::RevisionRequired,
+            "replace_page, replace_block et delete_block demandent « baseRevision » : relis la \
+             page (sa révision), puis réécris avec elle ; rien n'a été écrit",
+        )
+        .with("index", index)
+    }
+
+    /// `422 too_many_operations` : de une à `max` opérations par appel.
+    pub fn too_many_operations(max: usize) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::TooManyOperations,
+            format!(
+                "un appel porte de une à {max} opérations : découpe-le en plusieurs appels ; rien \
+                 n'a été écrit"
+            ),
+        )
+    }
+
+    /// `422 external_media` : une écriture par jeton poserait un média à adresse web (Ruling
+    /// R1235).
+    pub fn external_media(message: impl Into<String>) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::ExternalMedia,
+            message,
+        )
+    }
+
+    /// `409 revision_conflict`, avec la révision courante (`revision`).
+    pub fn revision_conflict(revision: &str) -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::RevisionConflict,
+            "la page a changé depuis ta lecture, dans les blocs que tu touches : relis-les, puis \
+             réécris avec la révision courante ; rien n'a été écrit",
+        )
+        .with("revision", revision)
+    }
+
+    /// `409 page_in_use` : quelqu'un écrit dans la page ; `replace_page` par un jeton attend
+    /// (Ruling R1233).
+    pub fn page_in_use() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::PageInUse,
+            "quelqu'un écrit dans cette page en ce moment : n'en récris pas tout le contenu ; \
+             passe par des opérations ciblées (str_replace, insert, replace_block) ; rien n'a été \
+             écrit",
+        )
+    }
+
+    /// `409 version_refused` : la version qui garde ce que l'opération remplace n'a pas pu être
+    /// écrite (Ruling R1234).
+    pub fn version_refused() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::VersionRefused,
+            "la page ne peut pas être versionnée avant ce remplacement : rien n'a été écrit ; \
+             réessaie, ou passe par str_replace",
+        )
+    }
+
+    /// `422 too_many_pages` : un lot porte de une à `max` pages.
+    pub fn too_many_pages(max: usize) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::TooManyPages,
+            format!(
+                "un lot porte de une à {max} pages : découpe-le en plusieurs appels ; rien n'a \
+                 été créé"
+            ),
+        )
+    }
+
+    /// `422 invalid_filter` : un filtre de recherche ne se lit pas.
+    pub fn invalid_filter(message: impl Into<String>) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidFilter,
+            message,
+        )
+    }
+
+    /// `422 stale_anchor` : l'ancre ne désigne aucun bloc de la page, ou plusieurs.
+    pub fn stale_anchor(ambiguous: bool) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::StaleAnchor,
+            if ambiguous {
+                "cette ancre désigne plusieurs blocs de la page : relis la page avec ses ancres, \
+                 puis vise le bloc par l'alias qu'elle donne"
+            } else {
+                "cette ancre ne désigne aucun bloc de la page : relis la page avec ses ancres, \
+                 puis vise le bloc par l'alias qu'elle donne"
+            },
+        )
+    }
+
     /// `500 internal` : le détail va dans le journal, pas dans la réponse.
     pub fn internal(error: &dyn std::fmt::Display) -> ApiError {
         tracing::error!(%error, "erreur interne");
@@ -747,7 +877,19 @@ pub(crate) fn internal(error: impl std::fmt::Display) -> ApiError {
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let code = self.body.error;
-        let mut response = (self.status, Json(self.body)).into_response();
+        let mut response = match self.extra {
+            None => (self.status, Json(self.body)).into_response(),
+            Some(extra) => {
+                let mut body = match serde_json::to_value(&self.body) {
+                    Ok(serde_json::Value::Object(body)) => body,
+                    _ => serde_json::Map::new(),
+                };
+                for (key, value) in *extra {
+                    body.entry(key).or_insert(value);
+                }
+                (self.status, Json(body)).into_response()
+            }
+        };
         if let Some(seconds) = self.retry_after {
             response
                 .headers_mut()
@@ -821,6 +963,9 @@ impl From<StoreError> for ApiError {
                 &"StoreError::TokenLimit est arrivé à la conversion générique : la route qui crée \
                   un jeton devait le traduire elle-même (`409 token_limit`)",
             ),
+            // Lot 5, Task S7 (Ruling R1356) : le jeton est mort pendant que l'écriture attendait
+            // son tour ; rien n'est écrit, et la réponse est celle de tout appel par un jeton mort.
+            StoreError::TokenRevoked => ApiError::invalid_token(),
             // Un refus de migration n'arrive qu'à l'ouverture de la base, jamais à une route.
             e @ (StoreError::Migration(_) | StoreError::Sqlx(_)) => ApiError::internal(&e),
         }

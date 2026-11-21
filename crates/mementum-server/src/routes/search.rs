@@ -57,6 +57,7 @@
 //! (huit mots, un seul début de mot, les plafonds de vérification de l'index) et par le débit, et
 //! tient l'index pendant ce temps (une réouverture ou une reconstruction l'attend, R1006).
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -116,6 +117,7 @@ pub(crate) async fn search(
              suivantes.",
         ));
     }
+    let filter = Filter::of(&request)?;
     if query.is_empty() {
         // Rien à chercher : ni place, ni calcul, ni plancher.
         return Ok(Json(SearchResults::default()));
@@ -139,6 +141,7 @@ pub(crate) async fn search(
         access,
         query,
         after,
+        filter,
     };
     let found = tokio::spawn(answered(search, seat, turn, started))
         .await
@@ -154,6 +157,52 @@ struct Search {
     access: Arc<SpaceAccess>,
     query: Query,
     after: usize,
+    filter: Option<Filter>,
+}
+
+/// Les filtres d'une recherche (lot 5, Ruling R1248) : créée par ce compte, contenu daté depuis,
+/// ou avant. Ils réduisent l'ensemble des pages permises, avant l'index, jamais ne l'élargissent.
+#[derive(Debug, Clone, Copy)]
+struct Filter {
+    created_by: Option<Uuid>,
+    edited_after: Option<i64>,
+    edited_before: Option<i64>,
+}
+
+impl Filter {
+    /// Les filtres du corps, lus : `422 invalid_filter` pour un compte qui ne se lit pas, ou des
+    /// dates qu'aucune page ne peut passer. Aucun filtre : `None`.
+    fn of(request: &SearchRequest) -> Result<Option<Filter>, ApiError> {
+        let created_by = match request.created_by.as_deref() {
+            None => None,
+            Some(raw) => Some(
+                Uuid::try_parse(raw)
+                    .ok()
+                    .filter(|_| raw.len() == 36)
+                    .ok_or_else(|| {
+                        ApiError::invalid_filter(
+                            "« createdBy » : l'identifiant d'un compte (un membre, tel que la \
+                             liste des membres le donne)",
+                        )
+                    })?,
+            ),
+        };
+        if let (Some(after), Some(before)) = (request.edited_after, request.edited_before)
+            && after >= before
+        {
+            return Err(ApiError::invalid_filter(
+                "« editedAfter » doit venir avant « editedBefore » : aucune page ne passerait",
+            ));
+        }
+        Ok((created_by.is_some()
+            || request.edited_after.is_some()
+            || request.edited_before.is_some())
+        .then_some(Filter {
+            created_by,
+            edited_after: request.edited_after,
+            edited_before: request.edited_before,
+        }))
+    }
 }
 
 /// Mène la recherche, puis attend le plancher ; la place du compte n'est rendue qu'ensuite, que
@@ -186,12 +235,40 @@ async fn results(search: Search, turn: Arc<Turn>) -> Result<SearchResults, ApiEr
         access,
         query,
         after,
+        filter,
     } = search;
+    // Les pages qui passent les filtres, lues dans la base sous les places : rien de ce qui en
+    // sort n'est jamais rendu sans être aussi vu par le compte (`allowed_pages`).
+    let passing = match filter {
+        None => None,
+        Some(filter) => Some(
+            state
+                .store
+                .pages_matching(
+                    space_id,
+                    filter.created_by,
+                    filter.edited_after,
+                    filter.edited_before,
+                )
+                .await
+                .map_err(internal)?
+                .into_iter()
+                .collect::<HashSet<Uuid>>(),
+        ),
+    };
     let (searches, indexer) = (state.searches.clone(), state.indexer.clone());
     let computed = tokio::task::spawn_blocking(move || {
         // Un calcul lancé va au bout, même si sa tâche est partie : il garde la place jusque-là.
         let _turn = turn;
-        let computed = compute(&searches, &indexer, &access, account, &query, after);
+        let computed = compute(
+            &searches,
+            &indexer,
+            &access,
+            account,
+            &query,
+            after,
+            passing.as_ref(),
+        );
         searches.finished();
         computed
     })
@@ -273,9 +350,10 @@ fn compute(
     account: Uuid,
     query: &Query,
     after: usize,
+    passing: Option<&HashSet<Uuid>>,
 ) -> Result<Computed, IndexError> {
     searches.computing(account);
-    let allowed = allowed_pages(access);
+    let allowed = allowed_pages(access, passing);
     searches.built();
     let limit = SEARCH_PAGE_SIZE.min(MAX_SEARCH_PAGES - after);
     let found = indexer.search(query, &allowed, after, limit)?;
@@ -303,18 +381,20 @@ fn compute(
 
 /// Les pages qu'une recherche peut rendre : ce que le compte voit de l'espace, **hors
 /// corbeille** (la page ou un de ses ancêtres jetés). `access` est celui d'un seul espace : rien
-/// d'un autre n'y entre. Les dossiers vus y sont aussi ; l'index n'en porte pas.
-fn allowed_pages(access: &SpaceAccess) -> PageSet {
+/// d'un autre n'y entre. Les dossiers vus y sont aussi ; l'index n'en porte pas. Avec des
+/// filtres (`passing`, lot 5, R1248), seulement celles qui les passent : un filtre ne fait que
+/// réduire cet ensemble.
+fn allowed_pages(access: &SpaceAccess, passing: Option<&HashSet<Uuid>>) -> PageSet {
     access
         .visible()
-        .filter(|(_, seen)| !seen.in_trash)
+        .filter(|(page, seen)| !seen.in_trash && passing.is_none_or(|p| p.contains(page)))
         .map(|(page, _)| page)
         .collect()
 }
 
 /// Les ancêtres que le compte voit d'une page, du plus haut au plus proche : la chaîne de
 /// `visible_parent`, qui s'arrête au premier parent non vu ; les [`MAX_PATH`] plus proches.
-fn ancestors(access: &SpaceAccess, page: &NodeAccess) -> Vec<Uuid> {
+pub(crate) fn ancestors(access: &SpaceAccess, page: &NodeAccess) -> Vec<Uuid> {
     let mut path = Vec::new();
     let mut seen = page;
     while path.len() < MAX_PATH
@@ -373,7 +453,7 @@ mod tests {
         ];
         let access = member_access(&nodes);
         assert_eq!(access.visible().count(), 4, "la corbeille se voit");
-        let allowed = allowed_pages(&access);
+        let allowed = allowed_pages(&access, None);
         let kept: Vec<u128> = (1..=4)
             .filter(|id| allowed.contains(&Uuid::from_u128(*id)))
             .collect();
@@ -419,7 +499,7 @@ mod tests {
             let mut times = Vec::with_capacity(ROUNDS);
             for _ in 0..ROUNDS {
                 let started = RealInstant::now();
-                let allowed = allowed_pages(&access);
+                let allowed = allowed_pages(&access, None);
                 times.push(started.elapsed());
                 assert_eq!(allowed.len() as u128, 1 + pages - pages / 10);
             }

@@ -622,6 +622,31 @@ impl Store {
             .collect()
     }
 
+    /// Les enfants du nœud `parent` de l'espace `space_id`, corbeille comprise, triés par
+    /// position : au plus `limit`, sans les droits (lot 5, Task S7 : les sous-pages d'une page
+    /// lue par un agent ; la route ne garde que ce qu'`access.rs` montre). Lus par l'index des
+    /// nœuds d'un parent.
+    pub async fn children(
+        &self,
+        space_id: Uuid,
+        parent: Uuid,
+        limit: usize,
+    ) -> Result<Vec<Node>, StoreError> {
+        sqlx::query(concat!(
+            "SELECT ",
+            node_columns!(),
+            " FROM nodes WHERE space_id = ? AND parent_id = ? ORDER BY position, id LIMIT ?"
+        ))
+        .bind(space_id.to_string())
+        .bind(parent.to_string())
+        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(node_from_row)
+        .collect()
+    }
+
     /// Tous les nœuds de l'espace, corbeille comprise, triés par `(parent_id, position)`.
     pub async fn list_nodes(&self, space_id: Uuid) -> Result<Vec<Node>, StoreError> {
         sqlx::query(concat!(

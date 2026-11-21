@@ -283,7 +283,7 @@ fn copy_title(title: &str) -> String {
 /// cas `spec/files/addresses.json`. Les routes lisent plus large (`Uuid::parse_str` : sans
 /// tirets, entre accolades, `urn:uuid:`) ; une adresse sous une de ces formes, que l'éditeur ne
 /// montre pas, n'est pas celle d'un fichier pour la copie.
-fn file_address(url: &str) -> Option<(Uuid, Uuid)> {
+pub(crate) fn file_address(url: &str) -> Option<(Uuid, Uuid)> {
     let (page, file) = url.strip_prefix("/api/v1/pages/")?.split_once("/files/")?;
     Some((hyphenated(page)?, hyphenated(file)?))
 }

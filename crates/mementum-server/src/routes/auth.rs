@@ -465,9 +465,13 @@ pub(crate) async fn me(
     user: Result<AuthUser, ApiError>,
 ) -> Response {
     let me = async {
-        me_of(&state, user?)
-            .await
-            .map(|me| Json(me).into_response())
+        let user = user?;
+        // Par un jeton d'API : le compte sans son adresse, les espaces de sa portée, le jeton
+        // (lot 5, Ruling R1247).
+        if let Some(agent) = crate::agent::info::me(&state, &user).await? {
+            return Ok(Json(agent).into_response());
+        }
+        me_of(&state, user).await.map(|me| Json(me).into_response())
     };
     no_store(me.await)
 }

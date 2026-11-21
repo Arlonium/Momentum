@@ -1494,6 +1494,7 @@ dependencies = [
  "http-body-util",
  "mementum-acl",
  "mementum-crdt",
+ "mementum-mcp",
  "mementum-md",
  "mementum-schema",
  "mementum-search",

@@ -91,11 +91,10 @@ pub(crate) async fn members(
     State(state): State<AppState>,
     user: AuthUser,
     path: Result<Path<String>, PathRejection>,
-) -> Result<Json<Vec<types::Member>>, ApiError> {
+) -> Result<axum::response::Response, ApiError> {
     let space_id = space_id(path)?;
-    state.role_at_least(&user, space_id, Role::Member).await?;
-    let members = state.store.members(space_id).await.map_err(internal)?;
-    Ok(Json(members.into_iter().map(member).collect()))
+    // Par un jeton d'API, les noms et les rôles seuls, jamais les adresses (lot 5, R1247).
+    crate::agent::info::members(&state, &user, space_id).await
 }
 
 /// `PATCH /api/v1/spaces/{id}/members/{userId}` : change le rôle d'un membre (règles en tête

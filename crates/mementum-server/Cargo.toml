@@ -28,6 +28,8 @@ http-body-util.workspace = true
 mementum-acl.workspace = true
 mementum-crdt.workspace = true
 mementum-md.workspace = true
+# Les opérations d'`update_page`, lues telles que l'outil MCP les décrit (lot 5, Task S7, R1238).
+mementum-mcp.workspace = true
 mementum-schema.workspace = true
 # La projection d'une page en lignes d'index, que l'indexeur écrit dans la base (lot 4).
 mementum-search.workspace = true

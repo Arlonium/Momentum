@@ -856,3 +856,88 @@ async fn measure_one_account_duplicating_without_pause() {
         }
     }
 }
+
+/// Task S7 du lot 5 (Rulings R1225, R1226) : la lecture d'une page de 10 000 blocs par un agent
+/// (`GET …/document`, par un jeton) : la première tranche (24 Kio), une tranche du milieu (reprise
+/// par `from`, avec `since` : ce qui a changé depuis la première, calculé sur toute la page), et
+/// la même tranche avec ses ancres. Chaque lecture lit la page par son acteur, calcule les
+/// empreintes de ses 10 000 blocs (hors de l'acteur) et les garde.
+#[tokio::test]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_document_of_a_10000_block_page() {
+    const READS: usize = 40;
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        // Le débit d'un jeton (120 appels par minute) n'est pas ce qu'on mesure.
+        cfg.token_calls_per_min = 10_000;
+        cfg.account_token_calls_per_min = 10_000;
+    })
+    .await;
+    let alice = t.account("Alice").await;
+    let page = alice.create(json!({ "title": "Longue" })).await;
+    alice
+        .put_mmd(&page.id, paragraphs(10_000))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let (token, _) = common::api_token(
+        &t.store,
+        alice.id,
+        mementum_store::TokenLevel::Read,
+        mementum_store::TokenScope::All,
+        false,
+    )
+    .await;
+    let get = |uri: String| {
+        let request = common::with_bearer(
+            axum::http::Request::get(uri)
+                .body(axum::body::Body::empty())
+                .unwrap(),
+            &token,
+        );
+        t.send(request)
+    };
+    let first = get(format!("/api/v1/pages/{}/document", page.id))
+        .await
+        .json();
+    let since = first["revision"].as_str().unwrap().to_string();
+    // Une ancre du milieu de la page : la tranche qui suit la vingtième.
+    let mut from = first["next"].as_str().unwrap().to_string();
+    for _ in 0..20 {
+        let doc = get(format!("/api/v1/pages/{}/document?from={from}", page.id))
+            .await
+            .json();
+        from = doc["next"].as_str().unwrap().to_string();
+    }
+    for (what, uri) in [
+        (
+            "première tranche",
+            format!("/api/v1/pages/{}/document", page.id),
+        ),
+        (
+            "tranche du milieu, avec since",
+            format!(
+                "/api/v1/pages/{}/document?from={from}&since={since}",
+                page.id
+            ),
+        ),
+        (
+            "tranche du milieu, avec ses ancres",
+            format!(
+                "/api/v1/pages/{}/document?from={from}&anchors=block",
+                page.id
+            ),
+        ),
+    ] {
+        let mut times = Vec::with_capacity(READS);
+        for _ in 0..READS {
+            let started = Instant::now();
+            let reply = get(uri.clone()).await;
+            times.push(started.elapsed());
+            reply.assert_status(StatusCode::OK);
+        }
+        report(
+            &format!("document d'une page de 10 000 blocs, {what}"),
+            times,
+        );
+    }
+}

@@ -21,4 +21,4 @@ pub use model::{
     normalize,
 };
 pub use parse::{EXCERPT_CHARS, MAX_DEPTH, excerpt, parse};
-pub use render::render;
+pub use render::{render, render_anchored};

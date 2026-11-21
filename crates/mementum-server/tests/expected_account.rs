@@ -457,6 +457,20 @@ async fn the_account_refusal_comes_right_after_the_401_and_writes_nothing() {
             ),
         ),
         (
+            "créer des pages en lot",
+            json_request(
+                Method::POST,
+                &format!("/api/v1/spaces/{space}/pages/batch"),
+                &json!({ "pages": [{ "title": "Neuve", "markdown": "Texte\n" }] }),
+            ),
+        ),
+        (
+            "membres de l'espace",
+            Request::get(format!("/api/v1/spaces/{space}/members"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+        (
             "créer un espace",
             json_request(Method::POST, "/api/v1/spaces", &json!({ "name": "Neuf" })),
         ),

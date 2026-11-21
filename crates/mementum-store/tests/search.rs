@@ -860,6 +860,7 @@ fn only_listed_places_write_a_title_or_a_node() {
     assert_eq!(
         places,
         [
+            "mementum-store/src/batch.rs : create_pages : création",
             "mementum-store/src/duplicate.rs : duplicate_pages : création",
             "mementum-store/src/nodes.rs : create_node : création",
             "mementum-store/src/nodes.rs : delete_node : suppression",
@@ -867,6 +868,7 @@ fn only_listed_places_write_a_title_or_a_node() {
         ]
     );
     for (function, marker) in [
+        ("mementum-store/src/batch.rs : create_pages", "mark_born("),
         (
             "mementum-store/src/duplicate.rs : duplicate_pages",
             "mark_born(",

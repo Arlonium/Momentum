@@ -179,7 +179,7 @@ use mementum_crdt::CrdtError;
 use mementum_store::StoreError;
 use yrs::{Doc, OffsetKind, Options};
 
-pub use actor::agent::{Edit, EditRefusal, Edited, OnConflict, PageRead};
+pub use actor::agent::{Edit, EditRefusal, Edited, MmdWrite, OnConflict, PageRead};
 pub use actor::stored_page;
 pub use brake::{FREE_REFUSALS, MAX_BLOCK};
 pub use hub::{ConnInfo, Hub, PageEvent};

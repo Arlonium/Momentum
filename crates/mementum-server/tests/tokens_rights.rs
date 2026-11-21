@@ -546,6 +546,22 @@ async fn a_read_token_writes_nothing() {
             "/api/v1/pages",
             &json!({ "parentId": page, "title": "Sous-page" }),
         ),
+        // Les routes des agents qui écrivent (Task S7).
+        json_request(
+            Method::POST,
+            &format!("{}/operations", page_uri(page)),
+            &json!({ "operations": [{ "op": "insert", "position": "end", "markdown": "Plus\n" }] }),
+        ),
+        json_request(
+            Method::POST,
+            &format!("/api/v1/spaces/{}/pages/batch", team.space),
+            &json!({ "pages": [{ "title": "Neuve", "markdown": "Texte\n" }] }),
+        ),
+        json_request(
+            Method::POST,
+            &format!("/api/v1/spaces/{}/pages/batch", team.space),
+            &json!({ "parentId": page, "pages": [{ "title": "Sous-page" }] }),
+        ),
     ];
     for request in writes {
         let reply = t.send(with_bearer(request, &token)).await;

@@ -602,6 +602,7 @@ pub(crate) mod tests {
             duplications: Arc::default(),
             searches: crate::Searches::default(),
             calls: Arc::default(),
+            revisions: Arc::default(),
         }
     }
 

@@ -63,6 +63,7 @@
 mod access_inputs;
 mod acl;
 mod backup;
+mod batch;
 mod calls;
 mod comments;
 mod docs;
@@ -95,6 +96,7 @@ use uuid::Uuid;
 pub use access_inputs::AccessInputs;
 pub use acl::{AccessChange, AccessWritten, ShareRefusal};
 pub use backup::{Backup, MigrationMismatch, MigrationRefusal, ResumeCopy, backup_path};
+pub use batch::{NewPageDoc, NewPages};
 pub use calls::{Busy, Call, CallOutcome, CallRow, CallSurface, MAX_KEPT_CALLS, MAX_KEPT_REFUSALS};
 pub use comments::{
     Author, Authorship, Comment, CommentLimit, MAX_MESSAGES_PER_ACCOUNT, MAX_MESSAGES_PER_PAGE,
@@ -169,6 +171,10 @@ pub enum StoreError {
     /// transaction qui créerait le jeton : rien n'est écrit. Comme [`StoreError::Stale`], il n'a
     /// pas de traduction générique : la route des jetons le dit elle-même (`409 token_limit`).
     TokenLimit,
+    /// Le jeton d'API par lequel l'écriture se fait n'est plus vivant (révoqué, échu, ou son compte
+    /// parti), vu dans la transaction qui écrirait (lot 5, Task S7, Ruling R1356) : rien n'est
+    /// écrit. Traduit en `401 invalid_token`, la réponse de tout appel par un jeton mort.
+    TokenRevoked,
     /// À l'ouverture : la base porte une migration que ce binaire ne peut pas suivre (inconnue,
     /// d'une autre version, ou notée inachevée), refusée avant toute copie, toute migration et
     /// toute connexion qui écrit (Rulings R840, R845, R846). Rien n'a été écrit. Son affichage est
@@ -202,6 +208,7 @@ impl fmt::Display for StoreError {
                 f,
                 "un compte garde au plus {MAX_LIVE_TOKENS} jetons d'API vivants"
             ),
+            StoreError::TokenRevoked => write!(f, "le jeton d'API de l'écriture n'est plus vivant"),
             StoreError::Migration(refusal) => write!(f, "{refusal}"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),
         }

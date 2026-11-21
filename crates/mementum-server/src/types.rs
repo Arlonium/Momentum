@@ -113,6 +113,20 @@ pub struct SearchRequest {
     #[serde(default)]
     #[ts(optional)]
     pub after: Option<u32>,
+    /// Seulement les pages créées par ce compte (son identifiant) : lot 5, Ruling R1248 ; un
+    /// filtre réduit l'ensemble des pages que le compte voit, jamais ne l'élargit.
+    #[serde(default)]
+    #[ts(optional)]
+    pub created_by: Option<String>,
+    /// Seulement les pages dont le contenu date d'au moins cet instant (millisecondes Unix) ; une
+    /// page pas encore indexée depuis sa création n'a pas de date, et ne passe pas.
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub edited_after: Option<i64>,
+    /// Seulement les pages dont le contenu date d'avant cet instant (millisecondes Unix).
+    #[serde(default)]
+    #[ts(optional, type = "number")]
+    pub edited_before: Option<i64>,
 }
 
 /// Les pages trouvées dans un espace (`POST /api/v1/spaces/{id}/search`) : seulement celles que
@@ -1199,6 +1213,171 @@ pub enum ErrorCode {
     InvalidLevel,
     /// L'échéance d'un jeton à créer n'est pas un nombre de jours de 1 à 3 650. Statut 422.
     InvalidExpiry,
+    /// Le mode d'écriture demandé (`suggest`, `branch`) n'est pas encore servi : seul `direct`
+    /// l'est (lot 5, Ruling R1211). Rien n'est écrit. Statut 422.
+    ModeUnavailable,
+    /// L'opération remplace ou retire des blocs (`replace_page`, `replace_block`,
+    /// `delete_block`) : elle demande la révision de la dernière lecture (Ruling R1231). Rien
+    /// n'est écrit. Statut 422.
+    RevisionRequired,
+    /// Plus de cent opérations, ou aucune, dans un appel. Statut 422.
+    TooManyOperations,
+    /// Une opération ne s'applique pas (`index` : son rang ; `reason` : `no_match`,
+    /// `stale_anchor`, `invalid_markdown`…) ; rien n'est écrit (Ruling R1229). Statut 422.
+    OperationFailed,
+    /// Une écriture par jeton d'API poserait une image, une vidéo ou un son à adresse web
+    /// (Ruling R1235). Rien n'est écrit. Statut 422.
+    ExternalMedia,
+    /// La page n'est plus à la révision nommée, et les blocs en cause ont changé (Ruling R1231) :
+    /// `revision` porte la révision courante. Rien n'est écrit. Statut 409.
+    RevisionConflict,
+    /// Quelqu'un écrit dans la page en ce moment : `replace_page` par un jeton est refusé
+    /// (Ruling R1233). Rien n'est écrit. Statut 409.
+    PageInUse,
+    /// La version qui garde ce qu'une opération d'agent remplace n'a pas pu être écrite (Ruling
+    /// R1234). Rien n'est écrit. Statut 409.
+    VersionRefused,
+    /// Un lot de pages à créer en porte plus de vingt, ou aucune. Statut 422.
+    TooManyPages,
+    /// Un filtre de recherche ne se lit pas (lot 5, Ruling R1248). Statut 422.
+    InvalidFilter,
+    /// Une ancre (un alias de bloc, ou un identifiant) ne désigne aucun bloc de la page, ou en
+    /// désigne plusieurs : relire la page avec ses ancres. Statut 422.
+    StaleAnchor,
+}
+
+// ================================================================== agents (lot 5, Task S7)
+//
+// Ce que lisent et envoient les agents, par jeton d'API ou par session : aucun écran ne s'en
+// sert, si bien que ces types n'ont pas de binding TypeScript.
+
+/// Une page lue par un agent (`GET /api/v1/pages/{id}/document`, Rulings R1223, R1225, R1226) :
+/// ses métadonnées, sa révision, et une tranche de son MMD, 48 Kio au plus.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageDocument {
+    pub id: String,
+    pub space_id: String,
+    pub title: String,
+    /// La page parente, si le compte (restreint au jeton) la voit.
+    pub parent_id: Option<String>,
+    /// Les pages au-dessus, que le compte voit, du plus haut au plus proche (le fil d'Ariane de
+    /// la recherche).
+    pub path: Vec<SearchAncestor>,
+    /// Le niveau de l'appel sur la page (celui du compte, ramené sous celui du jeton).
+    pub level: Level,
+    /// Millisecondes Unix : la date du contenu (`page_edits`, Ruling R1246) ; `null` tant que
+    /// l'indexeur n'a pas lu la page depuis sa création.
+    pub edited_at: Option<i64>,
+    /// La révision des blocs rendus, sortie de la même commande que leur lecture (Ruling R1226) :
+    /// celle à donner à une écriture, pour la **dernière** tranche lue.
+    pub revision: String,
+    /// Le MMD de la tranche, `limit` octets au plus.
+    pub mmd: String,
+    /// D'autres blocs suivent : les lire par `from=<next>&since=<révision de la première
+    /// tranche>`.
+    pub truncated: bool,
+    /// L'alias du premier bloc non rendu.
+    pub next: Option<String>,
+    /// Les sous-pages, que le compte voit, hors corbeille, dans l'ordre : deux cents au plus.
+    pub children: Vec<SearchAncestor>,
+    /// Avec `since` : quelque chose a changé, depuis cette révision, dans les blocs déjà servis.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed_since: Option<bool>,
+    /// Avec `since` : les alias des blocs déjà servis qui ont changé, sont partis, ou après
+    /// lesquels un bloc est arrivé ; `null` quand le serveur n'a plus les empreintes de `since`
+    /// (relire depuis le début).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub changed: Option<Option<Vec<String>>>,
+}
+
+/// Corps de `POST /api/v1/pages/{id}/operations` (Rulings R1211, R1228 à R1235) : les opérations
+/// sont celles de l'outil `update_page`, sous la même forme (`mementum_mcp::tools::Operation`).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PageOperations {
+    /// La révision de la dernière lecture ; exigée par `replace_page`, `replace_block` et
+    /// `delete_block`.
+    #[serde(default)]
+    pub base_revision: Option<String>,
+    /// `rebase` (par défaut) ou `fail`.
+    #[serde(default)]
+    pub on_conflict: Option<mementum_mcp::tools::OnConflict>,
+    /// `direct` (par défaut, et le seul servi).
+    #[serde(default)]
+    pub mode: Option<mementum_mcp::tools::Mode>,
+    pub operations: Vec<mementum_mcp::tools::Operation>,
+}
+
+/// Réponse de `POST /api/v1/pages/{id}/operations`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateResult {
+    /// La révision de l'état écrit, sortie de la commande qui écrit (RESULTS, leçon 8).
+    pub revision: String,
+    /// Le MMD des blocs touchés, avec leurs ancres, 48 Kio au plus.
+    pub mmd: String,
+    pub truncated: bool,
+    /// Les blocs dont un élément a changé.
+    pub blocks_touched: usize,
+    /// Toujours vide au lot 5 : un appel est atomique, une opération qui ne passe pas est un
+    /// refus (Ruling R1229).
+    pub warnings: Vec<String>,
+}
+
+/// Corps de `POST /api/v1/spaces/{id}/pages/batch` (Ruling R1243) : des pages créées ensemble,
+/// avec leur contenu, toutes ou aucune.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreatePages {
+    /// La page sous laquelle les créer ; absent : à la racine de l'espace.
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// À la racine seulement : `private` (par défaut) ou `space`.
+    #[serde(default)]
+    pub section: Option<RootSection>,
+    /// Vingt au plus.
+    pub pages: Vec<NewPageBody>,
+}
+
+/// Une page d'un lot ([`CreatePages`]).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NewPageBody {
+    /// Absent ou blanc : « Sans titre » ; 500 caractères au plus.
+    #[serde(default)]
+    pub title: Option<String>,
+    /// Le contenu, en MMD canonique ; absent : une page vide.
+    #[serde(default)]
+    pub markdown: Option<String>,
+}
+
+/// `GET /api/v1/me` par un jeton d'API (Ruling R1247) : le compte **sans son adresse**, les
+/// espaces de la portée du jeton, et le jeton.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentMe {
+    pub user: AgentUser,
+    pub spaces: Vec<SpaceInfo>,
+    pub token: TokenInfo,
+}
+
+/// Le compte d'un jeton, tel qu'un agent le lit : jamais son adresse e-mail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentUser {
+    pub id: String,
+    pub name: String,
+}
+
+/// Un membre d'un espace, tel qu'un agent le lit (`GET …/members` par un jeton, Ruling R1247) :
+/// son nom et son rôle, jamais son adresse.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemberName {
+    pub user_id: String,
+    pub name: String,
+    pub role: Role,
 }
 
 /// Corps de toute réponse d'erreur.

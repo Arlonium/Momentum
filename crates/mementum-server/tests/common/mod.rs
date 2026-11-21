@@ -914,6 +914,8 @@ pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
         ),
     ]
     .into_iter()
+    // Les routes des agents sur la page (`routes/agent.rs`, lot 5, Task S7).
+    .chain(agent_routes(id))
     // Les commentaires de la page (`routes/comments.rs`), sur un fil et un message quelconques.
     .chain(comment_routes(id, SOME_THREAD, SOME_MESSAGE))
     // L'historique de la page (`routes/versions.rs`), sur une version quelconque.
@@ -923,6 +925,41 @@ pub fn page_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
     // Les fichiers de la page (`routes/files.rs`), sur un fichier quelconque.
     .chain(file_routes(id, SOME_FILE))
     .collect()
+}
+
+/// Une requête sur chaque route d'agent de la page `id` (lot 5, Task S7), corps valides et corps
+/// illisibles : `(nom, requête)`.
+pub fn agent_routes(id: &str) -> Vec<(&'static str, Request<Body>)> {
+    let page = format!("/api/v1/pages/{id}");
+    vec![
+        (
+            "GET document",
+            Request::get(format!("{page}/document"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+        (
+            "GET document d'une adresse illisible",
+            Request::get(format!("{page}/document?limit=1"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+        (
+            "POST opérations",
+            json_request(
+                Method::POST,
+                &format!("{page}/operations"),
+                &json!({ "operations": [{ "op": "str_replace", "old": "Texte", "new": "Autre" }] }),
+            ),
+        ),
+        (
+            "POST opérations illisibles",
+            Request::post(format!("{page}/operations"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from("{"))
+                .unwrap(),
+        ),
+    ]
 }
 
 /// Une requête sur chaque route du favori de la page `id`, sans corps : `(nom, requête)`.

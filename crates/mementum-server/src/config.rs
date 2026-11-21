@@ -147,6 +147,11 @@ pub struct Config {
     /// variable ni option : seuls les tests l'abaissent, pour ne pas bâtir des dizaines de
     /// mégaoctets de pages.
     pub max_duplicated_bytes: usize,
+    /// Octets d'empreintes de blocs gardés pour les révisions servies aux agents (lot 5, Ruling
+    /// R1226) : [`MAX_KEPT_BYTES`](crate::agent::revisions::MAX_KEPT_BYTES) par défaut, 16 Mio. Ni
+    /// variable ni option : seuls les tests l'abaissent (0 : rien n'est gardé, une révision
+    /// lue est aussitôt « sortie du cache »).
+    pub kept_revision_bytes: usize,
     /// Le calme attendu sur une page, après sa dernière écriture, avant de l'indexer (Ruling
     /// R906) : [`INDEX_AFTER`](crate::INDEX_AFTER) par défaut, deux secondes.
     pub index_after: Duration,
@@ -173,6 +178,7 @@ impl Default for Config {
             upload_idle: UPLOAD_IDLE,
             store: StoreOptions::default(),
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
+            kept_revision_bytes: crate::agent::revisions::MAX_KEPT_BYTES,
             index_after: crate::INDEX_AFTER,
             index_at_most: crate::INDEX_AT_MOST,
             token_calls_per_min: crate::agent::calls::TOKEN_CALLS_PER_MIN,
@@ -291,6 +297,7 @@ impl Config {
             upload_idle: UPLOAD_IDLE,
             store: StoreOptions::default(),
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
+            kept_revision_bytes: crate::agent::revisions::MAX_KEPT_BYTES,
             index_after,
             index_at_most: crate::INDEX_AT_MOST,
             token_calls_per_min,

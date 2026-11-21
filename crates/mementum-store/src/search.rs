@@ -1155,6 +1155,37 @@ impl Store {
         Ok(pages.into_iter().max())
     }
 
+    /// Les pages de l'espace qui passent les filtres d'une recherche (lot 5, Task S7, Ruling
+    /// R1248) : créées par `created_by`, dont le contenu date d'au moins `edited_after` et d'avant
+    /// `edited_before` (millisecondes Unix, `page_edits`) ; un filtre absent ne retient rien. Une
+    /// page sans date (pas encore indexée depuis sa création) ne passe aucun filtre de date. Ne
+    /// dit rien des droits : la route croise ce qu'elle rend avec les pages que le compte voit,
+    /// sans jamais l'élargir. Lue sans tour, par l'index des nœuds de l'espace.
+    pub async fn pages_matching(
+        &self,
+        space_id: Uuid,
+        created_by: Option<Uuid>,
+        edited_after: Option<i64>,
+        edited_before: Option<i64>,
+    ) -> Result<Vec<Uuid>, StoreError> {
+        sqlx::query(
+            "SELECT n.id FROM nodes n LEFT JOIN page_edits e ON e.node_id = n.id \
+             WHERE n.space_id = ?1 AND n.kind = 'page' \
+               AND (?2 IS NULL OR n.created_by = ?2) \
+               AND (?3 IS NULL OR e.edited_at >= ?3) \
+               AND (?4 IS NULL OR e.edited_at < ?4)",
+        )
+        .bind(space_id.to_string())
+        .bind(created_by.map(|u| u.to_string()))
+        .bind(edited_after)
+        .bind(edited_before)
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| parse_uuid(&r.get::<String, _>(0)))
+        .collect()
+    }
+
     /// La date du contenu de ces pages (Ruling R1246), rangée par identifiant ; une page sans
     /// date (pas encore indexée depuis sa création, un dossier, une page inconnue) n'y est pas.
     /// Lue sans tour.

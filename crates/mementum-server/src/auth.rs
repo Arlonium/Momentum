@@ -330,10 +330,15 @@ pub const TOKEN_PREFIX: &str = "mmt_";
 /// Les routes qu'un jeton d'API ouvre, par méthode et chemin déclaré (lot 5, Ruling R1222) ;
 /// toute autre route le refuse (`403 token_not_allowed`), avant que rien ne soit lu ou écrit.
 /// Une route neuve entre dans cette liste ou dans [`SESSION_ONLY_ROUTES`] : un test lit le
-/// routeur (`only_listed_routes_accept_a_token`). `GET /api/v1/me` et `GET …/members`
-/// s'ouvriront avec leur réponse sans adresse e-mail (Ruling R1247, Task S7) ; les routes des
-/// agents (`…/document`, `…/operations`, `…/pages/batch`) et `/mcp` avec leurs tâches.
+/// routeur (`only_listed_routes_accept_a_token`). `GET /api/v1/me` et `GET …/members` y sont
+/// avec leur réponse sans adresse e-mail (Ruling R1247), comme les routes des agents
+/// (`…/document`, `…/operations`, `…/pages/batch`, Task S7) ; `/mcp` y entrera avec sa tâche (M2).
 pub const TOKEN_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/v1/me"),
+    ("GET", "/api/v1/spaces/{id}/members"),
+    ("POST", "/api/v1/spaces/{id}/pages/batch"),
+    ("GET", "/api/v1/pages/{id}/document"),
+    ("POST", "/api/v1/pages/{id}/operations"),
     ("GET", "/api/v1/spaces/{id}/tree"),
     ("POST", "/api/v1/spaces/{id}/search"),
     ("POST", "/api/v1/pages"),
@@ -358,10 +363,8 @@ pub const SESSION_ONLY_ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/v1/auth/login"),
     ("POST", "/api/v1/auth/logout"),
     ("POST", "/api/v1/auth/password"),
-    ("GET", "/api/v1/me"),
     ("POST", "/api/v1/spaces"),
     ("PATCH", "/api/v1/spaces/{id}"),
-    ("GET", "/api/v1/spaces/{id}/members"),
     ("PATCH", "/api/v1/spaces/{id}/members/{user_id}"),
     ("DELETE", "/api/v1/spaces/{id}/members/{user_id}"),
     ("GET", "/api/v1/spaces/{id}/invitations"),

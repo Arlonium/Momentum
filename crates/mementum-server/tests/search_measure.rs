@@ -167,6 +167,8 @@ async fn measure_search_on_10000_pages() {
         )
         .await;
     let (space, other_space) = (team.space, team.zoe.space);
+    // L'auteur d'une page sur deux, pour le filtre « auteur » (lot 5, Task S7, Ruling R1248).
+    let author = team.olga.id;
     t.indexer.settled().await;
     team.store.close().await;
     drop(team);
@@ -184,6 +186,11 @@ async fn measure_search_on_10000_pages() {
             parent.to_string(),
             format!("Page {}", letters(i)),
             id.to_string(),
+            if i % 2 == 0 {
+                author.to_string()
+            } else {
+                String::new()
+            },
         ]);
         states.push(vec![id.to_string()]);
         for j in 0..blocks {
@@ -203,10 +210,10 @@ async fn measure_search_on_10000_pages() {
         .unwrap();
     let mut tx = side.begin().await.unwrap();
     for chunk in nodes.chunks(200) {
-        let rows = vec!["(?, ?, ?, 'page', ?, ?, 0, 0)"; chunk.len()].join(", ");
+        let rows = vec!["(?, ?, ?, 'page', ?, ?, NULLIF(?, ''), 0, 0)"; chunk.len()].join(", ");
         let sql = format!(
-            "INSERT INTO nodes (id, space_id, parent_id, kind, title, position, created_at, \
-             updated_at) VALUES {rows}"
+            "INSERT INTO nodes (id, space_id, parent_id, kind, title, position, created_by, \
+             created_at, updated_at) VALUES {rows}"
         );
         let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
         for value in chunk.iter().flatten() {
@@ -221,6 +228,18 @@ async fn measure_search_on_10000_pages() {
         let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
         for value in chunk.iter().flatten() {
             query = query.bind(value.clone());
+        }
+        query.execute(&mut *tx).await.unwrap();
+    }
+    // La date du contenu de chaque page (`page_edits`, R1246) : la page i est datée de i.
+    for (i, chunk) in states.chunks(200).enumerate() {
+        let rows = vec!["(?, ?, NULL, 0)"; chunk.len()].join(", ");
+        let sql = format!(
+            "INSERT INTO page_edits (node_id, edited_at, edited_by, edited_seq) VALUES {rows}"
+        );
+        let mut query = sqlx::query(sqlx::AssertSqlSafe(sql));
+        for (j, value) in chunk.iter().flatten().enumerate() {
+            query = query.bind(value.clone()).bind((i * 200 + j) as i64);
         }
         query.execute(&mut *tx).await.unwrap();
     }
@@ -375,6 +394,52 @@ async fn measure_search_on_10000_pages() {
              pire {worst:.1} ms"
         ));
     }
+
+    // Les filtres de la recherche (lot 5, Task S7, Ruling R1248) : ils réduisent l'ensemble des
+    // pages permises, d'après `nodes` et `page_edits`, avant l'index. Par la route, plancher
+    // compris : à 100 000 pages (`MEMENTUM_MEASURE_PAGES=100000`), la mesure que demande le plan
+    // (`measure_search_filter_on_100000_pages`).
+    let half = (pages / 2) as i64;
+    for (name, body) in [
+        (
+            "filtre auteur",
+            json!({ "q": "commun", "createdBy": author.to_string() }),
+        ),
+        ("filtre date", json!({ "q": "commun", "editedAfter": half })),
+        (
+            "filtre auteur et date",
+            json!({ "q": "commun", "createdBy": author.to_string(), "editedBefore": half }),
+        ),
+    ] {
+        let mut times = Vec::with_capacity(ROUNDS);
+        for _ in 0..ROUNDS {
+            let started = Instant::now();
+            let reply = mona.post(&uri, body.clone()).await;
+            times.push(started.elapsed());
+            reply.assert_status(StatusCode::OK);
+            assert!(
+                !reply.json()["results"].as_array().unwrap().is_empty(),
+                "{name}"
+            );
+        }
+        let (p50, p95, worst) = percentiles(times);
+        said.push(format!(
+            "la route, membre, {name}, plancher compris : p50 {p50:.1} ms, p95 {p95:.1} ms, la \
+             pire {worst:.1} ms"
+        ));
+    }
+    let filter = Instant::now();
+    let passing = t
+        .store
+        .pages_matching(space, Some(author), Some(half), None)
+        .await
+        .unwrap()
+        .len();
+    said.push(format!(
+        "la lecture des pages qui passent les filtres auteur et date, seule : {:.1} ms, {passing} \
+         pages",
+        filter.elapsed().as_secs_f64() * 1000.0
+    ));
 
     // Pendant que tout l'index est récrit : chaque page repasse par l'outbox, l'indexeur enchaîne
     // les passages (R1029), le moteur valide et fusionne. La recherche lit l'index entier pendant

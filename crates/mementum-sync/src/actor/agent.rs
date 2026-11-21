@@ -30,7 +30,7 @@ use mementum_crdt::anchors::{BlockHashes, hashes};
 use mementum_crdt::ops::{self, Base, OpRefusal, Operation, Plan, PlanContext};
 use mementum_crdt::{PageDoc, WriteCost, diff_cost};
 use mementum_md::Block;
-use mementum_store::{Store, VersionReason, Writer};
+use mementum_store::{Store, StoreError, VersionReason, Writer};
 use tokio::sync::{RwLock, oneshot};
 use tracing::instrument::WithSubscriber;
 use uuid::Uuid;
@@ -102,6 +102,18 @@ pub struct Edited {
     pub hashes: Arc<BlockHashes>,
     /// La version `before_agent` coupée avant l'écriture, s'il y en a eu une (la dernière).
     pub version: Option<Uuid>,
+}
+
+/// Ce que rend une écriture complète de la page par le serveur ([`crate::Hub::write_blocks_at`],
+/// `PUT /mmd`, lot 5, Task S7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MmdWrite {
+    /// Écrite, ou rien à écrire : la révision de la page après elle, sortie de la commande qui
+    /// écrit (l'`ETag` de la réponse).
+    Written { revision: String },
+    /// La page n'est plus à la révision que l'auteur a nommée : rien n'est écrit ; voici la
+    /// révision courante.
+    Mismatch { revision: String },
 }
 
 /// Pourquoi une écriture d'agent n'a rien écrit.
@@ -462,7 +474,15 @@ impl Actor {
             }
         };
         if let Err(error) = self.persist(&[&written.update], writer).await {
-            self.store_failed(&error).await?;
+            if matches!(error, StoreError::TokenRevoked) {
+                // Lot 5, Task S7 (Ruling R1356) : le jeton a été révoqué pendant que l'écriture
+                // attendait son tour ; rien n'est au journal, et rien n'a été diffusé. Le
+                // document vivant porte l'écriture : il est relu du journal, sans fermer les
+                // connexions, qui n'ont rien reçu d'elle.
+                self.reload().await?;
+            } else {
+                self.store_failed(&error).await?;
+            }
             return Ok(Err(EditRefusal::Failed(error.into())));
         }
         self.wrote(changes, writer);

@@ -55,15 +55,16 @@ use std::time::Duration;
 
 use axum::Json;
 use axum::body::Bytes;
-use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection};
-use axum::extract::{Path, State};
-use axum::http::{StatusCode, header};
+use axum::extract::rejection::{BytesRejection, JsonRejection, PathRejection, QueryRejection};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use mementum_acl::{Action, Grant, Level, NodeAccess, Role, SpaceAccess, Subject};
 use mementum_crdt::{Cause, ListKind, PageDoc, WriteCost, write_cost};
 use mementum_md::{Block, Content, Props, RenderOpts, parse, render};
 use mementum_schema::PropSpec;
 use mementum_store::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, StoreError};
+use mementum_sync::MmdWrite;
 use uuid::Uuid;
 
 use crate::access::{at_least, permit, permit_root_page};
@@ -580,26 +581,105 @@ pub(crate) async fn delete(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `GET /api/v1/pages/{id}/mmd` : le MMD canonique de la page, sans ancres. Une page à la
-/// corbeille se lit encore.
+/// L'adresse de `GET …/mmd`.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct MmdQuery {
+    /// `block` : chaque bloc porte son alias en ancre (lot 5, Ruling R1224).
+    anchors: Option<String>,
+}
+
+/// `GET /api/v1/pages/{id}/mmd` : le MMD canonique de la page, sans ancres (avec
+/// `?anchors=block`, chaque bloc porte son alias, celui qu'un agent donne à ses opérations). Une
+/// page à la corbeille se lit encore. L'en-tête `ETag` porte la révision des blocs rendus, lue
+/// dans la même commande de l'acteur qu'eux (lot 5, Ruling R1223), et ses empreintes sont gardées
+/// pour une écriture qui la nommerait (`agent/revisions.rs`).
 pub(crate) async fn get_mmd(
     State(state): State<AppState>,
     user: AuthUser,
     path: Result<Path<String>, PathRejection>,
+    query: Result<Query<MmdQuery>, QueryRejection>,
 ) -> Result<Response, ApiError> {
     let id = page_id(path)?;
     state.node_access(&user, id, Action::Read).await?;
-    let blocks = state.hub.read_blocks(id).await?;
-    let mmd = render(&blocks, RenderOpts::default()).markdown;
-    Ok(([(header::CONTENT_TYPE, MARKDOWN)], mmd).into_response())
+    let anchors = match query.map(|Query(query)| query.anchors) {
+        Ok(None) => false,
+        Ok(Some(value)) if value == "block" => true,
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                ErrorCode::InvalidRequest,
+                "« anchors » ne vaut que « block »",
+            ));
+        }
+    };
+    let read = state.hub.read_page(id).await?;
+    state
+        .revisions
+        .served(id, &read.revision, read.hashes.clone());
+    let mmd = if anchors {
+        crate::agent::fetch::anchored(&read.blocks)
+    } else {
+        render(&read.blocks, RenderOpts::default()).markdown
+    };
+    Ok((
+        [
+            (header::CONTENT_TYPE, MARKDOWN.to_string()),
+            (header::ETAG, etag(&read.revision)),
+        ],
+        mmd,
+    )
+        .into_response())
+}
+
+/// L'`ETag` d'une révision : la révision entre guillemets.
+fn etag(revision: &str) -> String {
+    format!("\"{revision}\"")
+}
+
+/// La révision que nomme l'en-tête `If-Match` (lot 5, Task S7) : `None` sans en-tête, ou pour
+/// `*` ; `400 invalid_request` pour plusieurs valeurs, ou une qui ne se lit pas.
+fn if_match(headers: &HeaderMap) -> Result<Option<String>, ApiError> {
+    let unreadable = || {
+        ApiError::new(
+            StatusCode::BAD_REQUEST,
+            ErrorCode::InvalidRequest,
+            "« If-Match » : une seule révision, entre guillemets, telle que l'en-tête « ETag » de \
+             la lecture la donne",
+        )
+    };
+    let mut values = headers.get_all(header::IF_MATCH).iter();
+    let Some(value) = values.next() else {
+        return Ok(None);
+    };
+    if values.next().is_some() {
+        return Err(unreadable());
+    }
+    let text = value.to_str().map_err(|_| unreadable())?.trim();
+    if text == "*" {
+        return Ok(None);
+    }
+    let bare = text
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .unwrap_or(text);
+    if bare.is_empty() || bare.len() > 128 || bare.contains([',', '"']) {
+        return Err(unreadable());
+    }
+    Ok(Some(bare.to_string()))
 }
 
 /// `PUT /api/v1/pages/{id}/mmd` : remplace le contenu de la page, au nom du compte de la
 /// session. L'écriture est persistée, puis diffusée aux connexions ouvertes. Une prop hors
 /// registre est refusée (`422 invalid_blocks`, Ruling R41). Le MMD de `GET /mmd` ne porte pas
 /// d'ancres : un bloc écrit sans identifiant reçoit celui du bloc courant qui lui correspond
-/// (`PageDoc::rewrite_blocks`, Ruling R201), et une page récrite telle quelle garde ses
-/// identifiants, donc ses fils de commentaires attachés à leurs blocs.
+/// (`keep_ids`, Ruling R201), et une page récrite telle quelle garde ses identifiants, donc ses
+/// fils de commentaires attachés à leurs blocs. Depuis le lot 5 (Task S4, R1227), l'écriture se
+/// fait par différence (`PageDoc::write_diff`) : seuls les blocs qui diffèrent sont écrits.
+///
+/// **`If-Match`** (lot 5, Task S7) : la révision que l'auteur a lue (l'`ETag` de `GET /mmd`) ; si
+/// la page n'y est plus, `409 revision_conflict`, avec la révision courante, et rien n'est écrit.
+/// Elle est jugée dans la commande de l'acteur qui écrit, verrou de la page tenu, jamais avant.
+/// La réponse porte l'`ETag` de l'état écrit.
 ///
 /// Les droits sont contrôlés deux fois (Ruling R89) : avant la lecture du corps, pour que les
 /// refus viennent d'abord ; puis une fois la page chargée, juste avant d'écrire. Charger une
@@ -613,12 +693,14 @@ pub(crate) async fn put_mmd(
     State(state): State<AppState>,
     caller: SessionUser,
     path: Result<Path<String>, PathRejection>,
+    headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
-) -> Result<StatusCode, ApiError> {
+) -> Result<Response, ApiError> {
     let SessionUser { user, session } = caller;
     let id = page_id(path)?;
     // Premier contrôle : les refus, avant que le corps soit lu.
     state.node_access(&user, id, Action::Edit).await?;
+    let expected = if_match(&headers)?;
     let body = body?;
     // Ruling R383 : la lecture et l'estimation, hors des fils du serveur, à leur tour, les
     // comptes tour à tour (Ruling R436).
@@ -637,7 +719,7 @@ pub(crate) async fn put_mmd(
     // version. Le verrou se prend une fois le corps lu, et ce qui suit va au bout, verrou
     // tenu, même si le client coupe.
     let write = place.lock().await;
-    to_completion(async move {
+    let written = to_completion(async move {
         let _write = write;
         // La page chargée, les droits sont relus : c'est ce second contrôle qui autorise
         // l'écriture.
@@ -646,17 +728,27 @@ pub(crate) async fn put_mmd(
         // changement de mot de passe arrête la file, comme un droit retiré.
         state.session_still_live(session).await?;
         state.node_access(&user, id, Action::Edit).await?;
-        Ok(state.hub.write_blocks(id, blocks, Some(user.id)).await?)
+        // Lot 5, Task S7 : `If-Match` se juge dans la commande qui écrit, verrou de la page tenu,
+        // jamais avant (une écriture passée entre les deux serait écrasée sans conflit).
+        Ok(state
+            .hub
+            .write_blocks_at(id, blocks, Some(user.id), expected)
+            .await?)
     })
     .await?;
-    Ok(StatusCode::NO_CONTENT)
+    match written {
+        MmdWrite::Written { revision } => {
+            Ok((StatusCode::NO_CONTENT, [(header::ETAG, etag(&revision))]).into_response())
+        }
+        MmdWrite::Mismatch { revision } => Err(ApiError::revision_conflict(&revision)),
+    }
 }
 
 /// Le corps d'un `PUT /mmd`, lu et vérifié : UTF-8, MMD canonique, props du registre (Ruling
 /// R41), puis les deux bornes de l'écriture (Rulings R259 et R368), avant le verrou et avant de
 /// charger la page. Un calcul qui ne touche ni à la base ni à la page : il tourne sur le fil
 /// bloquant (Ruling R383).
-fn read_mmd(body: &[u8]) -> Result<Vec<Block>, ApiError> {
+pub(crate) fn read_mmd(body: &[u8]) -> Result<Vec<Block>, ApiError> {
     let text = std::str::from_utf8(body).map_err(|e| {
         let line = body[..e.valid_up_to()]
             .iter()
@@ -679,7 +771,7 @@ fn read_mmd(body: &[u8]) -> Result<Vec<Block>, ApiError> {
 /// Ruling R259 : au plus [`MAX_MMD_BLOCKS`] blocs, à tous les niveaux, lignes de tableau
 /// comprises (les lignes d'un tableau sont des frères d'une même liste, et coûtent comme des
 /// blocs) ; sinon `422 too_many_blocks`.
-fn at_most_blocks(blocks: &[Block]) -> Result<(), ApiError> {
+pub(crate) fn at_most_blocks(blocks: &[Block]) -> Result<(), ApiError> {
     let mut count = 0usize;
     let mut stack: Vec<&Block> = blocks.iter().collect();
     while let Some(block) = stack.pop() {
@@ -706,7 +798,7 @@ fn at_most_blocks(blocks: &[Block]) -> Result<(), ApiError> {
 
 /// Ruling R368 : un MMD dont l'écriture est estimée au-delà de [`MMD_WRITE_BUDGET`] est refusé
 /// par `422 too_long_to_write`, avec ce qui pèse le plus dans l'estimation.
-fn within_write_budget(blocks: &[Block]) -> Result<(), ApiError> {
+pub(crate) fn within_write_budget(blocks: &[Block]) -> Result<(), ApiError> {
     let cost = write_cost(blocks);
     if u128::from(cost.nanos) <= MMD_WRITE_BUDGET.as_nanos() {
         return Ok(());
@@ -719,7 +811,7 @@ fn within_write_budget(blocks: &[Block]) -> Result<(), ApiError> {
 }
 
 /// Le message de `422 too_long_to_write` : l'estimation, ce qui y pèse le plus, et quoi faire.
-fn too_long_to_write(cost: &WriteCost) -> String {
+pub(crate) fn too_long_to_write(cost: &WriteCost) -> String {
     let cause = match cost.cause {
         Cause::Lists {
             kind: ListKind::Siblings,
@@ -793,7 +885,7 @@ fn french_number(n: usize) -> String {
 ///
 /// Les blocs sont parcourus dans l'ordre du document : l'erreur nomme la
 /// première prop refusée. Pas de numéro de ligne, que l'arbre lu ne garde pas.
-fn registered_props_only(blocks: &[Block]) -> Result<(), ApiError> {
+pub(crate) fn registered_props_only(blocks: &[Block]) -> Result<(), ApiError> {
     let mut stack = vec![blocks.iter()];
     while let Some(level) = stack.last_mut() {
         let Some(block) = level.next() else {
@@ -865,7 +957,7 @@ fn unregistered_prop(name: &str, place: String, target: &str, known: &[PropSpec]
 /// BlockNote, affiché et conservé, `originalType` et `data` gardés. Au lot 1,
 /// un élément étranger ne vient que du MMD : un client d'un schéma plus récent
 /// est en lecture seule.
-fn unknown_not_foreign(blocks: &mut [Block]) {
+pub(crate) fn unknown_not_foreign(blocks: &mut [Block]) {
     let mut stack = vec![blocks];
     while let Some(level) = stack.pop() {
         for block in level.iter_mut() {

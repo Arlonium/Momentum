@@ -47,6 +47,18 @@ pub fn render(blocks: &[Block], opts: RenderOpts) -> Rendered {
     }
 }
 
+/// Écrit la forme canonique de `blocks` (normalisés au passage), chaque bloc qui a un
+/// identifiant portant **cet identifiant** en ancre (` ^id`, `id="…"` sur une balise). Pour les
+/// agents (lot 5, Task S7, Ruling R1224) : l'appelant met dans `id` l'alias à montrer
+/// (`mementum_crdt::anchors::Anchors::alias`) ; [`RenderOpts::anchors`], lui, numérote par rang.
+pub fn render_anchored(blocks: &[Block]) -> String {
+    Renderer {
+        ids: Ids::Real,
+        aliases: BTreeMap::new(),
+    }
+    .document(&normalize(blocks.to_vec()))
+}
+
 /// Rendu qui écrit les vrais ids comme ancres : la lecture s'en sert pour
 /// vérifier qu'un MMD est canonique.
 pub(crate) fn render_ids(blocks: &[Block]) -> String {

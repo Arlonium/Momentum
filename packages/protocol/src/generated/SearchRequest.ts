@@ -15,4 +15,18 @@ q: string,
  * Le nombre de pages déjà reçues pour cette recherche : absent ou 0 pour la première
  * réponse, puis 20, 40, 60, 80. À partir de 100 : `422 invalid_query`.
  */
-after?: number, };
+after?: number, 
+/**
+ * Seulement les pages créées par ce compte (son identifiant) : lot 5, Ruling R1248 ; un
+ * filtre réduit l'ensemble des pages que le compte voit, jamais ne l'élargit.
+ */
+createdBy?: string, 
+/**
+ * Seulement les pages dont le contenu date d'au moins cet instant (millisecondes Unix) ; une
+ * page pas encore indexée depuis sa création n'a pas de date, et ne passe pas.
+ */
+editedAfter?: number, 
+/**
+ * Seulement les pages dont le contenu date d'avant cet instant (millisecondes Unix).
+ */
+editedBefore?: number, };

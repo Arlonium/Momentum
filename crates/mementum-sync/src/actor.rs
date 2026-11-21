@@ -55,7 +55,7 @@ use crate::{PageEvent, SyncConfig, SyncError, presence};
 pub(crate) mod agent;
 mod history;
 
-use agent::{Edit, Step, Versioned, Versioning};
+use agent::{Edit, MmdWrite, Step, Versioned, Versioning};
 use history::{History, Slice, Watch};
 
 /// Identifiant d'une connexion, propre à l'acteur.
@@ -172,11 +172,14 @@ pub(crate) enum Command {
         id: String,
         reply: oneshot::Sender<Result<bool, SyncError>>,
     },
-    /// Remplacer les blocs (écriture serveur), au nom du compte `actor`.
+    /// Remplacer les blocs (écriture serveur), au nom du compte `actor` ; `expected` : la
+    /// révision que l'auteur a lue (`PUT /mmd` avec `If-Match`, lot 5, Task S7), jugée dans
+    /// cette commande, avant d'écrire.
     Write {
         blocks: Vec<Block>,
         actor: Option<Uuid>,
-        reply: oneshot::Sender<Result<(), SyncError>>,
+        expected: Option<String>,
+        reply: oneshot::Sender<Result<MmdWrite, SyncError>>,
     },
     /// Restaurer la version `version` de la page, au nom du compte `actor` (Ruling R135).
     Restore {
@@ -213,9 +216,10 @@ impl Command {
             Command::Join { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
-            Command::Create { reply }
-            | Command::Write { reply, .. }
-            | Command::Restore { reply, .. } => {
+            Command::Create { reply } | Command::Restore { reply, .. } => {
+                let _ = reply.send(Err(error));
+            }
+            Command::Write { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
             Command::Read { reply } => {
@@ -986,9 +990,10 @@ impl Actor {
             Command::Write {
                 blocks,
                 actor,
+                expected,
                 reply,
             } => {
-                let result = self.write(blocks, actor).await?;
+                let result = self.write(blocks, actor, expected).await?;
                 let written = result.is_ok();
                 // La réponse d'abord : l'écriture est faite, quoi qu'il arrive ensuite.
                 let _ = reply.send(result);
@@ -1590,13 +1595,30 @@ impl Actor {
     }
 
     /// Écriture du serveur (`PUT /mmd`), au nom de `actor` : elle compte dans
-    /// l'historique comme celle d'un client (Ruling R135).
+    /// l'historique comme celle d'un client (Ruling R135). `expected` : la révision que l'auteur a
+    /// lue (lot 5, Task S7) ; si la page n'y est plus, rien n'est écrit, et la révision courante
+    /// est rendue. Écrite, la révision rendue est celle de l'état écrit, sortie de cette commande
+    /// (RESULTS, leçon 8) : l'`ETag` de la réponse.
     async fn write(
         &mut self,
         blocks: Vec<Block>,
         actor: Option<Uuid>,
-    ) -> Result<Result<(), SyncError>, Broken> {
-        self.server_write(blocks, actor, History::Slice).await
+        expected: Option<String>,
+    ) -> Result<Result<MmdWrite, SyncError>, Broken> {
+        if let Some(expected) = expected {
+            let current = off_the_engine(|| self.page.revision());
+            if current != expected {
+                return Ok(Ok(MmdWrite::Mismatch { revision: current }));
+            }
+        }
+        Ok(
+            match self.server_write(blocks, actor, History::Slice).await? {
+                Ok(()) => Ok(MmdWrite::Written {
+                    revision: off_the_engine(|| self.page.revision()),
+                }),
+                Err(error) => Err(error),
+            },
+        )
     }
 
     /// Une écriture du serveur, au nom de `actor` : `PUT /mmd`, ou une
