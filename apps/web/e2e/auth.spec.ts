@@ -332,6 +332,18 @@ test("account_menu_by_keyboard", async ({ browser }) => {
   await p.keyboard.press("Shift+Tab");
   await p.keyboard.press("Shift+Tab");
   await expect(button).toHaveAttribute("aria-expanded", "false");
+  // « Réglages de l'espace » suivi au clavier : le lien part avec le menu, et le titre de l'écran
+  // prend le focus, jamais `body` (R1621).
+  await button.focus();
+  await p.keyboard.press("Enter");
+  await expect(current).toBeFocused();
+  const settings = menu.getByRole("link", { name: "Réglages de l'espace" });
+  await p.keyboard.press("Tab");
+  await p.keyboard.press("Tab");
+  await expect(settings).toBeFocused();
+  await p.keyboard.press("Enter");
+  await expect(p).toHaveURL(/\/settings$/);
+  await expect(p.getByRole("heading", { level: 1, name: "Réglages de l'espace" })).toBeFocused();
 });
 
 test("presence_carries_the_account_name", async ({ browser }) => {

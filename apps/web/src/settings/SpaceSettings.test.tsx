@@ -79,3 +79,32 @@ test("a_pending_page_invitation_names_its_page", async () => {
   expect(details[1].querySelector('.mm-isolate[dir="auto"]')?.textContent).toBe("Plan");
   expect(details[0].querySelector(".mm-isolate")).toBeNull();
 });
+
+test("the_screen_takes_the_focus_when_it_arrives_on_body", async () => {
+  // Arrivé depuis le menu du compte au clavier, le lien suivi part avec le menu : le titre de l'écran
+  // prend le focus, jamais `body` (R1621, comme « Jetons d'API »).
+  vi.mocked(getMembers).mockResolvedValue([alice]);
+  vi.mocked(getSpaceInvitations).mockResolvedValue([]);
+  (document.activeElement as HTMLElement | null)?.blur();
+  const render = () =>
+    act(async () =>
+      root.render(
+        <SessionContext.Provider value={{ me, refresh: async () => {} }}>
+          <SpaceSettings spaceId="pro" />
+        </SessionContext.Provider>,
+      ),
+    );
+  await render();
+  expect(document.activeElement?.tagName).toBe("H1");
+  expect(document.activeElement?.textContent).toBe("Réglages de l'espace");
+  await act(async () => root.unmount());
+  root = createRoot(host);
+
+  // Un focus posé ailleurs n'est pas pris.
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  elsewhere.focus();
+  await render();
+  expect(document.activeElement).toBe(elsewhere);
+  elsewhere.remove();
+});

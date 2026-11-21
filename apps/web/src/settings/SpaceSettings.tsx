@@ -109,6 +109,14 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
   const { load, reloadError, reload } = useSpaceSettings(spaceId, self, goHome, sessionLost);
   /** Le dernier refus du serveur pour rôle insuffisant, ou pour quelqu'un qui n'est plus là. */
   const [refusal, setRefusal] = useState<string | null>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+
+  // L'arrivée depuis le menu du compte : le lien suivi part avec le menu, et le focus tomberait sur
+  // `body` ; le titre de l'écran le prend (R1621, comme « Jetons d'API »).
+  useEffect(() => {
+    const active = document.activeElement;
+    if (active === null || active === document.body) titleRef.current?.focus();
+  }, []);
 
   // `retries` : une lecture tombée sur une session perdue est refaite quand le compte revient.
   useEffect(() => {
@@ -163,7 +171,9 @@ export function SpaceSettings({ spaceId }: { spaceId: string }) {
         </span>
       </header>
       <div className="mm-settings">
-        <h1 className="mm-settings-title">Réglages de l'espace</h1>
+        <h1 ref={titleRef} className="mm-settings-title" tabIndex={-1}>
+          Réglages de l'espace
+        </h1>
         <FormError message={refusal} />
         {reloadError && (
           // Le message, et dessous de quoi refaire la lecture : comme dans la corbeille.
