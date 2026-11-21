@@ -6,6 +6,8 @@
 //! un vrai jeton.
 
 mod common;
+#[path = "../../mementum-sync/tests/common/limit.rs"]
+mod limit;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
@@ -697,6 +699,32 @@ async fn trash_needs_the_option() {
             .trashed_at
             .is_some()
     );
+    // En sortir demande la même option (Ruling R1345 récrit).
+    let restore = format!("/api/v1/pages/{}/restore", page.id);
+    let reply = t
+        .send(with_bearer(bare(Method::POST, &restore), &without))
+        .await;
+    let body = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+    assert!(
+        body["message"].as_str().unwrap().contains("corbeille"),
+        "{body}"
+    );
+    assert!(
+        t.store
+            .get_node(id)
+            .await
+            .unwrap()
+            .unwrap()
+            .trashed_at
+            .is_some()
+    );
+    t.send(with_bearer(bare(Method::POST, &restore), &with))
+        .await
+        .assert_status(StatusCode::OK);
+    assert_eq!(
+        t.store.get_node(id).await.unwrap().unwrap().trashed_at,
+        None
+    );
 }
 
 /// Un jeton suit son compte : passée invitée, Mona ne voit plus les pages des membres, son jeton
@@ -900,11 +928,27 @@ async fn refusals_come_in_order() {
     };
     // Une Origin d'un autre site passe avant tout, jeton faux compris, écriture ou lecture.
     for method in [Method::GET, Method::POST] {
-        let request = with_bearer(bare(method, &missing), "mmt_faux");
+        let request = with_bearer(bare(method.clone(), &missing), "mmt_faux");
+        t.send(foreign(request))
+            .await
+            .assert_error(StatusCode::FORBIDDEN, "bad_origin");
+        // Un `Authorization` qui ne se lit pas comme un seul jeton : l'`Origin` d'abord aussi.
+        let mut request = with_bearer(bare(method, &missing), &token);
+        request
+            .headers_mut()
+            .append(header::AUTHORIZATION, "Basic YTpi".parse().unwrap());
         t.send(foreign(request))
             .await
             .assert_error(StatusCode::FORBIDDEN, "bad_origin");
     }
+    // Sans Origin étrangère, cet en-tête illisible est un 401.
+    let mut request = with_bearer(bare(Method::GET, &missing), &token);
+    request
+        .headers_mut()
+        .append(header::AUTHORIZATION, "Basic YTpi".parse().unwrap());
+    t.send(request)
+        .await
+        .assert_error(StatusCode::UNAUTHORIZED, "invalid_token");
     // Un jeton faux sur une route fermée : 401, pas 403.
     let closed = format!("{missing}/access");
     get_by(&t, "mmt_faux", &closed)
@@ -1057,9 +1101,20 @@ async fn the_bearer_is_never_logged() {
     get_by(&t, &token, &uri).await;
     t.calls.flush(&t.store).await;
     let secret = token.trim_start_matches("mmt_");
+    let hash = mementum_server::auth::token_hash(secret).unwrap();
+    let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
     let text = logs.text();
     assert!(!text.is_empty(), "le journal se lit");
     assert!(!text.contains(secret), "le jeton est dans le journal");
+    assert!(
+        !text.to_lowercase().contains(&hex),
+        "le hachage du jeton est dans le journal"
+    );
+    // Ni sous la forme où SQLite écrit un blob lié (`x'…'`, en majuscules).
+    assert!(
+        !text.contains(&hex.to_uppercase()),
+        "le hachage du jeton est dans le journal"
+    );
 }
 
 /// Aucune route ne lit par où l'appel est venu pour juger un droit (Ruling R1216) : `via`, et le
@@ -1086,13 +1141,358 @@ fn only_access_and_agent_read_how_a_call_came() {
             || relative == std::path::Path::new("auth.rs")
             || relative == std::path::Path::new("access.rs")
     };
+    // `.token()` dit si l'appel vient d'un jeton, sans rien dire de ses droits : il ne sert hors
+    // d'`auth.rs`, d'`access.rs` et d'`agent/` qu'à refuser un jeton, à ces places-là seulement.
+    let token_places = ["routes/sync.rs"];
+    let mut token_seen = Vec::new();
     for file in files.iter().filter(|f| !allowed(f)) {
         let text = std::fs::read_to_string(file).unwrap();
+        let relative = file
+            .strip_prefix(&src)
+            .unwrap()
+            .to_string_lossy()
+            .replace('\\', "/");
         for (n, line) in text.lines().enumerate() {
             let code = line.split("//").next().unwrap();
             let reads = code.contains(".via") || code.contains("via:") || code.contains("Via");
             assert!(!reads, "{}:{} lit `via` : {line}", file.display(), n + 1);
+            if code.contains(".token()") {
+                token_seen.push(relative.clone());
+            }
         }
+    }
+    token_seen.dedup();
+    assert_eq!(
+        token_seen, token_places,
+        "`.token()` hors de sa liste fermée"
+    );
+}
+
+/// Une page que le compte voit par une ligne posée sous une racine de la portée qu'il ne voit plus
+/// est hors de la portée du jeton (Ruling R1574) : la route rend la réponse d'une page inconnue,
+/// alors que la session la lit ; la racine rendue au compte, elle revient.
+#[tokio::test]
+async fn a_page_seen_under_a_root_the_account_no_longer_sees_is_out_of_scope() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let root = team
+        .page(
+            None,
+            "Racine",
+            &[(Subject::User(team.mona.id), Level::Read)],
+        )
+        .await;
+    let between = team.page(Some(root), "Entre", &[]).await;
+    let page = team
+        .page(
+            Some(between),
+            "Page",
+            &[(Subject::User(team.mona.id), Level::Edit)],
+        )
+        .await;
+    let (token, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Edit,
+        TokenScope::Pages {
+            space: team.space,
+            pages: vec![root],
+        },
+        false,
+    )
+    .await;
+    get_by(&t, &token, &page_uri(page))
+        .await
+        .assert_status(StatusCode::OK);
+    let line = format!("user:{}", team.mona.id);
+    let bump = format!(
+        "UPDATE spaces SET rev = rev + 1, lsn = lsn + 1 WHERE id = '{}'",
+        team.space
+    );
+    exec_sql(
+        &t.db_path(),
+        &format!("DELETE FROM acl WHERE node_id = '{root}' AND subject = '{line}'"),
+    )
+    .await;
+    exec_sql(&t.db_path(), &bump).await;
+    team.mona
+        .browser
+        .get(&page_uri(page))
+        .await
+        .assert_status(StatusCode::OK);
+    let hidden = get_by(&t, &token, &page_uri(page)).await;
+    let unknown = get_by(&t, &token, &page_uri(Uuid::now_v7())).await;
+    assert_eq!(hidden.status, StatusCode::NOT_FOUND);
+    assert_eq!(refusal(&hidden), refusal(&unknown));
+    exec_sql(
+        &t.db_path(),
+        &format!("INSERT INTO acl (node_id, subject, level) VALUES ('{root}', '{line}', 'read')"),
+    )
+    .await;
+    exec_sql(&t.db_path(), &bump).await;
+    get_by(&t, &token, &page_uri(page))
+        .await
+        .assert_status(StatusCode::OK);
+}
+
+/// Les routes de tout l'espace et les rétroliens d'un jeton de portée « pages » : l'arbre ne porte
+/// que la racine de la portée et ses sous-pages, la racine sans parent ; la recherche ne trouve
+/// qu'elles, et leurs fils d'Ariane s'arrêtent à la racine ; les rétroliens d'une page ne nomment
+/// que des sources de la portée.
+#[tokio::test]
+async fn a_scope_of_pages_sees_only_its_subtree_in_the_tree_the_search_and_the_backlinks() {
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        cfg.index_after = std::time::Duration::from_millis(50);
+    })
+    .await;
+    let team = Team::new(&t).await;
+    let above = team_page(&team, None, "Dessus commun").await;
+    let scoped = team_page(&team, Some(above), "Portée commun").await;
+    let inside = team_page(&team, Some(scoped), "Dedans commun").await;
+    let aside = team_page(&team, None, "Côté commun").await;
+    // Une source dans la portée, une hors d'elle, toutes deux vers la racine de la portée.
+    for source in [inside, aside] {
+        team.olga
+            .put_mmd(
+                &source.to_string(),
+                format!("Vers [la portée](/p/{scoped}).\n"),
+            )
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+    t.indexer.settled().await;
+    let (token, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Read,
+        TokenScope::Pages {
+            space: team.space,
+            pages: vec![scoped],
+        },
+        false,
+    )
+    .await;
+    let tree = get_by(&t, &token, &format!("/api/v1/spaces/{}/tree", team.space)).await;
+    let tree = tree.assert_status(StatusCode::OK).json();
+    let mut nodes: Vec<(String, String)> = tree["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|n| {
+            (
+                n["id"].as_str().unwrap().to_string(),
+                n["parentId"].to_string(),
+            )
+        })
+        .collect();
+    nodes.sort();
+    let mut expected = vec![
+        (scoped.to_string(), "null".to_string()),
+        (inside.to_string(), format!("\"{scoped}\"")),
+    ];
+    expected.sort();
+    assert_eq!(nodes, expected);
+    let found = json_by(
+        &t,
+        &token,
+        Method::POST,
+        &format!("/api/v1/spaces/{}/search", team.space),
+        json!({ "q": "commun" }),
+    )
+    .await;
+    let found = found.assert_status(StatusCode::OK).json();
+    let mut hits: Vec<(String, Vec<String>)> = found["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|hit| {
+            let path = hit["path"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a["id"].as_str().unwrap().to_string())
+                .collect();
+            (hit["pageId"].as_str().unwrap().to_string(), path)
+        })
+        .collect();
+    hits.sort();
+    let mut expected = vec![
+        (scoped.to_string(), Vec::new()),
+        (inside.to_string(), vec![scoped.to_string()]),
+    ];
+    expected.sort();
+    assert_eq!(hits, expected);
+    // Témoin : la session de Mona trouve les quatre pages.
+    let all = team
+        .mona
+        .browser
+        .post(
+            &format!("/api/v1/spaces/{}/search", team.space),
+            json!({ "q": "commun" }),
+        )
+        .await;
+    assert_eq!(all.json()["results"].as_array().unwrap().len(), 4);
+    let links = get_by(&t, &token, &format!("{}/backlinks", page_uri(scoped))).await;
+    let links = links.assert_status(StatusCode::OK).json();
+    let sources: Vec<&str> = links["pages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["pageId"].as_str().unwrap())
+        .collect();
+    assert_eq!(sources, vec![inside.to_string().as_str()]);
+    let witness = team
+        .mona
+        .browser
+        .get(&format!("{}/backlinks", page_uri(scoped)))
+        .await;
+    assert_eq!(witness.json()["pages"].as_array().unwrap().len(), 2);
+}
+
+/// Une écriture par jeton dont le client coupe pendant qu'elle attend son tour va au bout (elle est
+/// menée par `to_completion`), et laisse une ligne au journal d'activité, `error` et
+/// `client_gone` (Ruling R1355) : la scène de la sonde de la relecture.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_token_write_whose_client_left_leaves_a_line() {
+    let t = open_app().await;
+    let mona = t.account("Mona").await;
+    let page = mona
+        .create(json!({ "spaceId": mona.space, "title": "Avant" }))
+        .await;
+    let id = Uuid::parse_str(&page.id).unwrap();
+    let (token, token_id) =
+        api_token(&t.store, mona.id, TokenLevel::Edit, TokenScope::All, false).await;
+    t.indexer.settled().await;
+    t.indexer.freeze();
+    let held = t.store.hold_writes().await;
+    let mut request = with_bearer(
+        json_request(Method::PATCH, &page_uri(id), &json!({ "title": "Après" })),
+        &token,
+    );
+    request
+        .headers_mut()
+        .insert(header::HOST, "localhost".parse().unwrap());
+    let router = t.router.clone();
+    let asked = tokio::spawn(async move {
+        use tower::ServiceExt;
+        router.oneshot(request).await
+    });
+    until("le renommage attend son tour", || {
+        t.store.queued_writes() >= 1
+    })
+    .await;
+    asked.abort();
+    assert!(
+        asked.await.unwrap_err().is_cancelled(),
+        "le client est parti"
+    );
+    drop(held);
+    let deadline = std::time::Instant::now() + WAIT;
+    while t.store.get_node(id).await.unwrap().unwrap().title != "Après" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "le renommage n'est pas écrit"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    t.calls.flush(&t.store).await;
+    let calls = t
+        .store
+        .calls_of(mona.id, token_id, None, 50, now())
+        .await
+        .unwrap();
+    let lines: Vec<(&str, &str, Option<&str>)> = calls
+        .iter()
+        .map(|row| {
+            let call = &row.call;
+            (
+                call.tool.as_str(),
+                call.outcome.as_str(),
+                call.code.as_deref(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        vec![("PATCH /api/v1/pages/{id}", "error", Some("client_gone"))]
+    );
+}
+
+/// Attend que `ready` soit vrai, `WAIT` au plus.
+async fn until(what: &str, ready: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} : attente dépassée"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+mod known_limits {
+    use super::limit::known_limit;
+    use super::*;
+
+    /// Voulu : un client d'agent qui envoie tout le corps d'un `PUT …/mmd` sans attendre la réponse
+    /// reçoit le `403 token_not_allowed` de la porte. Aujourd'hui (Ruling R505, plan de S5,
+    /// « Pièges ») : la porte refuse avant de lire le corps, le serveur ferme en laissant des
+    /// octets non lus, le système coupe par `RST`, et la réponse est perdue pour ce client. Aucun
+    /// outil n'appelle cette route ; la lever demanderait de lire et jeter le corps d'un jeton
+    /// refusé, ce que la porte ne fait pas pour ne rien lire d'une route fermée.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_token_refused_before_the_body_of_put_mmd_may_lose_its_answer() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let t = open_app().await;
+        let mona = t.account("Mona").await;
+        let page = mona
+            .create(json!({ "spaceId": mona.space, "title": "P" }))
+            .await;
+        let (token, _) =
+            api_token(&t.store, mona.id, TokenLevel::Edit, TokenScope::All, false).await;
+        let addr = t.listen().await;
+        let length = 8usize << 20;
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let head = format!(
+            "PUT /api/v1/pages/{}/mmd HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer \
+             {token}\r\nContent-Type: text/markdown\r\nContent-Length: {length}\r\n\r\n",
+            page.id
+        );
+        stream.write_all(head.as_bytes()).await.unwrap();
+        let pushing = async {
+            let block = vec![b'a'; 64 * 1024];
+            let mut sent = 0;
+            while sent < length {
+                let size = block.len().min(length - sent);
+                if stream.write_all(&block[..size]).await.is_err() {
+                    return;
+                }
+                sent += size;
+            }
+        };
+        let _ = tokio::time::timeout(WAIT, pushing).await;
+        let mut received = Vec::new();
+        let mut buffer = [0u8; 8192];
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            match tokio::time::timeout_at(deadline, stream.read(&mut buffer)).await {
+                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => break,
+                Ok(Ok(n)) => received.extend_from_slice(&buffer[..n]),
+            }
+        }
+        let text = String::from_utf8_lossy(&received);
+        let mut unmet = Vec::new();
+        if !(text.starts_with("HTTP/1.1 403") && text.contains("token_not_allowed")) {
+            unmet.push(
+                "le 403 token_not_allowed arrive au client qui envoie tout son corps".to_string(),
+            );
+        }
+        known_limit(
+            "refus rendu avant de lire le corps, perdu par RST (R505)",
+            &unmet,
+            &["le 403 token_not_allowed arrive au client qui envoie tout son corps".to_string()],
+        );
     }
 }
 

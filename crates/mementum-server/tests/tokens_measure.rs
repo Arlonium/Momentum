@@ -44,6 +44,7 @@ fn timed<T>(rounds: usize, mut work: impl FnMut() -> T) -> (f64, f64) {
 #[test]
 #[ignore]
 fn measure_narrowing_alone() {
+    let _alone = ALONE.blocking_lock();
     for pages in [10_000usize, 100_000] {
         let user = Uuid::from_u128(1);
         let ids: Vec<Uuid> = (0..pages)
