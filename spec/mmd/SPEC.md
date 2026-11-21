@@ -232,6 +232,26 @@ l'entrée octet pour octet ; sinon, la première ligne qui diffère est signalé
 attendue (valeur par défaut écrite, échappement ou marque non canonique). L'import d'un Markdown
 quelconque (Obsidian, Notion) est un autre convertisseur, prévu plus tard.
 
+## Ce que `str_replace` cherche
+
+`str_replace` ne cherche pas dans le MMD, mais dans le **texte brut** de chaque bloc, un bloc à la
+fois (jamais à cheval sur deux) :
+
+- le texte tel qu'il s'affiche, sans marques ni échappements : `\$5` du MMD s'y cherche `$5`,
+  `**prix**` s'y cherche `prix`, `[la doc](https://exemple.org)` s'y cherche `la doc` ;
+- un saut de ligne (`<br/>`) y vaut `\n` ;
+- une mention ou une formule en ligne y vaut un seul caractère, U+FFFC : son libellé ne se cherche
+  pas ;
+- le texte d'un bloc de code y est tel quel ; une cellule de tableau, une légende et les props ne
+  sont pas cherchées.
+
+`new` est du texte brut aussi, jamais du MMD : `**x**` y écrit deux astérisques de chaque côté, et
+un `\n` y devient un saut de ligne du bloc (dans un bloc de code, un saut de ligne de son texte). Le
+texte écrit prend les marques (styles et lien) du premier caractère remplacé, à défaut celles du
+caractère d'avant ; une insertion pure (rien de remplacé) prend celles du caractère d'avant, à
+défaut celles du suivant. Pour changer une mention, une formule, une cellule ou une mise en forme,
+`replace_block`.
+
 ## Ce qu'une écriture d'agent refuse en plus
 
 - **Les médias du web** : un bloc `image`, `video` ou `audio` dont l'adresse n'est ni celle d'un
