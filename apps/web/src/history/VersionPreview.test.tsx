@@ -283,7 +283,7 @@ test("the_history_leaves_no_listener_on_the_page_document", async () => {
     },
   };
   const versions: Version[] = [
-    { id: "v1", createdAt: Date.now() - 60_000, reason: "periodic", authors: [author("alice")] },
+    { id: "v1", createdAt: Date.now() - 60_000, reason: "periodic", authors: [author("alice")], agentAuthors: [] },
   ];
   vi.mocked(getVersions).mockResolvedValue(versions);
   vi.mocked(getVersionState).mockResolvedValue(Y.encodeStateAsUpdate(pageDoc(["Le texte d'hier"])));

@@ -53,12 +53,14 @@ const v2: Version = {
   createdAt: NOW - 5 * MINUTE,
   reason: "before_restore",
   authors: [author("alice", "Alice"), author("bruno", "Bruno")],
+  agentAuthors: [],
 };
 const v1: Version = {
   id: "v1",
   createdAt: NOW - 3 * 60 * MINUTE,
   reason: "periodic",
   authors: [author("alice", "Alice")],
+  agentAuthors: [],
 };
 
 /** Une session de synchro réduite à ce que la fenêtre lit. */
@@ -449,6 +451,7 @@ test("names_from_elsewhere_are_isolated_and_an_absurd_date_breaks_nothing", asyn
     createdAt: 9e15,
     reason: "closing",
     authors: [author("eve", "‮evE"), author("zoe", "Zoé")],
+    agentAuthors: [],
   };
   await opened({ versions: [strange] });
   const item = items()[1];

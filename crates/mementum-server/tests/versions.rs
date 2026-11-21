@@ -9,11 +9,13 @@ mod common;
 
 use axum::http::StatusCode;
 use common::sync::{members, open_app, user};
-use common::{Team, TestApp, WAIT, sync_url, synced_as, uuid};
+use common::{Team, TestApp, WAIT, api_token, sync_url, synced_as, uuid};
 use mementum_acl::Level;
 use mementum_crdt::PageDoc;
+use mementum_crdt::ops::{Operation, Place, read_markdown};
 use mementum_md::{Block, parse};
-use mementum_store::VersionReason;
+use mementum_store::{TokenLevel, TokenScope, VersionReason, Writer};
+use mementum_sync::{Edit, OnConflict};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -103,11 +105,16 @@ async fn version_routes_follow_the_levels() {
                 .map(String::as_str)
                 .collect();
             keys.sort_unstable();
-            assert_eq!(keys, ["authors", "createdAt", "id", "reason"], "{what}");
+            assert_eq!(
+                keys,
+                ["agentAuthors", "authors", "createdAt", "id", "reason"],
+                "{what}"
+            );
             assert_eq!(only[0]["id"], version.to_string(), "{what}");
             assert_eq!(only[0]["reason"], "periodic", "{what}");
             assert!(only[0]["createdAt"].is_i64(), "{what}");
             assert_eq!(only[0]["authors"], Value::from(authors), "{what}");
+            assert_eq!(only[0]["agentAuthors"], json!([]), "{what}");
 
             let kept = tom.browser.get(&state_uri(page, version)).await;
             kept.assert_status(StatusCode::OK);
@@ -414,4 +421,118 @@ async fn a_version_kept_before_the_attribute_guard_is_served_without_the_attribu
         "la valeur est servie"
     );
     assert_eq!(blocks_of(&served[1]), blocks_of(&sound), "le reste est là");
+}
+
+/// Lot 5, Task C2 : une version dit ceux de ses auteurs qui ont écrit par un jeton d'API
+/// (`agentAuthors`, leurs identifiants, dans l'ordre de `authors`), et rien de plus : un compte que
+/// la version garde parmi ses auteurs d'agent sans le garder parmi ses auteurs n'y paraît pas, et
+/// une version sans écriture d'agent rend une liste vide.
+#[tokio::test]
+async fn agent_authors_are_a_subset_of_the_authors() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (mona, olga, gina) = (&team.mona, &team.olga, &team.gina);
+    let page = team.page(None, "Écrite", &[members(Level::Full)]).await;
+    let state = state_of("Un\n");
+    let ordinary = team
+        .store
+        .put_version_by(page, 0, &state, &[mona.id], &[], VersionReason::Periodic)
+        .await
+        .unwrap();
+    // Gina ne compte que parmi les auteurs d'agent : la route ne la rend pas.
+    let by_agent = team
+        .store
+        .put_version_by(
+            page,
+            1,
+            &state,
+            &[olga.id, mona.id],
+            &[mona.id, gina.id, olga.id],
+            VersionReason::BeforeAgent,
+        )
+        .await
+        .unwrap();
+
+    let listed = olga.browser.get(&versions_uri(page)).await.json();
+    let listed = listed.as_array().unwrap();
+    assert_eq!(listed.len(), 2, "{listed:?}");
+    assert_eq!(listed[0]["id"], by_agent.to_string());
+    assert_eq!(listed[0]["reason"], "before_agent");
+    let authors: Vec<&str> = listed[0]["authors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|author| author["id"].as_str().unwrap())
+        .collect();
+    let agents: Vec<&str> = listed[0]["agentAuthors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap())
+        .collect();
+    let mut expected = vec![mona.id.to_string(), olga.id.to_string()];
+    expected.sort();
+    assert_eq!(authors, expected, "{listed:?}");
+    assert_eq!(
+        agents, expected,
+        "les auteurs, dans leur ordre : {listed:?}"
+    );
+    assert!(
+        !agents.contains(&gina.id.to_string().as_str()),
+        "{listed:?}"
+    );
+    assert_eq!(listed[1]["id"], ordinary.to_string());
+    assert_eq!(listed[1]["agentAuthors"], json!([]));
+}
+
+/// Lot 5, Task C2 : l'historique ne nomme jamais un jeton. Une page écrite par le jeton de Tom
+/// (par l'acteur, comme une route d'agent) garde à son arrêt une version dont Tom est l'auteur, par
+/// un agent ; la liste des versions ne porte ni le nom du jeton, ni son identifiant, ni sa fin.
+#[tokio::test]
+async fn the_token_name_is_never_in_a_version() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let tom = &team.tom;
+    let page = team
+        .page(None, "Par un agent", &[user(tom, Level::Edit)])
+        .await;
+    let (text, token) = api_token(&t.store, tom.id, TokenLevel::Edit, TokenScope::All, false).await;
+    let read = t.hub.read_page(page).await.unwrap();
+    t.hub
+        .edit_page(
+            page,
+            Edit {
+                ops: vec![Operation::Insert {
+                    at: Place::End,
+                    blocks: read_markdown(0, "Écrit par un agent\n").unwrap(),
+                }],
+                base: Some((read.revision.clone(), Some(read.hashes.clone()))),
+                on_conflict: OnConflict::Rebase,
+                writer: Writer {
+                    account: Some(tom.id),
+                    token: Some(token),
+                },
+                commented: None,
+            },
+        )
+        .await
+        .unwrap();
+    // L'acteur s'arrête : la tranche, la première de la page, garde sa version de fin.
+    t.hub.shutdown().await;
+
+    let listed = tom.browser.get(&versions_uri(page)).await;
+    listed.assert_status(StatusCode::OK);
+    let json = listed.json();
+    let versions = json.as_array().unwrap();
+    assert_eq!(versions.len(), 1, "{json}");
+    assert_eq!(versions[0]["agentAuthors"], json!([tom.id.to_string()]));
+    assert_eq!(
+        versions[0]["authors"],
+        json!([{ "id": tom.id.to_string(), "name": "Tom" }])
+    );
+    let body = String::from_utf8(listed.body.to_vec()).unwrap();
+    let hint = &text[text.len() - 4..];
+    for secret in ["agent de test", &token.to_string(), hint, &text] {
+        assert!(!body.contains(secret), "« {secret} » dans {body}");
+    }
 }

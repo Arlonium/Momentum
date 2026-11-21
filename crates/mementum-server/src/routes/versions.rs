@@ -4,7 +4,7 @@
 //!
 //! | Route | Il faut | Réponse |
 //! |---|---|---|
-//! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi) | [`Version`]`[]`, la plus récente d'abord ; cent au plus |
+//! | `GET /api/v1/pages/{id}/versions` | `edit` (à la corbeille aussi) | [`Version`]`[]`, la plus récente d'abord ; cent au plus ; ses auteurs, et ceux d'entre eux qui ont écrit par un jeton d'API (`agentAuthors`, lot 5), jamais le jeton |
 //! | `GET …/versions/{versionId}/state` | `edit` (à la corbeille aussi) | `application/octet-stream` : l'état Yjs (v1) tel qu'il a été gardé, sans les attributs de bloc que la garde refuse (Ruling R701) |
 //! | `POST …/versions/{versionId}/restore` | `edit` | `204` ; `409 trashed` ; `429 page_busy` (Ruling R535) ; `409 restore_refused` (Ruling R832) |
 //!
@@ -182,6 +182,14 @@ fn version(version: &mementum_store::Version) -> Version {
                 id: author.id.to_string(),
                 name: display_name(&author.name),
             })
+            .collect(),
+        // Lot 5, Task C2 : tirés des auteurs, si bien qu'un auteur d'agent est toujours un auteur
+        // de la version, dans leur ordre.
+        agent_authors: version
+            .authors
+            .iter()
+            .filter(|author| version.agent_authors.contains(&author.id))
+            .map(|author| author.id.to_string())
             .collect(),
     }
 }

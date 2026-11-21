@@ -827,6 +827,11 @@ pub struct Version {
     /// identifiants, nommés comme dans les commentaires ; vide si aucune écriture n'avait de
     /// compte. Un compte qui n'est plus dans l'espace reste nommé.
     pub authors: Vec<Author>,
+    /// Ceux de ces comptes qui l'ont modifiée par un jeton d'API, « par un agent » (lot 5, Ruling
+    /// R1234) : leurs identifiants, dans l'ordre de `authors`, dont ils sont toujours une part ;
+    /// vide pour une version sans écriture d'agent. Le jeton n'y est jamais nommé : son nom n'est
+    /// montré qu'à son compte, dans son activité.
+    pub agent_authors: Vec<String>,
 }
 
 /// Réponse de `POST /api/v1/auth/password` : combien de jetons d'API vivants le changement a

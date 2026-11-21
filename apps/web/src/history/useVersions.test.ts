@@ -50,6 +50,7 @@ const version = (id: string, overrides: Partial<Version> = {}): Version => ({
   createdAt: 1_000,
   reason: "periodic",
   authors: [author("alice")],
+  agentAuthors: [],
   ...overrides,
 });
 
