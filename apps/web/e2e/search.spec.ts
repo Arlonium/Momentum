@@ -517,6 +517,76 @@ test("a_result_of_the_open_page_goes_to_its_block", async ({ browser }) => {
   await expect(p.locator('[role="alert"]')).toHaveCount(0);
 });
 
+/** Cherche `query` par Ctrl+K, et ouvre par Entrée la page `id`, trouvée par son titre dans l'arbre. */
+async function titleAndEnter(p: Page, query: string, id: string) {
+  await p.keyboard.press("Control+k");
+  await expect(field(p)).toBeFocused();
+  await p.keyboard.type(query);
+  await expect(row(p, id)).toHaveAttribute("data-from", "tree");
+  await expect(row(p, id)).toHaveAttribute("aria-selected", "true");
+  await p.keyboard.press("Enter");
+  await expect(win(p)).toHaveCount(0);
+}
+
+/** La page ouverte, dans le fil d'Ariane de la barre du haut. */
+const crumb = (p: Page) => p.locator('.mm-breadcrumb [aria-current="page"]');
+
+test("a_page_opened_by_its_title_opens_at_its_top_with_the_focus_on_its_breadcrumb", async ({ browser }) => {
+  // Recette C4 et choix 24 : une page trouvée par son titre s'ouvre en haut, depuis une autre page
+  // comme depuis elle-même (arrivée en bas par un bloc), sans être remontée ; le focus va à la page,
+  // dans le fil d'Ariane, comme à un rétrolien sans bloc (R1128), pas à « Rechercher ».
+  const { far, long, home, account } = await longScene();
+  const p = await openPage(browser, home.id, account);
+  await p.locator(".mm-editor .bn-block-content").first().click();
+
+  // Depuis une autre page.
+  await titleAndEnter(p, "longue", long.id);
+  await expect(p).toHaveURL(pageUrl(long.id));
+  await waitSynced(p);
+  await expect(firstBlock(p)).toBeInViewport();
+  await expect(crumb(p)).toBeFocused();
+  await expect(crumb(p)).toHaveText(long.title);
+
+  // Arrivée en bas, par un bloc ; puis la même page, par son titre : elle remonte en haut.
+  const WITNESSES = [".mm-editor", ".mm-title-input"];
+  await p.evaluate((selectors) => {
+    for (const selector of selectors) {
+      (document.querySelector(selector) as unknown as { witness: boolean }).witness = true;
+    }
+  }, WITNESSES);
+  const kept = () =>
+    p.evaluate(
+      (selectors) =>
+        selectors.map(
+          (selector) => (document.querySelector(selector) as unknown as { witness?: boolean }).witness === true,
+        ),
+      WITNESSES,
+    );
+  await searchAndEnter(p, far, long.id);
+  await blockOfUrl(p, long.id);
+  await expect(blockWith(p, far)).toBeInViewport();
+  await expect(firstBlock(p)).not.toBeInViewport();
+  const length = await p.evaluate(() => history.length);
+  await titleAndEnter(p, "longue", long.id);
+  await expect(p).toHaveURL(pageUrl(long.id));
+  expect(await p.evaluate(() => history.length)).toBe(length + 1);
+  await expect(firstBlock(p)).toBeInViewport();
+  await expect(blockWith(p, far)).not.toBeInViewport();
+  await expect(crumb(p)).toBeFocused();
+  expect(await kept()).toEqual([true, true]);
+
+  // À l'adresse même de la page, défilée à la main : par son titre, de nouveau en haut, sans entrée
+  // de plus dans l'historique.
+  await blockWith(p, far).scrollIntoViewIfNeeded();
+  await expect(firstBlock(p)).not.toBeInViewport();
+  await titleAndEnter(p, "longue", long.id);
+  await expect(firstBlock(p)).toBeInViewport();
+  await expect(crumb(p)).toBeFocused();
+  expect(await p.evaluate(() => history.length)).toBe(length + 1);
+  expect(await kept()).toEqual([true, true]);
+  expect(await focusOnBody(p)).toBe(false);
+});
+
 test("a_found_block_with_many_sub_blocks_shows_its_own_text", async ({ browser }) => {
   // Un bloc dont les sous-blocs dépassent la hauteur de la fenêtre : centré sur son sous-arbre, son
   // texte (ce que la recherche a trouvé) serait au-dessus de l'écran.

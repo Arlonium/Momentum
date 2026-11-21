@@ -7,7 +7,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import "../test/hooks";
 import { page } from "../test/pages";
-import { Breadcrumb } from "./Breadcrumb";
+import { arriveAt, Breadcrumb } from "./Breadcrumb";
 
 let host: HTMLDivElement;
 let root: Root;
@@ -236,6 +236,34 @@ test("a_page_opened_otherwise_leaves_the_focus_where_it_is", async () => {
   expect(document.activeElement).toBe(elsewhere);
   await act(async () => root.render(<Breadcrumb key="a" node={a} ancestors={[]} />));
   expect(document.activeElement).toBe(elsewhere);
+});
+
+test("an_arrival_at_the_open_page_takes_the_focus_without_remounting_it", async () => {
+  // Recette C4 : la page déjà ouverte, trouvée par son titre (`arriveAt`, puis `navigate`) : son fil,
+  // déjà monté, prend le focus, et la page est montrée en haut. Une arrivée vers une autre page ne
+  // le touche pas : c'est le fil de cette page-là qui la prendra, à son montage.
+  const [a, b] = chain("a", "b");
+  await show(b, [a]);
+  const current = nav()!.querySelector<HTMLElement>('[aria-current="page"]')!;
+  const scrolled: Element[] = [];
+  Element.prototype.scrollIntoView = function (this: Element) {
+    scrolled.push(this);
+  };
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  elsewhere.focus();
+  await act(async () => arriveAt("autre"));
+  expect(document.activeElement).toBe(elsewhere);
+  expect(scrolled).toEqual([]);
+  await act(async () => arriveAt("b"));
+  expect(document.activeElement).toBe(current);
+  // Montrée en haut : la barre du haut (`.mm-topbar`), à défaut, comme ici, la page dans le fil.
+  expect(scrolled).toEqual([current]);
+  // L'arrivée suivie ne revient pas : le focus mis ailleurs y reste.
+  elsewhere.focus();
+  await show(b, [a]);
+  expect(document.activeElement).toBe(elsewhere);
+  delete (Element.prototype as { scrollIntoView?: unknown }).scrollIntoView;
 });
 
 test("a_crumb_opened_elsewhere_does_not_take_the_focus_later", async () => {

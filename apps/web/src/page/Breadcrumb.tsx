@@ -37,17 +37,23 @@ type Props = {
 };
 
 /**
- * La page qu'un lien du fil vient d'ouvrir : le fil de sa barre du haut, quand il sera monté,
- * prendra le focus. Tout fil qui se monte l'efface.
+ * La page qu'un lien vient d'ouvrir : le fil de sa barre du haut, quand il sera monté (ou à son rendu
+ * suivant, s'il l'est déjà), prendra le focus. Tout fil qui se monte l'efface.
  */
 let arriving: string | null = null;
+/** Les fils montés, prévenus d'une arrivée : celui de la page ouverte la suit sans être remonté. */
+const arrivals = new Set<() => void>();
 
 /**
- * Un lien de la page quittée mène à la page `id` (un rétrolien, `Backlinks.tsx`) : il part avec
- * elle, et le focus tomberait sur `body` ; le fil de la page d'arrivée le prendra (R292).
+ * Un geste mène à la page `id`, sans bloc : un rétrolien (`Backlinks.tsx`), une page trouvée par son
+ * titre (`SearchDialog.tsx`). Ce qui avait le focus part avec la page quittée, et il tomberait sur
+ * `body` : le fil de la page d'arrivée le prend (R292, R1128), et la page est montrée en haut (choix
+ * 24 de la recette du lot 4). La page déjà ouverte n'est pas remontée (seul le fragment de l'adresse
+ * a changé, R1104) : son fil, déjà monté, est prévenu, et y va de même.
  */
 export function arriveAt(id: string): void {
   arriving = id;
+  for (const arrival of arrivals) arrival();
 }
 
 /** Un clic que le routeur suivra (`useLinkInterception`) : bouton principal, sans touche. */
@@ -65,11 +71,34 @@ export function Breadcrumb({ node, ancestors }: Props) {
   const current = useRef<HTMLSpanElement>(null);
   /** Le bouton « … » du menu ouvert ; `null` : fermé. */
   const [anchor, setAnchor] = useState<HTMLElement | null>(null);
+  /** Les arrivées annoncées pendant que ce fil est monté : chacune le fait rendre de nouveau. */
+  const [announced, setAnnounced] = useState(0);
 
   useEffect(() => {
-    if (arriving === node.id) current.current?.focus();
-    arriving = null;
-  }, [node.id]);
+    const announce = () => setAnnounced((n) => n + 1);
+    arrivals.add(announce);
+    return () => {
+      arrivals.delete(announce);
+    };
+  }, []);
+
+  // Le fil monté prend une arrivée vers sa page, dans un effet : après le rendu qui ferme ce qui l'a
+  // demandée (la fenêtre de recherche, qui rend le focus dans un nettoyage), jamais avant. La page est
+  // montrée en haut, puis le focus va au fil sans la faire défiler. Monté, il efface toute arrivée ;
+  // une arrivée vers une autre page (que ce fil va quitter) ne le touche pas.
+  const mounting = useRef(true);
+  useEffect(() => {
+    const first = mounting.current;
+    mounting.current = false;
+    if (arriving === node.id) {
+      arriving = null;
+      const page = current.current;
+      (page?.closest(".mm-topbar") ?? page)?.scrollIntoView?.({ block: "start" });
+      page?.focus({ preventScroll: true });
+    } else if (first) {
+      arriving = null;
+    }
+  }, [node.id, announced]);
 
   const trail = [...ancestors, node];
   const folded = trail.length > MAX_CRUMBS;

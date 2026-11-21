@@ -41,6 +41,7 @@ import {
   type SyntheticEvent,
 } from "react";
 import { PageIcon, SearchIcon } from "../icons";
+import { arriveAt } from "../page/Breadcrumb";
 import { blockPath, navigate } from "../router";
 import { useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
@@ -193,8 +194,14 @@ export function SearchDialog({ space, nodes, query, onQuery, onClose, before, ca
     if (now === null || now === document.body) fieldRef.current?.focus();
   }, [search.more]);
 
-  /** Ouvre la page d'une ligne dans l'onglet : la recherche est finie, le champ est vidé. */
+  /**
+   * Ouvre la page d'une ligne dans l'onglet : la recherche est finie, le champ est vidé. Une ligne
+   * sans bloc (une page trouvée par son titre) ouvre la page en haut, le focus dans son fil d'Ariane,
+   * comme un rétrolien sans bloc (`arriveAt`, R1128) ; la page déjà ouverte aussi, sans être remontée
+   * (choix 24, recette du lot 4, C4). Une ligne à un bloc y mène (`useArrival`).
+   */
   const open = (row: Row) => {
+    if (row.blockId === null || row.blockId === "") arriveAt(row.id);
     navigate(hrefOf(row));
     onQuery("");
     onClose();
