@@ -1406,3 +1406,83 @@ fn the_bounds_of_the_tools_are_those_of_the_routes() {
         mementum_mcp::text::MAX_CONTENT_BYTES
     );
 }
+
+/// Un appel d'outil dont le client coupe pendant que son écriture attend son tour va au bout (la
+/// route de la page la mène par `to_completion`), et laisse une ligne au journal d'activité qui
+/// nomme l'outil, `error` et `client_gone` (Ruling R1355, « Pour M2 » de S5).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tool_call_whose_client_left_leaves_a_line_with_its_tool() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Avant", "Un\n").await;
+    let (token, token_id) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Edit,
+        TokenScope::All,
+        false,
+    )
+    .await;
+    t.indexer.settled().await;
+    t.indexer.freeze();
+    let held = t.store.hold_writes().await;
+    let mut request = Mcp::new(&t, &token, Era::V2026).request(
+        "tools/call",
+        json!({
+            "name": "manage_pages",
+            "arguments": { "action": "rename", "page": page.to_string(), "title": "Après" },
+        }),
+    );
+    request
+        .headers_mut()
+        .insert(header::HOST, "localhost".parse().unwrap());
+    let router = t.router.clone();
+    let asked = tokio::spawn(async move {
+        use tower::ServiceExt;
+        router.oneshot(request).await
+    });
+    eventually("le renommage attend son tour", || {
+        t.store.queued_writes() >= 1
+    })
+    .await;
+    asked.abort();
+    assert!(
+        asked.await.unwrap_err().is_cancelled(),
+        "le client est parti"
+    );
+    drop(held);
+    let deadline = std::time::Instant::now() + WAIT;
+    while t.store.get_node(page).await.unwrap().unwrap().title != "Après" {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "le renommage n'est pas écrit"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    t.calls.flush(&t.store).await;
+    let lines: Vec<(String, CallSurface, CallOutcome, Option<String>)> = t
+        .store
+        .calls_of(team.mona.id, token_id, None, None, 50, now())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.call.tool,
+                row.call.surface,
+                row.call.outcome,
+                row.call.code,
+            )
+        })
+        .collect();
+    assert_eq!(
+        lines,
+        [(
+            "manage_pages".to_string(),
+            CallSurface::Mcp,
+            CallOutcome::Error,
+            Some("client_gone".to_string())
+        )]
+    );
+}
+

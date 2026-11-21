@@ -570,6 +570,12 @@ pub(crate) async fn token_gate(
     };
     request.extensions_mut().insert(TokenCaller(caller));
     let (space_id, node_id) = path_ids(path, params.ok().as_ref());
+    // Sur `/mcp`, l'outil n'est connu qu'une fois le corps lu : la route le nomme ici dès qu'elle
+    // l'appelle, pour la ligne d'un appel que le client coupe (Task M2).
+    let named = is_mcp(path).then(CallTool::default);
+    if let Some(named) = &named {
+        request.extensions_mut().insert(named.clone());
+    }
     // La ligne est bâtie avant la route : si le client coupe pendant qu'elle travaille (une
     // écriture menée au bout par `to_completion`), la garde l'écrit en partant, `client_gone`
     // (Ruling R1355).
@@ -578,7 +584,11 @@ pub(crate) async fn token_gate(
         call: Some(Call {
             token_id: token.id,
             at: now,
-            surface: CallSurface::Rest,
+            surface: if named.is_some() {
+                CallSurface::Mcp
+            } else {
+                CallSurface::Rest
+            },
             tool,
             space_id,
             node_id,
@@ -588,6 +598,7 @@ pub(crate) async fn token_gate(
             revision_after: None,
             blocks_touched: None,
         }),
+        named,
     };
     let response = next.run(request).await;
     let details = response
@@ -632,10 +643,31 @@ pub const CLIENT_GONE: &str = "client_gone";
 
 /// La ligne du journal d'activité d'un appel admis, en attente de son issue : écrite par
 /// [`PendingCall::settle`] avec la réponse, ou, si l'appel est abandonné avant elle (le client a
-/// coupé), par `Drop`, avec l'issue `error` et le code [`CLIENT_GONE`] (Ruling R1355).
+/// coupé), par `Drop`, avec l'issue `error` et le code [`CLIENT_GONE`] (Ruling R1355), et, pour un
+/// appel MCP, l'outil que la route a nommé ([`CallTool`]).
 struct PendingCall {
     calls: Arc<crate::agent::calls::Calls>,
     call: Option<Call>,
+    named: Option<CallTool>,
+}
+
+/// L'outil que mène un appel MCP (lot 5, Task M2) : nommé par la route dès qu'elle l'appelle, lu
+/// par la garde du journal si le client coupe avant la réponse (Ruling R1355) ; la réponse, elle,
+/// dit l'outil par `CallDetails`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CallTool(Arc<Mutex<Option<String>>>);
+
+impl CallTool {
+    pub(crate) fn set(&self, tool: &str) {
+        *self.0.lock().unwrap_or_else(PoisonError::into_inner) = Some(tool.to_string());
+    }
+
+    fn get(&self) -> Option<String> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
 }
 
 impl PendingCall {
@@ -650,7 +682,10 @@ impl PendingCall {
 
 impl Drop for PendingCall {
     fn drop(&mut self) {
-        if let Some(call) = self.call.take() {
+        if let Some(mut call) = self.call.take() {
+            if let Some(tool) = self.named.as_ref().and_then(CallTool::get) {
+                call.tool = tool;
+            }
             self.calls.record(call);
         }
     }
@@ -871,8 +906,9 @@ struct TokenBusy(u64);
 /// n'est pas un jeton vivant a déjà reçu `401 invalid_token` de la porte (Ruling R1352).
 #[derive(Debug, Clone)]
 pub(crate) enum McpCaller {
-    /// Admis : le compte du jeton, restreint, et sa preuve (`Proof::Token`).
-    Admitted(LiveCaller),
+    /// Admis : le compte du jeton, restreint, et sa preuve (`Proof::Token`) ; et où nommer l'outil
+    /// qu'il mène, pour la ligne d'un appel que le client coupe.
+    Admitted(LiveCaller, CallTool),
     /// Refusé par le débit du jeton ou de son compte (Ruling R1241) : les secondes à attendre.
     Busy(u64),
 }
@@ -892,8 +928,14 @@ impl FromRequestParts<AppState> for McpCaller {
         }
         // Le compte du jeton, par le chemin de toute route (le compte attendu, la voie de ses
         // écritures) ; la session n'est jamais regardée.
+        let named = parts
+            .extensions
+            .get::<CallTool>()
+            .cloned()
+            .unwrap_or_default();
         Ok(McpCaller::Admitted(
             LiveCaller::from_request_parts(parts, state).await?,
+            named,
         ))
     }
 }

@@ -53,7 +53,7 @@ use uuid::Uuid;
 use crate::AppState;
 use crate::agent;
 use crate::agent::fetch::{DEFAULT_LIMIT, Fetch, MAX_LIMIT, MIN_LIMIT};
-use crate::auth::{CallDetails, LiveCaller, McpCaller};
+use crate::auth::{CallDetails, CallTool, LiveCaller, McpCaller};
 use crate::error::ApiError;
 use crate::types::{
     CreatePages, ErrorCode, NewPageBody, PageDocument, PageNode, PageOperations, RootSection,
@@ -119,10 +119,11 @@ async fn answer(
             let served = mementum_mcp::serve(&compared, &body, endpoint, &Busy { seconds }).await;
             reply(&served.reply)
         }
-        McpCaller::Admitted(caller) => {
+        McpCaller::Admitted(caller, named) => {
             let tools = Tools {
                 state: &state,
                 caller: &caller,
+                named: &named,
                 seen: Mutex::default(),
             };
             let served = mementum_mcp::serve(&compared, &body, endpoint, &tools).await;
@@ -251,6 +252,8 @@ impl Host for Busy {
 struct Tools<'a> {
     state: &'a AppState,
     caller: &'a LiveCaller,
+    /// Où nommer l'outil appelé, pour la ligne d'un appel que le client coupe.
+    named: &'a CallTool,
     seen: Mutex<Seen>,
 }
 
@@ -280,6 +283,14 @@ impl From<ApiError> for Failure {
 
 impl Host for Tools<'_> {
     async fn call(&self, call: ToolCall) -> ToolOutput {
+        self.named.set(match &call {
+            ToolCall::Search(_) => "search",
+            ToolCall::Fetch(_) => "fetch",
+            ToolCall::CreatePages(_) => "create_pages",
+            ToolCall::UpdatePage(_) => "update_page",
+            ToolCall::ManagePages(_) => "manage_pages",
+            ToolCall::WorkspaceInfo(_) => "workspace_info",
+        });
         let result = match call {
             ToolCall::Search(input) => self.search(input).await,
             ToolCall::Fetch(input) => self.fetch(input).await,
