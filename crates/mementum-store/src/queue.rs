@@ -77,6 +77,12 @@ pub(crate) enum Lane {
     /// (`MAX_INDEX_TX_BYTES`) : entre deux, la file sert une écriture de chaque autre voie qui
     /// attend, si bien qu'une frappe n'attend jamais plus d'une transaction de l'index.
     Index,
+    /// Le journal d'activité des jetons d'API (`Store::append_calls`, Ruling R1244) : ses paquets,
+    /// dans une même voie, quel que soit le compte de la tâche qui les écrit, sans priorité, comme
+    /// l'index. Un paquet porte les appels de plusieurs comptes ; dans la voie d'un compte, il
+    /// passerait devant ses autres écritures, et le journal d'un agent en boucle ferait attendre
+    /// son propriétaire.
+    Calls,
     /// Les écritures dont personne n'est nommé : inscription, ménage, commandes, tests.
     Common,
 }

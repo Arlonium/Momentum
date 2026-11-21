@@ -14,7 +14,7 @@ use common::{Fixture, account, break_table, exec_sql, fresh, int, page, repair, 
 use mementum_acl::{Grant, Level, Role, Subject};
 use mementum_store::{
     CopiedPage, FeedLine, FeedStart, FeedTokens, IndexRow, IndexedBlock, MAX_INDEX_TX_BYTES,
-    NewCopy, NewNode, NodeKind, Place, Sibling, Store, StoreError,
+    NewCopy, NewNode, NodeKind, PageEdit, Place, Sibling, Store, StoreError,
 };
 use sqlx::Row as _;
 use tokio::sync::broadcast::error::TryRecvError;
@@ -1685,5 +1685,113 @@ async fn a_source_linking_many_times_is_read_once() {
     assert_eq!(
         many, once,
         "les liens d'une même source ont été lus un à un"
+    );
+}
+
+/// Ruling R1246 : la date d'une page (`page_edits`) est posée par l'indexeur, dans la transaction
+/// où il l'indexe, d'après l'écriture qu'il indexe, jamais d'après l'heure de l'indexation : la
+/// date et le compte de l'entrée du journal à ce `seq` ; le journal compacté jusque-là, la date
+/// de l'instantané, sans compte ; une page sans document, sa création. Les dates du journal sont
+/// posées loin dans le passé : l'heure de l'indexation ne peut pas s'y confondre.
+#[tokio::test]
+async fn a_page_edit_is_dated_from_the_journal_not_from_now() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let page = new_page(&f, "P").await;
+    let created = f.store.get_node(page).await.unwrap().unwrap().created_at;
+    let edit = |edited_at, edited_by, edited_seq| PageEdit {
+        node_id: page,
+        edited_at,
+        edited_by,
+        edited_seq,
+    };
+    assert!(f.store.page_edits_of(&[page]).await.unwrap().is_empty());
+
+    // Sans document : sa création, sans compte, au `seq` 0.
+    index(&f.store, page, 0, &[]).await;
+    assert_eq!(
+        f.store.page_edits_of(&[page]).await.unwrap(),
+        [edit(created, None, 0)]
+    );
+
+    // Une écriture d'Alice : la date et le compte de son entrée du journal.
+    let seq = f
+        .store
+        .append_updates(page, &[b"a"], Some(alice.id))
+        .await
+        .unwrap();
+    exec_sql(&f.db, "UPDATE doc_updates SET created_at = 1234").await;
+    index(&f.store, page, seq, &[row("b", "texte")]).await;
+    assert_eq!(
+        f.store.page_edits_of(&[page]).await.unwrap(),
+        [edit(1234, Some(alice.id), seq)]
+    );
+
+    // Le journal compacté jusque-là : la date de l'instantané, sans compte.
+    let seq = f
+        .store
+        .append_updates(page, &[b"b"], Some(alice.id))
+        .await
+        .unwrap();
+    f.store.put_snapshot(page, seq, b"etat").await.unwrap();
+    exec_sql(&f.db, "UPDATE doc_snapshots SET created_at = 5678").await;
+    index(&f.store, page, seq, &[row("b", "texte 2")]).await;
+    assert_eq!(
+        f.store.page_edits_of(&[page]).await.unwrap(),
+        [edit(5678, None, seq)]
+    );
+}
+
+/// Ruling R1246 : la date d'une page ne change que si le `seq` indexé a avancé. Une reprojection
+/// (une version neuve de la projection, `mementum reindex`) relit la page au même `seq`, et récrit
+/// sa projection ; la date ne bouge pas, même quand le journal dirait autre chose à ce `seq`. Une
+/// écriture neuve, indexée, la change.
+#[tokio::test]
+async fn a_reprojection_does_not_move_a_page_edit() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let page = new_page(&f, "P").await;
+    let seq = f
+        .store
+        .append_updates(page, &[b"a"], Some(alice.id))
+        .await
+        .unwrap();
+    exec_sql(&f.db, "UPDATE doc_updates SET created_at = 1234").await;
+    index(&f.store, page, seq, &[row("b", "texte")]).await;
+    let dated = f.store.page_edits_of(&[page]).await.unwrap();
+    assert_eq!(dated[0].edited_at, 1234);
+
+    f.store.reproject_everything(None, 100).await.unwrap();
+    exec_sql(
+        &f.db,
+        "UPDATE doc_updates SET created_at = 9999, actor_id = NULL",
+    )
+    .await;
+    assert_eq!(
+        index(&f.store, page, seq, &[row("b", "autre projection")]).await,
+        1,
+        "la projection est récrite"
+    );
+    assert_eq!(f.store.page_edits_of(&[page]).await.unwrap(), dated);
+
+    let next = f
+        .store
+        .append_updates(page, &[b"b"], Some(alice.id))
+        .await
+        .unwrap();
+    exec_sql(
+        &f.db,
+        &format!("UPDATE doc_updates SET created_at = 4321 WHERE seq = {next}"),
+    )
+    .await;
+    index(&f.store, page, next, &[row("b", "texte neuf")]).await;
+    assert_eq!(
+        f.store.page_edits_of(&[page]).await.unwrap(),
+        [PageEdit {
+            node_id: page,
+            edited_at: 4321,
+            edited_by: Some(alice.id),
+            edited_seq: next,
+        }]
     );
 }

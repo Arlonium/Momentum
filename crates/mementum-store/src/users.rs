@@ -11,6 +11,7 @@ use sqlx::{Row, Sqlite, Transaction};
 use uuid::Uuid;
 
 use crate::queue::Lane;
+use crate::tokens::revoke_all_tokens;
 use crate::{Store, StoreError, now_ms, parse_uuid};
 
 /// Un jour, en millisecondes : une session ne glisse qu'une fois par jour d'usage au plus.
@@ -228,8 +229,9 @@ impl Store {
             .get(0))
     }
 
-    /// Change le hachage du mot de passe et supprime toutes les sessions du compte, dans la
-    /// même transaction. `NotFound` (sans rien écrire) si le compte n'existe pas.
+    /// Change le hachage du mot de passe, supprime toutes les sessions du compte et révoque tous
+    /// ses jetons d'API (Ruling R1221), dans la même transaction. `NotFound` (sans rien écrire) si
+    /// le compte n'existe pas.
     ///
     /// Sans condition : pour qui n'a vérifié aucun mot de passe (la commande `mementum user
     /// set-password`). Une demande qui a vérifié le mot de passe actuel passe par
@@ -250,14 +252,16 @@ impl Store {
             .bind(&id)
             .execute(&mut **tx)
             .await?;
+        revoke_all_tokens(&mut tx, &id, now_ms()).await?;
         tx.commit().await?;
         Ok(())
     }
 
-    /// Remplace le hachage `verified` du compte par `new_hash`, supprime toutes ses sessions
-    /// et lui en ouvre une (`token_hash`, `expires_at`), dans la même transaction. `false`,
-    /// sans rien écrire, si le hachage du compte n'est plus `verified` (ou si le compte
-    /// n'existe pas).
+    /// Remplace le hachage `verified` du compte par `new_hash`, supprime toutes ses sessions,
+    /// révoque tous ses jetons d'API (Ruling R1221 : c'est le geste de qui pense avoir été volé, et
+    /// un voleur de session aurait pu s'en faire un) et lui ouvre une session (`token_hash`,
+    /// `expires_at`), dans la même transaction. `false`, sans rien écrire, si le hachage du compte
+    /// n'est plus `verified` (ou si le compte n'existe pas).
     ///
     /// Ruling R120 : `verified` est le hachage contre lequel l'appelant vient de vérifier le
     /// mot de passe actuel. Entre cette vérification (un calcul Argon2, et l'attente de son
@@ -290,6 +294,7 @@ impl Store {
             .bind(&id)
             .execute(&mut **tx)
             .await?;
+        revoke_all_tokens(&mut tx, &id, now_ms()).await?;
         sqlx::query(
             "INSERT INTO sessions (token_hash, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
         )

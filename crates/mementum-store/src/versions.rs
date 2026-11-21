@@ -42,6 +42,10 @@ pub const MAX_VERSIONS: usize = 100;
 /// partent d'abord, avant le plafond de [`MAX_VERSIONS`] (Ruling R189).
 pub const MAX_BEFORE_RESTORE: usize = 20;
 
+/// Versions `before_agent` gardées par page : au-delà, les plus anciennes de cette sorte partent
+/// avant toutes les autres, avant même les `before_restore` au-delà des leurs (Ruling R1234).
+pub const MAX_BEFORE_AGENT: usize = 20;
+
 /// Pourquoi une version a été coupée.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionReason {
@@ -51,6 +55,9 @@ pub enum VersionReason {
     Closing,
     /// Juste avant une restauration : ce qu'elle remplace.
     BeforeRestore,
+    /// Juste avant une opération destructrice d'un jeton d'API (`replace_page`, `replace_block`,
+    /// `delete_block`) qui remplace ce qu'une autre écriture a changé (Ruling R1234).
+    BeforeAgent,
 }
 
 impl VersionReason {
@@ -60,6 +67,7 @@ impl VersionReason {
             VersionReason::Periodic => "periodic",
             VersionReason::Closing => "closing",
             VersionReason::BeforeRestore => "before_restore",
+            VersionReason::BeforeAgent => "before_agent",
         }
     }
 
@@ -68,6 +76,7 @@ impl VersionReason {
             VersionReason::Periodic,
             VersionReason::Closing,
             VersionReason::BeforeRestore,
+            VersionReason::BeforeAgent,
         ]
         .into_iter()
         .find(|reason| reason.as_str() == text)
@@ -84,6 +93,9 @@ pub struct Version {
     /// Les comptes qui ont modifié la page depuis la version d'avant, dans l'ordre de leurs
     /// identifiants.
     pub authors: Vec<Author>,
+    /// Ceux d'entre eux qui l'ont modifiée par un jeton d'API, triés (Ruling R1234) : « par un
+    /// agent ». Vide pour une version d'avant le lot 5.
+    pub agent_authors: Vec<Uuid>,
     /// Millisecondes Unix.
     pub created_at: i64,
 }
@@ -100,14 +112,42 @@ pub struct Unversioned {
     /// La page a au moins une version. Sans elle, son contenu (celui de sa création, une page
     /// importée par exemple) n'est gardé par aucune.
     pub versioned: bool,
+    /// Les jetons d'API par lesquels ces écritures ont été faites, triés, pour ce qu'il en reste
+    /// au journal (Ruling R1234).
+    pub tokens: Vec<Uuid>,
+    /// Les comptes qui ont écrit par un jeton, triés, pour ce qu'il en reste au journal.
+    pub agent_authors: Vec<Uuid>,
+    /// Le journal porte, dans la tranche, une écriture faite sans jeton (d'une connexion de
+    /// synchro, d'une session, ou du serveur).
+    pub others: bool,
+    /// Une partie de la tranche n'est plus qu'un instantané plus récent que la dernière version
+    /// (la compaction a purgé son journal) : ni ses comptes ni ses jetons ne sont plus connus. La
+    /// règle de R1234 (« au doute, couper ») la tient pour écrite par d'autres.
+    pub unknown_writers: bool,
+}
+
+/// Des identifiants triés et sans doublon, en JSON (`["…","…"]`) : des UUID relus, sans rien à
+/// échapper.
+fn sorted_ids(ids: &[Uuid]) -> String {
+    let mut sorted = ids.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    format!(
+        "[{}]",
+        sorted
+            .iter()
+            .map(|id| format!("\"{id}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    )
 }
 
 impl Store {
     /// Garde une version de la page : son état Yjs (`state`, écrit par le serveur), le `seq` du
     /// journal qu'il couvre, les comptes qui l'ont modifiée depuis la version d'avant (triés et
     /// dédoublonnés ici) et la raison. Dans la même transaction, seules les [`MAX_VERSIONS`]
-    /// dernières versions de la page restent, dont au plus [`MAX_BEFORE_RESTORE`]
-    /// `before_restore`. `NotFound` si la page n'existe pas.
+    /// dernières versions de la page restent, dont au plus [`MAX_BEFORE_AGENT`] `before_agent` et
+    /// [`MAX_BEFORE_RESTORE`] `before_restore`. `NotFound` si la page n'existe pas.
     pub async fn put_version(
         &self,
         node_id: Uuid,
@@ -116,24 +156,35 @@ impl Store {
         authors: &[Uuid],
         reason: VersionReason,
     ) -> Result<Uuid, StoreError> {
-        let mut sorted = authors.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        let authors = format!(
-            "[{}]",
-            sorted
-                .iter()
-                .map(|id| format!("\"{id}\""))
-                .collect::<Vec<_>>()
-                .join(",")
-        );
+        self.put_version_by(node_id, seq, state, authors, &[], reason)
+            .await
+    }
+
+    /// [`Store::put_version`], qui garde aussi, parmi les auteurs, ceux qui ont écrit par un jeton
+    /// d'API (`agent_authors`, triés et dédoublonnés ici ; Ruling R1234). La purge retire d'abord
+    /// les `before_agent` au-delà des [`MAX_BEFORE_AGENT`] plus récentes, puis les
+    /// `before_restore` au-delà des leurs, puis toutes au-delà de [`MAX_VERSIONS`] : une coupe
+    /// d'agent ne fait partir une version ordinaire que tant que la page garde moins de vingt
+    /// `before_agent`.
+    pub async fn put_version_by(
+        &self,
+        node_id: Uuid,
+        seq: i64,
+        state: &[u8],
+        authors: &[Uuid],
+        agent_authors: &[Uuid],
+        reason: VersionReason,
+    ) -> Result<Uuid, StoreError> {
+        let authors = sorted_ids(authors);
+        let agent_authors = sorted_ids(agent_authors);
         let (id, node) = (Uuid::now_v7(), node_id.to_string());
         // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui échouerait.
         let mut tx = self.write_in(Lane::Page(node_id)).await?;
         sqlx::query(
             "INSERT INTO doc_versions \
-             (id, node_id, seq, covers_seq, state_blob, reason, authors, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+             (id, node_id, seq, covers_seq, state_blob, reason, authors, agent_authors, \
+              created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(&node)
@@ -142,22 +193,29 @@ impl Store {
         .bind(state)
         .bind(reason.as_str())
         .bind(&authors)
+        .bind(&agent_authors)
         .bind(now_ms())
         .execute(&mut **tx)
         .await
         .map_err(StoreError::from_fk)?;
-        // Les `before_restore` au-delà des vingt plus récentes d'abord (Ruling R189), puis toutes
-        // au-delà des cent plus récentes.
-        sqlx::query(
-            "DELETE FROM doc_versions WHERE node_id = ?1 AND reason = ?2 AND id NOT IN ( \
-                 SELECT id FROM doc_versions WHERE node_id = ?1 AND reason = ?2 \
-                 ORDER BY seq DESC, created_at DESC, id DESC LIMIT ?3)",
-        )
-        .bind(&node)
-        .bind(VersionReason::BeforeRestore.as_str())
-        .bind(MAX_BEFORE_RESTORE as i64)
-        .execute(&mut **tx)
-        .await?;
+        // Les `before_agent` au-delà des vingt plus récentes d'abord (Ruling R1234), puis les
+        // `before_restore` au-delà des leurs (Ruling R189), puis toutes au-delà des cent plus
+        // récentes.
+        for (reason, kept) in [
+            (VersionReason::BeforeAgent, MAX_BEFORE_AGENT),
+            (VersionReason::BeforeRestore, MAX_BEFORE_RESTORE),
+        ] {
+            sqlx::query(
+                "DELETE FROM doc_versions WHERE node_id = ?1 AND reason = ?2 AND id NOT IN ( \
+                     SELECT id FROM doc_versions WHERE node_id = ?1 AND reason = ?2 \
+                     ORDER BY seq DESC, created_at DESC, id DESC LIMIT ?3)",
+            )
+            .bind(&node)
+            .bind(reason.as_str())
+            .bind(kept as i64)
+            .execute(&mut **tx)
+            .await?;
+        }
         sqlx::query(
             "DELETE FROM doc_versions WHERE node_id = ?1 AND id NOT IN ( \
                  SELECT id FROM doc_versions WHERE node_id = ?1 \
@@ -192,6 +250,7 @@ impl Store {
                 reason: VersionReason::parse(&reason)
                     .ok_or_else(|| unreadable("raison de version", &reason))?,
                 authors: Vec::new(),
+                agent_authors: Vec::new(),
                 created_at: r.get("created_at"),
             })
         })
@@ -200,6 +259,13 @@ impl Store {
         let authors = sqlx::query(
             "SELECT v.id AS version_id, a.value AS author_id, u.name AS author_name \
              FROM doc_versions v, json_each(v.authors) a LEFT JOIN users u ON u.id = a.value \
+             WHERE v.node_id = ? ORDER BY v.id, a.key",
+        )
+        .bind(&node)
+        .fetch_all(&mut *tx)
+        .await?;
+        let agent_authors = sqlx::query(
+            "SELECT v.id, a.value FROM doc_versions v, json_each(v.agent_authors) a \
              WHERE v.node_id = ? ORDER BY v.id, a.key",
         )
         .bind(&node)
@@ -223,6 +289,15 @@ impl Store {
                     .get::<Option<String>, _>("author_name")
                     .unwrap_or_default(),
             });
+        }
+        for r in &agent_authors {
+            let version = parse_uuid(&r.get::<String, _>(0))?;
+            let Some(&at) = index.get(&version) else {
+                continue;
+            };
+            versions[at]
+                .agent_authors
+                .push(parse_uuid(&r.get::<String, _>(1))?);
         }
         Ok(versions)
     }
@@ -263,7 +338,7 @@ impl Store {
         let (node, actor) = (node_id.to_string(), actor.map(|a| a.to_string()));
         // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui échouerait.
         let mut tx = self.write_in(Lane::Page(node_id)).await?;
-        let seq = append(&mut **tx, &node, update, actor.as_deref(), now_ms()).await?;
+        let seq = append(&mut **tx, &node, update, actor.as_deref(), None, now_ms()).await?;
         let bound =
             sqlx::query("UPDATE doc_versions SET covers_seq = ? WHERE id = ? AND node_id = ?")
                 .bind(seq)
@@ -314,7 +389,8 @@ impl Store {
     ///
     /// La compaction purge le journal et ses auteurs : si l'instantané couvre des écritures
     /// au-delà de la dernière version, la tranche date au plus tard de lui (sa date est
-    /// postérieure aux écritures purgées), et ses auteurs ne sont plus connus. Le journal ne
+    /// postérieure aux écritures purgées), et ses auteurs et ses jetons ne sont plus connus
+    /// ([`Unversioned::unknown_writers`] ; Ruling R1234, « au doute, couper »). Le journal ne
     /// porte que des écritures qui ont changé la page : une mise à jour de client sans effet
     /// n'y est pas écrite (Ruling R181).
     pub async fn unversioned(&self, node_id: Uuid) -> Result<Unversioned, StoreError> {
@@ -338,18 +414,39 @@ impl Store {
                 .fetch_one(&mut *tx)
                 .await?
                 .get(0);
-        let authors = sqlx::query(
-            "SELECT DISTINCT actor_id FROM doc_updates \
-             WHERE node_id = ? AND seq > ? AND actor_id IS NOT NULL ORDER BY actor_id",
+        // Qui a écrit, et par quel jeton : une ligne par couple distinct (compte, jeton).
+        let writers = sqlx::query(
+            "SELECT DISTINCT actor_id, token_id FROM doc_updates WHERE node_id = ? AND seq > ?",
         )
         .bind(&node)
         .bind(versioned)
         .fetch_all(&mut *tx)
-        .await?
-        .iter()
-        .map(|r| parse_uuid(&r.get::<String, _>(0)))
-        .collect::<Result<Vec<_>, _>>()?;
+        .await?;
         tx.commit().await?;
+        let (mut authors, mut tokens, mut agent_authors) = (Vec::new(), Vec::new(), Vec::new());
+        let mut others = false;
+        for r in &writers {
+            let actor = r
+                .get::<Option<String>, _>(0)
+                .map(|id| parse_uuid(&id))
+                .transpose()?;
+            let token = r
+                .get::<Option<String>, _>(1)
+                .map(|id| parse_uuid(&id))
+                .transpose()?;
+            authors.extend(actor);
+            match token {
+                Some(token) => {
+                    tokens.push(token);
+                    agent_authors.extend(actor);
+                }
+                None => others = true,
+            }
+        }
+        for ids in [&mut authors, &mut tokens, &mut agent_authors] {
+            ids.sort_unstable();
+            ids.dedup();
+        }
         let compacted = snapshot
             .filter(|(seq, _)| *seq > versioned)
             .map(|(_, at)| at);
@@ -361,6 +458,10 @@ impl Store {
             since,
             authors,
             versioned: latest.is_some(),
+            tokens,
+            agent_authors,
+            others,
+            unknown_writers: compacted.is_some(),
         })
     }
 }

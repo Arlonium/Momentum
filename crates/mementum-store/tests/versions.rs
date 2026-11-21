@@ -4,7 +4,10 @@
 mod common;
 
 use common::{Fixture, account, break_table, exec_sql, fresh, int, new_user, page, repair, texts};
-use mementum_store::{MAX_BEFORE_RESTORE, MAX_VERSIONS, StoreError, Unversioned, VersionReason};
+use mementum_store::{
+    MAX_BEFORE_AGENT, MAX_BEFORE_RESTORE, MAX_VERSIONS, StoreError, Unversioned, VersionReason,
+    Writer,
+};
 use uuid::Uuid;
 
 async fn fresh_page() -> (Fixture, Uuid) {
@@ -225,6 +228,8 @@ async fn unversioned_is_read_from_what_the_journal_keeps() {
             since: Some(first),
             authors: both,
             versioned: false,
+            others: true,
+            ..Unversioned::default()
         }
     );
 
@@ -249,6 +254,8 @@ async fn unversioned_is_read_from_what_the_journal_keeps() {
             since: Some(fifth),
             authors: vec![alice],
             versioned: true,
+            others: true,
+            ..Unversioned::default()
         }
     );
 
@@ -263,6 +270,9 @@ async fn unversioned_is_read_from_what_the_journal_keeps() {
             since: Some(snapshot),
             authors: Vec::new(),
             versioned: true,
+            others: true,
+            unknown_writers: true,
+            ..Unversioned::default()
         }
     );
 }
@@ -501,6 +511,8 @@ async fn restore_write_is_covered_by_its_version() {
             since: Some(fourth),
             authors: vec![alice],
             versioned: true,
+            others: true,
+            ..Unversioned::default()
         }
     );
 }
@@ -537,4 +549,263 @@ async fn restore_write_and_its_bound_are_all_or_nothing() {
     assert!(f.store.append_restore(id, b"r", None, ours).await.is_err());
     repair(&f.db).await;
     assert_eq!(int(&f.db, "SELECT COUNT(*) FROM doc_updates").await, 0);
+}
+
+/// Ruling R1234 : `doc_updates.token_id` dit quel jeton a écrit chaque entrée du journal, par
+/// l'écriture d'une ou de plusieurs mises à jour ; une écriture sans jeton le laisse vide. La
+/// tranche pas encore versionnée le redit : les jetons qui l'ont écrite, les comptes qui ont écrit
+/// par eux, et si quelqu'un y a écrit sans jeton.
+#[tokio::test]
+async fn the_journal_says_which_token_wrote() {
+    let (f, id) = fresh_page().await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    let token = Uuid::now_v7();
+    let by_token = Writer {
+        account: Some(alice),
+        token: Some(token),
+    };
+    assert_eq!(
+        f.store
+            .append_updates_by(id, &[b"a"], &by_token)
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        f.store
+            .append_updates_by(id, &[b"b", b"c"], &by_token)
+            .await
+            .unwrap(),
+        3
+    );
+    f.store
+        .append_updates(id, &[b"d"], Some(bob))
+        .await
+        .unwrap();
+    assert_eq!(
+        texts(&f.db, "SELECT token_id FROM doc_updates ORDER BY seq").await,
+        [
+            Some(token.to_string()),
+            Some(token.to_string()),
+            Some(token.to_string()),
+            None
+        ]
+    );
+    let first = int(&f.db, "SELECT created_at FROM doc_updates WHERE seq = 1").await;
+    let mut both = vec![alice, bob];
+    both.sort();
+    assert_eq!(
+        f.store.unversioned(id).await.unwrap(),
+        Unversioned {
+            since: Some(first),
+            authors: both,
+            versioned: false,
+            tokens: vec![token],
+            agent_authors: vec![alice],
+            others: true,
+            unknown_writers: false,
+        }
+    );
+
+    // Une tranche que seul ce jeton a écrite.
+    f.store
+        .put_version(id, 4, b"v", &[alice, bob], VersionReason::Periodic)
+        .await
+        .unwrap();
+    f.store
+        .append_updates_by(id, &[b"e"], &by_token)
+        .await
+        .unwrap();
+    let fifth = int(&f.db, "SELECT created_at FROM doc_updates WHERE seq = 5").await;
+    assert_eq!(
+        f.store.unversioned(id).await.unwrap(),
+        Unversioned {
+            since: Some(fifth),
+            authors: vec![alice],
+            versioned: true,
+            tokens: vec![token],
+            agent_authors: vec![alice],
+            others: false,
+            unknown_writers: false,
+        }
+    );
+
+    // Sans mise à jour, rien n'est écrit ; un compte inconnu reste refusé, jeton ou non.
+    assert_eq!(
+        f.store.append_updates_by(id, &[], &by_token).await.unwrap(),
+        5
+    );
+    let stranger = Writer {
+        account: Some(Uuid::now_v7()),
+        token: Some(token),
+    };
+    for updates in [&[][..], &[&b"x"[..]][..]] {
+        assert!(matches!(
+            f.store.append_updates_by(id, updates, &stranger).await,
+            Err(StoreError::NotFound)
+        ));
+    }
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM doc_updates").await, 5);
+}
+
+/// Ruling R1234 : une page garde au plus vingt versions `before_agent`, et la purge les retire
+/// **d'abord**, avant les `before_restore` au-delà de vingt et le plafond de cent : une coupe
+/// d'agent ne fait partir une version ordinaire que tant que la page en garde moins de vingt. Avec
+/// soixante versions ordinaires et vingt `before_restore`, trente `before_agent` n'en laissent que
+/// les vingt plus récentes, et toutes les autres restent. Une version garde ses auteurs par jeton,
+/// triés, sans doublon.
+#[tokio::test]
+async fn before_agent_versions_are_purged_first_and_twenty_at_most() {
+    let (f, id) = fresh_page().await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    let ordinary_count = MAX_VERSIONS - MAX_BEFORE_RESTORE - MAX_BEFORE_AGENT;
+    let mut ordinary = Vec::new();
+    for seq in 0..ordinary_count as i64 {
+        let reason = if seq % 2 == 0 {
+            VersionReason::Periodic
+        } else {
+            VersionReason::Closing
+        };
+        ordinary.push(
+            f.store
+                .put_version(id, seq, b"o", &[], reason)
+                .await
+                .unwrap(),
+        );
+    }
+    let mut restores = Vec::new();
+    for i in 0..MAX_BEFORE_RESTORE as i64 {
+        let seq = ordinary_count as i64 + i;
+        restores.push(
+            f.store
+                .put_version(id, seq, b"r", &[], VersionReason::BeforeRestore)
+                .await
+                .unwrap(),
+        );
+    }
+    let mut agents = Vec::new();
+    for i in 0..30 {
+        let seq = 1_000 + i;
+        agents.push(
+            f.store
+                .put_version_by(
+                    id,
+                    seq,
+                    b"a",
+                    &[bob, alice],
+                    &[alice, alice],
+                    VersionReason::BeforeAgent,
+                )
+                .await
+                .unwrap(),
+        );
+    }
+    let listed = f.store.list_versions(id).await.unwrap();
+    assert_eq!(listed.len(), MAX_VERSIONS);
+    let kept = |reason: VersionReason| -> Vec<Uuid> {
+        listed
+            .iter()
+            .filter(|v| v.reason == reason)
+            .map(|v| v.id)
+            .collect()
+    };
+    let mut newest_agents = agents[agents.len() - MAX_BEFORE_AGENT..].to_vec();
+    newest_agents.reverse();
+    assert_eq!(kept(VersionReason::BeforeAgent), newest_agents);
+    restores.reverse();
+    assert_eq!(kept(VersionReason::BeforeRestore), restores);
+    let mut ordinary_kept: Vec<Uuid> = listed
+        .iter()
+        .filter(|v| matches!(v.reason, VersionReason::Periodic | VersionReason::Closing))
+        .map(|v| v.id)
+        .collect();
+    ordinary_kept.reverse();
+    assert_eq!(
+        ordinary_kept, ordinary,
+        "aucune version ordinaire n'est partie"
+    );
+
+    // Ses auteurs, et parmi eux ceux qui ont écrit par jeton.
+    let newest = &listed[0];
+    assert_eq!(newest.reason, VersionReason::BeforeAgent);
+    let mut both = vec![alice, bob];
+    both.sort();
+    let authors: Vec<Uuid> = newest.authors.iter().map(|a| a.id).collect();
+    assert_eq!(authors, both);
+    assert_eq!(newest.agent_authors, [alice]);
+    assert!(
+        listed
+            .iter()
+            .filter(|v| v.reason != VersionReason::BeforeAgent)
+            .all(|v| v.agent_authors.is_empty())
+    );
+    assert_eq!(
+        texts(
+            &f.db,
+            "SELECT DISTINCT agent_authors FROM doc_versions WHERE reason = 'before_agent'"
+        )
+        .await,
+        [Some(format!("[\"{alice}\"]"))]
+    );
+}
+
+/// Ruling R1234, règle 2 (« au doute, couper ») : quand un instantané plus récent que la dernière
+/// version couvre une partie de la tranche pas encore versionnée, le journal ne dit plus qui l'a
+/// écrite, ni par quel jeton, et `unversioned` le dit. Une version qui couvre tout, ou un
+/// instantané qui ne dépasse pas la dernière version, ne laissent rien échapper.
+#[tokio::test]
+async fn unversioned_says_when_part_of_the_slice_escapes_it() {
+    let (f, id) = fresh_page().await;
+    let alice = new_user(&f.db).await;
+    let token = Uuid::now_v7();
+    let by_token = Writer {
+        account: Some(alice),
+        token: Some(token),
+    };
+    let store = &f.store;
+    assert!(!store.unversioned(id).await.unwrap().unknown_writers);
+
+    store
+        .append_updates_by(id, &[b"a"], &by_token)
+        .await
+        .unwrap();
+    store
+        .append_updates(id, &[b"b"], Some(alice))
+        .await
+        .unwrap();
+    // La compaction jusqu'au `seq` 2, sans version : toute la tranche échappe au journal.
+    store.put_snapshot(id, 2, b"instantane").await.unwrap();
+    let escaped = store.unversioned(id).await.unwrap();
+    assert!(escaped.unknown_writers);
+    assert_eq!(
+        (escaped.tokens, escaped.agent_authors, escaped.others),
+        (Vec::new(), Vec::new(), false)
+    );
+    store
+        .append_updates(id, &[b"c"], Some(alice))
+        .await
+        .unwrap();
+    let partly = store.unversioned(id).await.unwrap();
+    assert!(partly.unknown_writers && partly.others);
+
+    // Une version au `seq` 3 couvre tout : rien n'échappe.
+    store
+        .put_version(id, 3, b"v", &[alice], VersionReason::Periodic)
+        .await
+        .unwrap();
+    assert!(!store.unversioned(id).await.unwrap().unknown_writers);
+    // Un instantané qui ne dépasse pas la dernière version non plus ; le journal garde la suite.
+    store
+        .append_updates_by(id, &[b"d"], &by_token)
+        .await
+        .unwrap();
+    store.put_snapshot(id, 3, b"instantane 3").await.unwrap();
+    let kept = store.unversioned(id).await.unwrap();
+    assert!(!kept.unknown_writers);
+    assert_eq!(kept.tokens, [token]);
+    // Une compaction au-delà de la version : de nouveau, et les jetons sont perdus.
+    store.put_snapshot(id, 4, b"instantane 4").await.unwrap();
+    let lost = store.unversioned(id).await.unwrap();
+    assert!(lost.unknown_writers);
+    assert!(lost.tokens.is_empty());
 }

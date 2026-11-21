@@ -28,7 +28,10 @@
 //! - `versions.rs` : les versions d'une page (état Yjs complet et auteurs), cent par page.
 //! - `search.rs` : l'index de recherche, côté base (lot 4) : la projection des pages, écrite par
 //!   différence, les rétroliens, ce que l'index plein texte n'a pas encore validé, et les
-//!   marqueurs que posent les écritures d'ici qui le changent ; une voie à lui dans la file.
+//!   marqueurs que posent les écritures d'ici qui le changent ; une voie à lui dans la file ; la
+//!   date du contenu de chaque page, posée par l'indexeur (lot 5).
+//! - `tokens.rs` : les jetons d'API personnels (lot 5), dont le store ne voit que le hachage.
+//! - `calls.rs` : le journal d'activité des jetons, écrit par paquets dans une voie à lui.
 //! - `position.rs` : l'index fractionnaire.
 //!
 //! Les horodatages sont en millisecondes Unix. Les identifiants sont des UUIDv7 stockés en
@@ -60,6 +63,7 @@
 mod access_inputs;
 mod acl;
 mod backup;
+mod calls;
 mod comments;
 mod docs;
 mod duplicate;
@@ -73,6 +77,7 @@ mod queue;
 mod search;
 mod signup;
 mod spaces;
+mod tokens;
 mod users;
 mod versions;
 
@@ -90,6 +95,7 @@ use uuid::Uuid;
 pub use access_inputs::AccessInputs;
 pub use acl::{AccessChange, AccessWritten, ShareRefusal};
 pub use backup::{Backup, MigrationMismatch, MigrationRefusal, ResumeCopy, backup_path};
+pub use calls::{Busy, Call, CallOutcome, CallRow, CallSurface, MAX_KEPT_CALLS, MAX_KEPT_REFUSALS};
 pub use comments::{
     Author, Authorship, Comment, CommentLimit, MAX_MESSAGES_PER_ACCOUNT, MAX_MESSAGES_PER_PAGE,
     MAX_MESSAGES_PER_THREAD, MAX_PAGE_REACTIONS_PER_ACCOUNT, MAX_REACTIONS_PER_ACCOUNT,
@@ -97,7 +103,7 @@ pub use comments::{
     MAX_TEXT_BYTES_PER_PAGE, MAX_THREADS_PER_ACCOUNT, MAX_THREADS_PER_PAGE, Reaction, Thread,
     ThreadAuthors,
 };
-pub use docs::DocState;
+pub use docs::{DocState, Writer};
 pub use duplicate::{CopiedAttachment, CopiedPage, NewCopy};
 pub use files::{Attachment, NewAttachment};
 pub use invitations::{Invitation, InvitationGrant, NewInvitation};
@@ -109,12 +115,18 @@ pub use queue::{attribute_writes_to, writer, writes_by};
 pub use search::BacklinkSteps;
 pub use search::{
     Backlink, Feed, FeedLine, FeedStart, FeedTokens, IndexRow, Indexed, IndexedBlock,
-    MAX_INDEX_TX_BYTES, StalePages,
+    MAX_INDEX_TX_BYTES, PageEdit, StalePages,
 };
 pub use signup::SignedUp;
 pub use spaces::Space;
+pub use tokens::{
+    DEAD_TOKEN_KEPT_MS, LiveToken, MAX_DEAD_TOKENS, MAX_LIVE_TOKENS, MAX_TOKEN_PAGES, NewToken,
+    TokenLevel, TokenRow, TokenScope,
+};
 pub use users::{NewSession, NewUser, User};
-pub use versions::{MAX_BEFORE_RESTORE, MAX_VERSIONS, Unversioned, Version, VersionReason};
+pub use versions::{
+    MAX_BEFORE_AGENT, MAX_BEFORE_RESTORE, MAX_VERSIONS, Unversioned, Version, VersionReason,
+};
 
 /// Erreurs du store.
 #[derive(Debug)]
@@ -153,6 +165,10 @@ pub enum StoreError {
     /// Un plafond des commentaires est atteint (Ruling R204), vérifié dans la transaction qui
     /// écrirait : rien n'est écrit.
     CommentLimit(CommentLimit),
+    /// Le compte a déjà [`MAX_LIVE_TOKENS`] jetons d'API vivants (Ruling R1220), vu dans la
+    /// transaction qui créerait le jeton : rien n'est écrit. Comme [`StoreError::Stale`], il n'a
+    /// pas de traduction générique : la route des jetons le dit elle-même (`409 token_limit`).
+    TokenLimit,
     /// À l'ouverture : la base porte une migration que ce binaire ne peut pas suivre (inconnue,
     /// d'une autre version, ou notée inachevée), refusée avant toute copie, toute migration et
     /// toute connexion qui écrit (Rulings R840, R845, R846). Rien n'a été écrit. Son affichage est
@@ -182,6 +198,10 @@ impl fmt::Display for StoreError {
             StoreError::Trashed => write!(f, "la page est à la corbeille"),
             StoreError::NotAuthor => write!(f, "ce message, ou ce fil, est d'un autre compte"),
             StoreError::CommentLimit(limit) => write!(f, "plafond des commentaires : {limit}"),
+            StoreError::TokenLimit => write!(
+                f,
+                "un compte garde au plus {MAX_LIVE_TOKENS} jetons d'API vivants"
+            ),
             StoreError::Migration(refusal) => write!(f, "{refusal}"),
             StoreError::Sqlx(e) => write!(f, "erreur de base de données : {e}"),
         }

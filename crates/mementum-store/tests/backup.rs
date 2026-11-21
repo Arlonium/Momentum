@@ -16,7 +16,7 @@ use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 /// Le nombre de migrations du store : une base migrée les porte toutes.
-const MIGRATIONS: i64 = 5;
+const MIGRATIONS: i64 = 6;
 
 /// Une base telle que le code du lot 1 la produit (comme dans `tests/migration.rs`) : les options
 /// de connexion de `Store::open`, et la seule migration `0001_init.sql`, lancée par sqlx.
@@ -306,7 +306,8 @@ async fn pending_migration_backs_up_first() {
             Some("2".to_string()),
             Some("3".to_string()),
             Some("4".to_string()),
-            Some("5".to_string())
+            Some("5".to_string()),
+            Some("6".to_string())
         ]
     );
     store.close().await;
@@ -957,13 +958,13 @@ async fn a_database_from_a_newer_version_is_refused_in_french() {
     sqlx::query(
         "INSERT INTO _sqlx_migrations \
              (version, description, installed_on, success, checksum, execution_time) \
-         VALUES (6, 'plus tard', '2026-12-01 00:00:00', TRUE, X'00', 1)",
+         VALUES (7, 'plus tard', '2026-12-01 00:00:00', TRUE, X'00', 1)",
     )
     .execute(&pool)
     .await
     .unwrap();
     pool.close().await;
-    let unknown = "la base porte la migration 0006, que ce binaire ne connaît pas : une version \
+    let unknown = "la base porte la migration 0007, que ce binaire ne connaît pas : une version \
                    plus récente de Mementum l'a appliquée. La base n'a pas été modifiée, et aucune \
                    copie n'a été écrite.";
     assert_eq!(
@@ -975,13 +976,13 @@ async fn a_database_from_a_newer_version_is_refused_in_french() {
         )
     );
 
-    // La version plus récente a écrit sa copie avant d'appliquer la `0006`.
-    let resume = copy_at(&db, "0006.bak", 1_763_000_000);
+    // La version plus récente a écrit sa copie avant d'appliquer la `0007`.
+    let resume = copy_at(&db, "0007.bak", 1_763_000_000);
     assert_eq!(
         refused_untouched(&db).await,
         format!(
             "{unknown} Lance cette version plus récente ; pour revenir à celle-ci, reprends la \
-             copie d'avant la migration 0006, {} ; ce qui a été écrit dans la base depuis cette \
+             copie d'avant la migration 0007, {} ; ce qui a été écrit dans la base depuis cette \
              copie est perdu. Voir « Copies avant migration » dans le README.",
             resume.display()
         )

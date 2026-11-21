@@ -796,6 +796,9 @@ pub enum VersionReason {
     Closing,
     /// Juste avant une restauration : ce qu'elle a remplacé.
     BeforeRestore,
+    /// Juste avant qu'un agent (un jeton d'API) remplace ce qu'une autre écriture avait changé :
+    /// ce qu'il a remplacé (Ruling R1234).
+    BeforeAgent,
 }
 
 impl From<mementum_store::VersionReason> for VersionReason {
@@ -804,6 +807,7 @@ impl From<mementum_store::VersionReason> for VersionReason {
             mementum_store::VersionReason::Periodic => VersionReason::Periodic,
             mementum_store::VersionReason::Closing => VersionReason::Closing,
             mementum_store::VersionReason::BeforeRestore => VersionReason::BeforeRestore,
+            mementum_store::VersionReason::BeforeAgent => VersionReason::BeforeAgent,
         }
     }
 }
@@ -1162,11 +1166,16 @@ mod tests {
         assert_eq!(RootSection::default(), RootSection::Private);
     }
 
-    /// La raison d'une version s'écrit comme le store la garde, pour chacune des trois.
+    /// La raison d'une version s'écrit comme le store la garde, pour chacune des quatre.
     #[test]
     fn version_reason_is_written_like_the_store_keeps_it() {
         use mementum_store::VersionReason as Kept;
-        for reason in [Kept::Periodic, Kept::Closing, Kept::BeforeRestore] {
+        for reason in [
+            Kept::Periodic,
+            Kept::Closing,
+            Kept::BeforeRestore,
+            Kept::BeforeAgent,
+        ] {
             let written = serde_json::to_value(VersionReason::from(reason)).unwrap();
             assert_eq!(written, reason.as_str());
         }

@@ -697,6 +697,12 @@ impl From<StoreError> for ApiError {
                 "ce message, ou ce fil, n'est pas le tien : rien n'a été modifié",
             ),
             StoreError::CommentLimit(limit) => ApiError::comment_limit(limit),
+            // Comme `Stale` : la route des jetons le traduit elle-même (`409 token_limit`, Task
+            // S6) ; arrivé ici, elle a oublié de le faire.
+            StoreError::TokenLimit => ApiError::internal(
+                &"StoreError::TokenLimit est arrivé à la conversion générique : la route qui crée \
+                  un jeton devait le traduire elle-même (`409 token_limit`)",
+            ),
             // Un refus de migration n'arrive qu'à l'ouverture de la base, jamais à une route.
             e @ (StoreError::Migration(_) | StoreError::Sqlx(_)) => ApiError::internal(&e),
         }
@@ -1085,6 +1091,20 @@ mod tests {
         );
         // Rien de la cause dans la réponse.
         assert!(!error.body.message.contains("Stale"));
+    }
+
+    /// `TokenLimit` non plus (lot 5, Task S1) : seule la route qui crée un jeton l'attend, et le
+    /// dit elle-même (`409 token_limit`, Task S6). Arrivé ici, une route l'a oublié.
+    #[test]
+    fn token_limit_has_no_generic_translation() {
+        let (error, journal) = logged(|| ApiError::from(StoreError::TokenLimit));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.body.error, ErrorCode::Internal);
+        assert_eq!(error.body.message, "erreur interne du serveur");
+        assert!(
+            journal.contains("ERROR") && journal.contains("StoreError::TokenLimit"),
+            "une ligne `error` qui nomme la conversion oubliée : {journal}"
+        );
     }
 
     /// Les autres refus du store gardent leur traduction.

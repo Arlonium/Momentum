@@ -166,6 +166,54 @@ pub struct Backlink {
     pub excerpt: String,
 }
 
+/// La date du contenu d'une page (`page_edits`, lot 5, Ruling R1246) : celle de l'écriture que
+/// l'indexeur a indexée en dernier ([`Store::page_edits_of`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PageEdit {
+    pub node_id: Uuid,
+    /// Millisecondes Unix : la date de l'entrée du journal à `edited_seq` ; le journal compacté
+    /// jusque-là, celle de l'instantané ; une page sans document, celle de sa création.
+    pub edited_at: i64,
+    /// Le compte de cette entrée du journal ; `None` : le serveur, une écriture d'avant les
+    /// comptes, ou une date lue ailleurs qu'au journal (l'auteur est alors perdu).
+    pub edited_by: Option<Uuid>,
+    /// Le `seq` de la page à cette date : la ligne ne change que s'il avance.
+    pub edited_seq: i64,
+}
+
+/// Date la page `?1` au `seq` `?2` qu'on indexe (Ruling R1246), dans la transaction de l'indexeur :
+/// la date et le compte de l'entrée du journal à ce `seq` ; sans elle (le journal a été compacté
+/// jusque-là), la date de l'instantané et un auteur vide ; sans instantané (une page sans
+/// document), la date de sa création. La ligne ne change que si `?2` dépasse le `seq` qu'elle porte
+/// (`edited_seq`) : une reprojection, ou une indexation refaite au même `seq`, ne date jamais une
+/// page à « maintenant », ni d'après une entrée relue autrement. Une page qui n'existe pas n'a pas
+/// de ligne.
+///
+/// L'instruction est un `INSERT … SELECT` à `ON CONFLICT` : SQLite demande alors un `WHERE` au
+/// `SELECT` (sans lui, `ON` se lirait comme la jointure), qu'il a.
+const STAMP_PAGE_EDIT: &str = "INSERT INTO page_edits (node_id, edited_at, edited_by, edited_seq) \
+     SELECT n.id, COALESCE(u.created_at, s.created_at, n.created_at), u.actor_id, ?2 \
+     FROM nodes n \
+     LEFT JOIN doc_updates u ON u.node_id = n.id AND u.seq = ?2 \
+     LEFT JOIN doc_snapshots s ON s.node_id = n.id \
+     WHERE n.id = ?1 \
+     ON CONFLICT (node_id) DO UPDATE SET edited_at = excluded.edited_at, \
+         edited_by = excluded.edited_by, edited_seq = excluded.edited_seq \
+     WHERE excluded.edited_seq > page_edits.edited_seq";
+
+async fn stamp_page_edit(
+    tx: &mut Transaction<'_, Sqlite>,
+    node_id: &str,
+    seq: i64,
+) -> Result<(), StoreError> {
+    sqlx::query(STAMP_PAGE_EDIT)
+        .bind(node_id)
+        .bind(seq)
+        .execute(&mut **tx)
+        .await?;
+    Ok(())
+}
+
 /// Où en est la projection d'une page (`search_state`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct PageState {
@@ -498,7 +546,7 @@ fn malformed(why: &str) -> StoreError {
 
 /// Les identifiants d'une liste, en un seul paramètre : un tableau JSON. Ce sont des UUID, sans
 /// rien à échapper.
-fn json_ids(ids: &[Uuid]) -> String {
+pub(crate) fn json_ids(ids: &[Uuid]) -> String {
     format!(
         "[{}]",
         ids.iter()
@@ -655,7 +703,8 @@ impl Store {
     /// n'est pas touché. La page est notée à `seq` (et un échec de lecture oublié) dans la
     /// dernière transaction : au-delà de [`MAX_INDEX_TX_BYTES`] de changements, la page s'écrit en
     /// plusieurs, et entre deux, `blocks_index` et `page_links` portent une partie de la page
-    /// (limite L-i du plan).
+    /// (limite L-i du plan). Dans cette dernière transaction aussi, la page est datée de
+    /// l'écriture à ce `seq`, si le `seq` avance ([`PageEdit`], Ruling R1246).
     ///
     /// Rien n'est écrit, et aucun tour n'est pris, si la page reflète déjà un `seq` plus récent
     /// (une lecture plus ancienne n'écrase jamais l'index), ou si rien n'a changé ni dans les
@@ -777,6 +826,8 @@ impl Store {
                     put_outbox(&mut tx, &id, &[""]).await?;
                 }
                 write_state(&mut tx, &id, done).await?;
+                // La date du contenu, avec le `seq` noté (Ruling R1246).
+                stamp_page_edit(&mut tx, &id, seq).await?;
             }
             tx.commit().await?;
             changed += slice.len();
@@ -1102,6 +1153,32 @@ impl Store {
             return Ok(None);
         }
         Ok(pages.into_iter().max())
+    }
+
+    /// La date du contenu de ces pages (Ruling R1246), rangée par identifiant ; une page sans
+    /// date (pas encore indexée depuis sa création, un dossier, une page inconnue) n'y est pas.
+    /// Lue sans tour.
+    pub async fn page_edits_of(&self, nodes: &[Uuid]) -> Result<Vec<PageEdit>, StoreError> {
+        sqlx::query(
+            "SELECT node_id, edited_at, edited_by, edited_seq FROM page_edits \
+             WHERE node_id IN (SELECT value FROM json_each(?)) ORDER BY node_id",
+        )
+        .bind(json_ids(nodes))
+        .fetch_all(&self.pool)
+        .await?
+        .iter()
+        .map(|r| {
+            Ok(PageEdit {
+                node_id: parse_uuid(&r.get::<String, _>(0))?,
+                edited_at: r.get(1),
+                edited_by: r
+                    .get::<Option<String>, _>(2)
+                    .map(|id| parse_uuid(&id))
+                    .transpose()?,
+                edited_seq: r.get(3),
+            })
+        })
+        .collect()
     }
 
     /// Le titre que l'index plein texte porte pour la page, sur chacune de ses entrées (Ruling

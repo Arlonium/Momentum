@@ -1,7 +1,8 @@
-//! Migrations `0002` à `0005` : une base du lot 1 garde ses pages, une base du lot 2 gagne les
+//! Migrations `0002` à `0006` : une base du lot 1 garde ses pages, une base du lot 2 gagne les
 //! tables de la collaboration sans rien perdre, une base de la partie A du lot 3 gagne celles des
 //! fichiers et des favoris sans rien perdre, une base du lot 3 gagne celles de l'index de
-//! recherche, vides, sans rien perdre, une base neuve n'a pas d'espace.
+//! recherche, vides, sans rien perdre, une base du lot 4 gagne celles des agents et la date de
+//! ses pages, et garde toutes ses versions, une base neuve n'a pas d'espace.
 
 mod common;
 
@@ -9,9 +10,10 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
-use common::{LOT2, LOT3, LOT3A, database_with, int, side_pool, texts};
+use common::tmp::TestDir;
+use common::{LOT2, LOT3, LOT3A, LOT4, database_with, int, side_pool, texts};
 use mementum_acl::{Grant, Level, Subject};
-use mementum_store::{NodeKind, Store, StoreError, backup_path};
+use mementum_store::{NodeKind, PageEdit, Store, StoreError, VersionReason, backup_path};
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 use sqlx::{Row, SqlitePool};
@@ -96,9 +98,11 @@ fn set(names: &[&str]) -> BTreeSet<String> {
 }
 
 /// Les tables d'une base à jour, par nom.
-const ALL_TABLES: [&str; 22] = [
+const ALL_TABLES: [&str; 26] = [
     "_sqlx_migrations",
     "acl",
+    "api_token_pages",
+    "api_tokens",
     "attachments",
     "blocks_index",
     "comment_reactions",
@@ -113,11 +117,13 @@ const ALL_TABLES: [&str; 22] = [
     "invitations",
     "members",
     "nodes",
+    "page_edits",
     "page_links",
     "search_outbox",
     "search_state",
     "sessions",
     "spaces",
+    "token_calls",
     "users",
 ];
 
@@ -195,6 +201,28 @@ async fn columns(db: &Path, table: &str) -> Vec<String> {
     .into_iter()
     .flatten()
     .collect()
+}
+
+/// Les colonnes que `table` a après la migration `0006`, quand elle avait `before` dans une base
+/// d'un lot plus ancien : `doc_updates` gagne `token_id`, en dernier (`ALTER TABLE`, Ruling
+/// R1234) ;
+/// `doc_versions`, rebâtie pour admettre `before_agent`, gagne `agent_authors` juste avant
+/// `created_at`, si bien que `state_blob` reste la dernière (Ruling R191). Les autres ne changent
+/// pas.
+fn columns_after_0006(table: &str, before: &[String]) -> Vec<String> {
+    let mut after = before.to_vec();
+    match table {
+        "doc_updates" => after.push("token_id".to_string()),
+        "doc_versions" => {
+            let at = after
+                .iter()
+                .position(|c| c == "created_at")
+                .expect("`doc_versions` a une colonne `created_at`");
+            after.insert(at, "agent_authors".to_string());
+        }
+        _ => {}
+    }
+    after
 }
 
 /// Les lignes de `table`, chacune écrite par `quote()` de SQLite sur ces colonnes (octets d'un
@@ -295,9 +323,9 @@ async fn migration_keeps_lot1_pages() {
     pool.close().await;
 
     // Le code d'aujourd'hui ouvre cette base : `0001` est reconnue (même somme de contrôle),
-    // `0002` à `0005` sont appliquées.
+    // `0002` à `0006` sont appliquées.
     let store = Store::open(&db).await.unwrap();
-    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5"]);
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5", "6"]);
 
     // Le coffre est devenu un espace de même id, sans membre.
     assert_eq!(int(&db, "SELECT COUNT(*) FROM spaces").await, 1);
@@ -409,6 +437,8 @@ async fn migration_keeps_lot1_pages() {
     assert_eq!(
         indexes,
         [
+            "api_token_pages_by_node",
+            "api_tokens_by_user",
             "attachments_by_file",
             "attachments_by_node",
             "comment_threads_by_node",
@@ -420,11 +450,14 @@ async fn migration_keeps_lot1_pages() {
             "nodes_parent_key",
             "page_links_by_target",
             "search_outbox_taken",
-            "search_state_never"
+            "search_state_never",
+            "token_calls_by_token"
         ]
     );
     for (index, columns) in [
-        ("attachments_by_file", &["file_hash"][..]),
+        ("api_token_pages_by_node", &["node_id"][..]),
+        ("api_tokens_by_user", &["user_id", "created_at"]),
+        ("attachments_by_file", &["file_hash"]),
         ("attachments_by_node", &["node_id", "created_at"]),
         ("comment_threads_by_node", &["node_id", "created_at"]),
         (
@@ -442,6 +475,7 @@ async fn migration_keeps_lot1_pages() {
         ),
         ("search_outbox_taken", &["token"]),
         ("search_state_never", &["node_id"]),
+        ("token_calls_by_token", &["token_id", "outcome", "id"]),
     ] {
         let found: Vec<String> = texts(
             &db,
@@ -772,7 +806,7 @@ async fn lot2_database_gains_the_collaboration_tables() {
     }
 
     let store = Store::open(&db).await.unwrap();
-    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5"]);
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5", "6"]);
 
     // Rien n'a changé dans ce qui était là, `_sqlx_migrations` mise à part (elle gagne les lignes
     // de `0003` à `0005`) ; `spaces` gagne une colonne, et ses autres colonnes n'ont pas bougé.
@@ -784,7 +818,11 @@ async fn lot2_database_gains_the_collaboration_tables() {
         if table == "spaces" {
             assert_eq!(columns_after.pop().as_deref(), Some("lsn"));
         }
-        assert_eq!(&columns_after, columns_before, "{table}");
+        assert_eq!(
+            columns_after,
+            columns_after_0006(table, columns_before),
+            "{table}"
+        );
         assert_eq!(
             &rows(&db, table, columns_before).await,
             rows_before,
@@ -853,7 +891,7 @@ async fn lot2_database_gains_the_collaboration_tables() {
     // Une seconde ouverture ne migre plus rien.
     let store = Store::open(&db).await.unwrap();
     assert_eq!(store.backup(), None);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 5);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 6);
     store.close().await;
 }
 
@@ -942,7 +980,7 @@ async fn lot3a_database_gains_files_and_favorites() {
     }
 
     let store = Store::open(&db).await.unwrap();
-    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5"]);
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5", "6"]);
     // La copie d'avant migration : la base de la partie A, sous le nom de `0004`.
     let backup = store.backup().expect("une copie avant la migration");
     assert_eq!(backup.path, backup_path(&db, 4));
@@ -955,7 +993,11 @@ async fn lot3a_database_gains_files_and_favorites() {
         if table == "_sqlx_migrations" {
             continue;
         }
-        assert_eq!(&columns(&db, table).await, columns_before, "{table}");
+        assert_eq!(
+            columns(&db, table).await,
+            columns_after_0006(table, columns_before),
+            "{table}"
+        );
         assert_eq!(
             &rows(&db, table, columns_before).await,
             rows_before,
@@ -1023,7 +1065,7 @@ async fn lot3a_database_gains_files_and_favorites() {
     // Une seconde ouverture ne migre plus rien.
     let store = Store::open(&db).await.unwrap();
     assert_eq!(store.backup(), None);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 5);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 6);
     store.close().await;
 }
 
@@ -1059,7 +1101,7 @@ async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
     }
 
     let store = Store::open(&db).await.unwrap();
-    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5"]);
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5", "6"]);
     let backup = store.backup().expect("une copie avant la migration");
     assert_eq!(backup.path, dir.path().join("mementum.db.avant-0005.bak"));
     assert!(backup.path.is_file());
@@ -1068,7 +1110,11 @@ async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
         if table == "_sqlx_migrations" {
             continue;
         }
-        assert_eq!(&columns(&db, table).await, columns_before, "{table}");
+        assert_eq!(
+            columns(&db, table).await,
+            columns_after_0006(table, columns_before),
+            "{table}"
+        );
         assert_eq!(
             &rows(&db, table, columns_before).await,
             rows_before,
@@ -1141,7 +1187,406 @@ async fn a_lot_3_database_migrates_and_starts_with_nothing_indexed() {
 
     let store = Store::open(&db).await.unwrap();
     assert_eq!(store.backup(), None);
-    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 5);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 6);
+    store.close().await;
+}
+
+/// Les tables des agents, que la migration `0006` crée (lot 5, Task S1) : vides, sauf
+/// `page_edits`, où chaque page existante reçoit sa date (Ruling R1246).
+const AGENT_TABLES: [&str; 4] = ["api_tokens", "api_token_pages", "token_calls", "page_edits"];
+
+/// Ce que porte la base : chaque table, avec ses colonnes et ses lignes ([`rows`]).
+async fn contents(db: &Path) -> Vec<(String, Vec<String>, Vec<String>)> {
+    let mut all = Vec::new();
+    for table in table_names(db).await {
+        let columns = columns(db, &table).await;
+        let rows = rows(db, &table, &columns).await;
+        all.push((table, columns, rows));
+    }
+    all
+}
+
+/// Rien de ce que portait `before` n'a changé, `_sqlx_migrations` mise à part : ni une valeur, ni
+/// une colonne, hors de celles que `0006` ajoute ([`columns_after_0006`]).
+async fn kept_through_0006(db: &Path, before: &[(String, Vec<String>, Vec<String>)]) {
+    for (table, columns_before, rows_before) in before {
+        if table == "_sqlx_migrations" {
+            continue;
+        }
+        assert_eq!(
+            columns(db, table).await,
+            columns_after_0006(table, columns_before),
+            "{table}"
+        );
+        assert_eq!(
+            &rows(db, table, columns_before).await,
+            rows_before,
+            "{table}"
+        );
+    }
+}
+
+/// L'identifiant de la page de ce titre, ou du compte de cette adresse.
+async fn id_of(db: &Path, sql: &str) -> Uuid {
+    texts(db, sql).await[0].as_deref().unwrap().parse().unwrap()
+}
+
+/// Ce qu'une base du lot 4 porte en plus d'une base de la partie A du lot 3, écrit en SQL comme le
+/// code du lot 4 l'écrit : un favori, la projection d'une page et l'état d'index de chacune ; pour
+/// la date des pages (Ruling R1246), deux mises à jour de la page jetée (la dernière sans compte),
+/// un instantané seul pour la page à soi, et une page sans document ; et deux versions de plus de
+/// la page d'accueil, de chaque raison qui manquait (`periodic`, `closing`), dont une restaurée
+/// depuis (`covers_seq` au-delà de son `seq`). Rend l'identifiant de la page sans document.
+async fn lot4_data(pool: &SqlitePool, own: Uuid) -> Uuid {
+    let id = async |sql: &'static str| -> String {
+        sqlx::query_scalar(sql).fetch_one(pool).await.unwrap()
+    };
+    let olga = id("SELECT id FROM users WHERE email = 'olga@exemple.test'").await;
+    let bob = id("SELECT id FROM users WHERE email = 'bob@exemple.test'").await;
+    let home = id("SELECT id FROM nodes WHERE title = 'Accueil'").await;
+    let binned = id("SELECT id FROM nodes WHERE title = 'Jetée'").await;
+    let mine = id("SELECT id FROM nodes WHERE title = 'À moi'").await;
+    let empty = Uuid::now_v7();
+    exec(
+        pool,
+        "INSERT INTO nodes (id, space_id, parent_id, kind, title, position, created_by, \
+                            created_at, updated_by, updated_at, trashed_at, trashed_by) \
+         VALUES (?1, ?2, NULL, 'page', 'Vide', 'a1', ?3, 2600, ?3, 2600, NULL, NULL)",
+        &[&empty.to_string(), &own.to_string(), &olga],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO favorites (user_id, node_id, created_at) VALUES (?1, ?2, 4300)",
+        &[&olga, &home],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO blocks_index (node_id, block_id, type, text, hash) \
+         VALUES (?1, 'b1', 'paragraph', 'Bonjour', x'01')",
+        &[&home],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO search_state (node_id, indexed_seq) \
+         VALUES (?1, 3), (?2, -1), (?3, -1), (?4, -1)",
+        &[&home, &binned, &mine, &empty.to_string()],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO doc_updates (node_id, seq, update_blob, created_at, actor_id) \
+         VALUES (?1, 1, x'0a', 2010, ?2), (?1, 2, x'0b', 2020, NULL)",
+        &[&binned, &olga],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO doc_snapshots (node_id, seq, state_blob, created_at) \
+         VALUES (?1, 5, x'05', 2400)",
+        &[&mine],
+    )
+    .await;
+    exec(
+        pool,
+        "INSERT INTO doc_versions \
+         (id, node_id, seq, covers_seq, reason, authors, created_at, state_blob) \
+         VALUES (?1, ?3, 1, 1, 'periodic', json_array(?4, ?5), 4400, x'deadbeef00'), \
+                (?2, ?3, 2, 7, 'closing', '[]', 4500, x'ff')",
+        &[
+            &Uuid::now_v7().to_string(),
+            &Uuid::now_v7().to_string(),
+            &home,
+            &bob,
+            &olga,
+        ],
+    )
+    .await;
+    empty
+}
+
+/// Une base du lot 4.
+async fn lot4_database(db: &Path) -> Uuid {
+    let pool = database_with(db, LOT4).await;
+    let (team, own) = lot2_data(&pool).await;
+    lot3a_data(&pool, team).await;
+    let empty = lot4_data(&pool, own).await;
+    pool.close().await;
+    empty
+}
+
+/// La migration `0006` sur une base du lot 4 (lot 5, Task S1) : tout ce qui y était reste à
+/// l'identique, valeur pour valeur (`doc_updates` gagne `token_id`, vide) ; les quatre tables des
+/// agents existent, et leurs clés étrangères visent ce qu'il faut ; chaque page, et elle seule (pas
+/// un dossier), reçoit sa date (Ruling R1246) : celle de la dernière entrée de son journal, avec
+/// son compte, sinon celle de son instantané, sinon celle de sa création, sans compte, et le `seq`
+/// où en est la page ; la copie d'avant migration porte le nom de `0006` ; une seconde ouverture
+/// ne migre plus rien.
+#[tokio::test]
+async fn a_database_of_lot_4_gets_its_page_edits() {
+    let dir = TestDir::new();
+    let db = dir.path().join("mementum.db");
+    let empty = lot4_database(&db).await;
+    let before = contents(&db).await;
+
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(applied(&db).await, ["1", "2", "3", "4", "5", "6"]);
+    let backup = store.backup().expect("une copie avant la migration");
+    assert_eq!(backup.path, backup_path(&db, 6));
+    assert_eq!(backup.path, dir.path().join("mementum.db.avant-0006.bak"));
+    assert!(backup.path.is_file());
+    kept_through_0006(&db, &before).await;
+    assert_eq!(
+        int(
+            &db,
+            "SELECT COUNT(*) FROM doc_updates WHERE token_id IS NOT NULL"
+        )
+        .await,
+        0
+    );
+
+    assert_eq!(table_names(&db).await, ALL_TABLES);
+    for table in AGENT_TABLES {
+        assert!(!before.iter().any(|(t, _, _)| t == table), "{table}");
+    }
+    for table in ["api_tokens", "api_token_pages", "token_calls"] {
+        assert_eq!(
+            int(&db, &format!("SELECT COUNT(*) FROM {table}")).await,
+            0,
+            "{table}"
+        );
+    }
+
+    // La date de chaque page ; le dossier n'en a pas.
+    let bob = id_of(&db, "SELECT id FROM users WHERE email = 'bob@exemple.test'").await;
+    let home = id_of(&db, "SELECT id FROM nodes WHERE title = 'Accueil'").await;
+    let binned = id_of(&db, "SELECT id FROM nodes WHERE title = 'Jetée'").await;
+    let mine = id_of(&db, "SELECT id FROM nodes WHERE title = 'À moi'").await;
+    let folder = id_of(&db, "SELECT id FROM nodes WHERE kind = 'folder'").await;
+    let mut expected = vec![
+        // La dernière entrée du journal (l'instantané, au `seq` 2, est plus ancien), son compte.
+        PageEdit {
+            node_id: home,
+            edited_at: 2300,
+            edited_by: Some(bob),
+            edited_seq: 3,
+        },
+        // La dernière des deux entrées, sans compte, et pas la première.
+        PageEdit {
+            node_id: binned,
+            edited_at: 2020,
+            edited_by: None,
+            edited_seq: 2,
+        },
+        // Un instantané seul : sa date, sans compte.
+        PageEdit {
+            node_id: mine,
+            edited_at: 2400,
+            edited_by: None,
+            edited_seq: 5,
+        },
+        // Ni journal ni instantané : la création de la page, sans compte, au `seq` 0.
+        PageEdit {
+            node_id: empty,
+            edited_at: 2600,
+            edited_by: None,
+            edited_seq: 0,
+        },
+    ];
+    expected.sort_by_key(|edit| edit.node_id);
+    let asked = [home, binned, mine, empty, folder, Uuid::now_v7()];
+    assert_eq!(store.page_edits_of(&asked).await.unwrap(), expected);
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM page_edits").await,
+        4,
+        "une ligne par page, aucune pour le dossier"
+    );
+
+    // Les clés étrangères des tables neuves.
+    assert_eq!(
+        foreign_tables(&db, "api_tokens").await,
+        set(&["spaces", "users"])
+    );
+    assert_eq!(
+        foreign_tables(&db, "api_token_pages").await,
+        set(&["api_tokens", "nodes"])
+    );
+    assert_eq!(
+        foreign_tables(&db, "token_calls").await,
+        set(&["api_tokens"])
+    );
+    assert_eq!(foreign_tables(&db, "page_edits").await, set(&["nodes"]));
+    for faulty in [
+        "INSERT INTO api_tokens (id, user_id, name, hash, hint, level, scope, created_at) \
+         VALUES ('t', 'compte-inconnu', 'x', x'00', 'abcd', 'read', 'all', 1)",
+        "INSERT INTO api_tokens \
+             (id, user_id, name, hash, hint, level, scope, space_id, created_at) \
+         SELECT 't', id, 'x', x'00', 'abcd', 'read', 'space', 'espace-inconnu', 1 \
+         FROM users LIMIT 1",
+        "INSERT INTO api_token_pages (token_id, node_id) \
+         SELECT 'jeton-inconnu', id FROM nodes LIMIT 1",
+        "INSERT INTO token_calls (token_id, at, surface, tool, outcome) \
+         VALUES ('jeton-inconnu', 1, 'mcp', 'fetch', 'ok')",
+        "INSERT INTO page_edits (node_id, edited_at, edited_seq) VALUES ('nœud-inconnu', 1, 0)",
+    ] {
+        assert!(refused_by_foreign_key(&db, faulty).await, "{faulty}");
+    }
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0
+    );
+    store.close().await;
+
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(store.backup(), None);
+    assert_eq!(int(&db, "SELECT COUNT(*) FROM _sqlx_migrations").await, 6);
+    store.close().await;
+}
+
+/// La migration `0006` rebâtit `doc_versions` pour admettre `before_agent` (Ruling R1234) : une
+/// base du lot 4 qui porte des versions des trois raisons d'avant les garde toutes, octet pour
+/// octet (`state_blob`, `covers_seq`, auteurs, dates), avec `agent_authors = '[]'` ; la table
+/// rebâtie a son index, sa clé étrangère et l'état en dernière colonne (Ruling R191) ; son
+/// `CHECK` admet `before_agent` et refuse toute autre raison ; rien de la table de passage ne
+/// reste.
+#[tokio::test]
+async fn a_database_of_lot_4_keeps_every_version() {
+    let dir = TestDir::new();
+    let db = dir.path().join("mementum.db");
+    lot4_database(&db).await;
+    let old_columns = columns(&db, "doc_versions").await;
+    assert_eq!(
+        old_columns,
+        [
+            "id",
+            "node_id",
+            "seq",
+            "covers_seq",
+            "reason",
+            "authors",
+            "created_at",
+            "state_blob"
+        ]
+    );
+    let versions = rows(&db, "doc_versions", &old_columns).await;
+    assert_eq!(versions.len(), 3);
+    assert_eq!(
+        texts(&db, "SELECT reason FROM doc_versions ORDER BY seq").await,
+        [
+            Some("periodic".to_string()),
+            Some("closing".to_string()),
+            Some("before_restore".to_string()),
+        ]
+    );
+
+    let store = Store::open(&db).await.unwrap();
+    assert_eq!(
+        columns(&db, "doc_versions").await,
+        [
+            "id",
+            "node_id",
+            "seq",
+            "covers_seq",
+            "reason",
+            "authors",
+            "agent_authors",
+            "created_at",
+            "state_blob"
+        ]
+    );
+    assert_eq!(rows(&db, "doc_versions", &old_columns).await, versions);
+    assert_eq!(
+        texts(&db, "SELECT agent_authors FROM doc_versions").await,
+        vec![Some("[]".to_string()); 3]
+    );
+
+    // Le store les relit : leur raison, leur `seq`, leur état, sans auteur par jeton.
+    let home = id_of(&db, "SELECT id FROM nodes WHERE title = 'Accueil'").await;
+    let listed = store.list_versions(home).await.unwrap();
+    let read: Vec<_> = listed.iter().map(|v| (v.seq, v.reason)).collect();
+    assert_eq!(
+        read,
+        [
+            (3, VersionReason::BeforeRestore),
+            (2, VersionReason::Closing),
+            (1, VersionReason::Periodic),
+        ]
+    );
+    assert!(listed.iter().all(|v| v.agent_authors.is_empty()));
+    for (version, state) in listed.iter().zip([
+        &[0x00, 0xff, 0x01, 0xfe, 0x80, 0x0a, 0x0d][..],
+        &[0xff],
+        &[0xde, 0xad, 0xbe, 0xef, 0x00],
+    ]) {
+        assert_eq!(
+            store
+                .get_version(home, version.id)
+                .await
+                .unwrap()
+                .as_deref(),
+            Some(state)
+        );
+    }
+
+    // L'index, la clé étrangère, rien de la table de passage.
+    assert_eq!(
+        texts(
+            &db,
+            "SELECT name FROM pragma_index_info('doc_versions_by_node') ORDER BY seqno"
+        )
+        .await,
+        [
+            Some("node_id".to_string()),
+            Some("seq".to_string()),
+            Some("created_at".to_string())
+        ]
+    );
+    assert_eq!(foreign_tables(&db, "doc_versions").await, set(&["nodes"]));
+    assert_eq!(
+        int(
+            &db,
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE name LIKE 'doc\\_versions\\_new%' ESCAPE '\\' OR sql LIKE '%doc_versions_new%'"
+        )
+        .await,
+        0
+    );
+    assert!(
+        refused_by_foreign_key(
+            &db,
+            "INSERT INTO doc_versions \
+             (id, node_id, seq, covers_seq, reason, authors, created_at, state_blob) \
+             VALUES ('v', 'nœud-inconnu', 1, 1, 'periodic', '[]', 1, x'00')"
+        )
+        .await
+    );
+
+    // Le `CHECK` admet `before_agent`, et refuse une raison inconnue.
+    let pool = side_pool(&db).await;
+    let insert = |reason: &'static str| {
+        sqlx::query(
+            "INSERT INTO doc_versions \
+             (id, node_id, seq, covers_seq, reason, authors, created_at, state_blob) \
+             VALUES (?1, ?2, 9, 9, ?3, '[]', 9, x'00')",
+        )
+        .bind(Uuid::now_v7().to_string())
+        .bind(home.to_string())
+        .bind(reason)
+        .execute(&pool)
+    };
+    insert("before_agent").await.unwrap();
+    let refused = insert("autre").await.unwrap_err();
+    assert!(
+        refused.to_string().contains("CHECK constraint failed"),
+        "{refused}"
+    );
+    pool.close().await;
+    assert_eq!(
+        int(&db, "SELECT COUNT(*) FROM pragma_foreign_key_check").await,
+        0
+    );
     store.close().await;
 }
 

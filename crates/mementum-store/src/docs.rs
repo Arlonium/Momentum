@@ -24,26 +24,39 @@ macro_rules! last_seq {
     };
 }
 
+/// Qui écrit une entrée du journal : le compte (`None` : inconnu, ou le serveur), et le jeton
+/// d'API par lequel il écrit (`None` : par une session, une connexion de synchro, ou le serveur ;
+/// Ruling R1234). Le nom `Author` est pris par les commentaires.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Writer {
+    pub account: Option<Uuid>,
+    pub token: Option<Uuid>,
+}
+
 /// Ajoute une mise à jour au journal de la page et rend le `seq` attribué : le `seq` où en est
 /// la page, plus un, en un seul `INSERT … SELECT`. Le `seq` repart donc de l'instantané quand
-/// une compaction a vidé le journal. `NotFound` si la page ou l'acteur n'existe pas.
+/// une compaction a vidé le journal. `token` : le jeton par lequel l'acteur écrit, sans clé
+/// étrangère (un jeton purgé laisse son nom au journal, Ruling R1234). `NotFound` si la page ou
+/// l'acteur n'existe pas.
 pub(crate) async fn append<'e>(
     db: impl SqliteExecutor<'e>,
     node_id: &str,
     update: &[u8],
     actor: Option<&str>,
+    token: Option<&str>,
     now: i64,
 ) -> Result<i64, StoreError> {
     let row = sqlx::query(concat!(
-        "INSERT INTO doc_updates (node_id, seq, update_blob, created_at, actor_id) \
+        "INSERT INTO doc_updates (node_id, seq, update_blob, created_at, actor_id, token_id) \
          SELECT ?1, ",
         last_seq!(),
-        " + 1, ?2, ?3, ?4 RETURNING seq"
+        " + 1, ?2, ?3, ?4, ?5 RETURNING seq"
     ))
     .bind(node_id)
     .bind(update)
     .bind(now)
     .bind(actor)
+    .bind(token)
     .fetch_one(db)
     .await
     .map_err(StoreError::from_fk)?;
@@ -62,9 +75,26 @@ impl Store {
         updates: &[&[u8]],
         actor: Option<Uuid>,
     ) -> Result<i64, StoreError> {
+        let writer = Writer {
+            account: actor,
+            token: None,
+        };
+        self.append_updates_by(node_id, updates, &writer).await
+    }
+
+    /// [`Store::append_updates`], au nom de `writer` : son compte, et le jeton par lequel il
+    /// écrit, que chaque entrée garde (`doc_updates.token_id`, Ruling R1234).
+    pub async fn append_updates_by(
+        &self,
+        node_id: Uuid,
+        updates: &[&[u8]],
+        writer: &Writer,
+    ) -> Result<i64, StoreError> {
         let id = node_id.to_string();
-        let actor = actor.map(|a| a.to_string());
+        let actor = writer.account.map(|a| a.to_string());
         let actor = actor.as_deref();
+        let token = writer.token.map(|t| t.to_string());
+        let token = token.as_deref();
         let now = now_ms();
         match updates {
             [] => {
@@ -88,7 +118,7 @@ impl Store {
             // son acteur, qui écrit chaque frappe.
             [update] => {
                 let mut db = self.write_conn_in(Lane::Page(node_id)).await?;
-                append(&mut *db, &id, update, actor, now).await
+                append(&mut *db, &id, update, actor, token, now).await
             }
             _ => {
                 // IMMEDIATE : on prend le verrou d'écriture d'emblée, sans montée de verrou qui
@@ -96,7 +126,7 @@ impl Store {
                 let mut tx = self.write_in(Lane::Page(node_id)).await?;
                 let mut seq = 0;
                 for update in updates {
-                    seq = append(&mut **tx, &id, update, actor, now).await?;
+                    seq = append(&mut **tx, &id, update, actor, token, now).await?;
                 }
                 tx.commit().await?;
                 Ok(seq)

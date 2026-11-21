@@ -3,4 +3,4 @@
 /**
  * Pourquoi une version d'une page a été gardée (Ruling R135).
  */
-export type VersionReason = "periodic" | "closing" | "before_restore";
+export type VersionReason = "periodic" | "closing" | "before_restore" | "before_agent";
