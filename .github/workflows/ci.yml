@@ -53,9 +53,15 @@ jobs:
       # récrite en boucle (150 ms), le délai avant qu'un mot tapé soit trouvable (5 s), et la
       # recherche par la route entière sur 100 000 blocs (100 ms). Le démarrage et la mémoire
       # avec un index sont dans `mementum-cli`, que la ligne du dessus lance déjà.
+      # Lot 5 (Task X2, Ruling R1641) : `agent_budgets`, la frappe d'une personne pendant qu'un
+      # agent écrit au débit de son jeton (édition en boucle d'une page de 10 000 blocs, avec ou
+      # sans version `before_agent`, créations de pages en boucle, trois jetons d'un compte au
+      # débit du compte), sous le même filtre (150 ms) ; et les recherches filtrées, dans la
+      # mesure de la recherche (100 ms). La mémoire au repos après 500 lectures d'agent est dans
+      # `mementum-cli`.
       - run: >-
-          cargo test --release -p mementum-server --test indexer --test search_measure --
-          --ignored --nocapture --test-threads=1
+          cargo test --release -p mementum-server --test indexer --test search_measure
+          --test agent_budgets -- --ignored --nocapture --test-threads=1
           keystroke_seen_under_150ms measure_search_on_10000_pages
 
   web:
