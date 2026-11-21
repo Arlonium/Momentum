@@ -13,11 +13,12 @@
 // pousser l'agent à agir avec les droits du jeton, et la portée est la seule barrière.
 //
 // Les pages d'une portée « pages » sont celles de l'arbre que montre la barre latérale, et rien
-// d'autre (`findPages`, R570) : aucune lecture du serveur ne part d'ici, et une page que le compte ne
-// voit pas, ou à la corbeille, n'est jamais proposée. Elles sont donc d'un seul espace, celui qui est
-// ouvert. Les listes de pages sont lues à l'ouverture et à chaque frappe de la recherche, jamais quand
-// l'arbre change ni quand on coche : rien n'y bouge sous le pointeur, une page décochée reste à sa
-// place.
+// d'autre (`outlinePages`, `findPages`, R570) : aucune lecture du serveur ne part d'ici, et une page
+// que le compte ne voit pas, ou à la corbeille, n'est jamais proposée. Elles sont donc d'un seul
+// espace, celui qui est ouvert. Sans recherche, elles viennent dans l'ordre de l'arbre, chaque
+// sous-page en retrait sous sa page (R1553). Les listes de pages sont lues à l'ouverture et à chaque
+// frappe de la recherche, jamais quand l'arbre change ni quand on coche : rien n'y bouge sous le
+// pointeur, une page décochée reste à sa place.
 //
 // **Le texte du jeton ne vit que dans cette fenêtre** (`created`) : il part avec elle. Une fois le jeton
 // montré, rien ne le fait partir sans demander (R1460) : Échap ouvre la confirmation ; Chrome, qui ferme
@@ -40,6 +41,7 @@ import {
   useId,
   useRef,
   useState,
+  type CSSProperties,
   type FormEvent,
   type ReactNode,
   type RefObject,
@@ -48,7 +50,7 @@ import { answerLost, ApiError, createToken, isSessionLost, lostAnswer } from "..
 import { holdHistory } from "../router";
 import { Field, FormError, messageOf } from "../session/forms";
 import { ROLE_LABELS } from "../share/levels";
-import { findPages, pageTitle, publishedSpace, type FoundPage } from "../space/pageDirectory";
+import { findPages, outlinePages, pageTitle, publishedSpace, type FoundPage } from "../space/pageDirectory";
 import { Confirm } from "../ui/Confirm";
 import { TokenCreated } from "./TokenCreated";
 
@@ -109,9 +111,14 @@ function treeOf(space: SpaceInfo | null): boolean {
   return space !== null && publishedSpace() === space.id;
 }
 
-/** Les pages proposées pour `query` : celles de l'arbre de `space` s'il est l'arbre publié. */
-function offer(space: SpaceInfo | null, query: string): FoundPage[] {
-  return treeOf(space) ? findPages(query, OFFERED) : [];
+/**
+ * Les pages proposées pour `query` : celles de l'arbre de `space` s'il est l'arbre publié. Sans
+ * recherche, dans l'ordre de l'arbre, chaque sous-page sous sa page avec sa profondeur (R1553) ; une
+ * recherche, à plat.
+ */
+function offer(space: SpaceInfo | null, query: string): (FoundPage & { depth?: number })[] {
+  if (!treeOf(space)) return [];
+  return query.trim() === "" ? outlinePages(OFFERED) : findPages(query, OFFERED);
 }
 
 /**
@@ -158,7 +165,7 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
   const [scope, setScope] = useState<TokenScope>(start?.scope ?? (current !== null ? "space" : "all"));
   const [spaceId, setSpaceId] = useState(start?.spaceId ?? current?.id ?? spaces[0]?.id ?? "");
   const [query, setQuery] = useState("");
-  const [offered, setOffered] = useState<FoundPage[]>(() => offer(current, ""));
+  const [offered, setOffered] = useState<(FoundPage & { depth?: number })[]>(() => offer(current, ""));
   const [chosen, setChosen] = useState<FoundPage[]>(start?.chosen ?? []);
   /** Les pages choisies hors de la liste proposée, figées comme elle : décochées, elles restent. */
   const [kept, setKept] = useState<FoundPage[]>(() =>
@@ -591,7 +598,8 @@ function Choice({ type, name, value, checked, disabled, onChange, label, hint, i
 type PickerProps = {
   searchRef: RefObject<HTMLInputElement | null>;
   query: string;
-  offered: readonly FoundPage[];
+  /** Avec leur profondeur dans l'arbre quand on ne cherche rien (R1553). */
+  offered: readonly (FoundPage & { depth?: number })[];
   kept: readonly FoundPage[];
   chosen: readonly FoundPage[];
   /** L'arbre publié est celui de l'espace de la portée. */
@@ -616,8 +624,9 @@ function PagePicker({ searchRef, query, offered, kept, chosen, treeRead, onSearc
     } else if (query.trim() === "") empty = "Cet espace n'a aucune page que tu vois.";
     else empty = "Aucune page de l'arbre ne porte ce titre.";
   }
-  const box = (found: FoundPage) => (
-    <li key={found.id}>
+  // Une sous-page en retrait de sa profondeur (`--depth`, comme une ligne de la barre latérale).
+  const box = (found: FoundPage, depth = 0) => (
+    <li key={found.id} style={depth > 0 ? ({ "--depth": depth } as CSSProperties) : undefined}>
       <label className="mm-token-check">
         <input
           type="checkbox"
@@ -650,7 +659,7 @@ function PagePicker({ searchRef, query, offered, kept, chosen, treeRead, onSearc
         <p className="mm-token-choice-hint">{empty}</p>
       ) : (
         <ul className="mm-token-offered" aria-label="Pages proposées">
-          {offered.map(box)}
+          {offered.map((found) => box(found, found.depth))}
         </ul>
       )}
       <p className="mm-token-choice-hint" role="status">
@@ -660,7 +669,7 @@ function PagePicker({ searchRef, query, offered, kept, chosen, treeRead, onSearc
       </p>
       {kept.length > 0 && (
         <ul className="mm-token-offered" aria-label="Autres pages choisies">
-          {kept.map(box)}
+          {kept.map((found) => box(found))}
         </ul>
       )}
     </div>

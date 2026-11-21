@@ -15,17 +15,22 @@ import { useEffect, useSyncExternalStore } from "react";
 /** Une page proposée par un sélecteur : son id et son titre, rien d'autre. */
 export type FoundPage = { id: string; title: string };
 
+/** Une page à sa place dans l'arbre ([`outlinePages`]) : sa profondeur, 0 à la racine de ce qu'on voit. */
+export type OutlinedPage = FoundPage & { depth: number };
+
 type Directory = {
   readonly spaceId: string | null;
   /** Les pages, dans l'ordre de l'arbre. */
   readonly pages: readonly FoundPage[];
+  /** La page parente visible de chaque page qui en a une, par id. */
+  readonly parents: ReadonlyMap<string, string>;
   /** Le titre de chaque page, par id. */
   readonly titles: ReadonlyMap<string, string>;
   /** Le titre de chaque page, sans accents ni casse, dans l'ordre de `pages`. */
   readonly folded: readonly string[];
 };
 
-const EMPTY: Directory = { spaceId: null, pages: [], titles: new Map(), folded: [] };
+const EMPTY: Directory = { spaceId: null, pages: [], parents: new Map(), titles: new Map(), folded: [] };
 
 let directory: Directory = EMPTY;
 const listeners = new Set<() => void>();
@@ -39,26 +44,73 @@ function samePages(a: readonly FoundPage[], b: readonly FoundPage[]): boolean {
   return a.length === b.length && a.every((page, i) => page.id === b[i].id && page.title === b[i].title);
 }
 
+function sameParents(a: ReadonlyMap<string, string>, b: ReadonlyMap<string, string>): boolean {
+  if (a.size !== b.size) return false;
+  for (const [id, parent] of a) if (b.get(id) !== parent) return false;
+  return true;
+}
+
+/** Les pages publiées dans l'ordre de l'arbre, bâties à la première demande ([`outlinePages`]). */
+let outline: readonly OutlinedPage[] | null = null;
+
+/**
+ * Les pages publiées dans l'ordre où l'arbre les montre (recette du lot 5, B3, R1553) : chaque page
+ * suivie de ses sous-pages, en profondeur, chacune avec sa profondeur. L'arbre que rend le serveur
+ * est rangé par page parente (`pages` aussi) : une sous-page y vient après les pages de la racine.
+ * Une page dont la page parente n'est pas publiée est à la racine de ce qu'on voit. Au plus `limit`.
+ */
+export function outlinePages(limit: number): OutlinedPage[] {
+  if (outline === null) {
+    const { pages, parents } = directory;
+    const children = new Map<string | null, FoundPage[]>();
+    const known = new Set(pages.map((page) => page.id));
+    for (const page of pages) {
+      const parent = parents.get(page.id);
+      const under = parent !== undefined && known.has(parent) ? parent : null;
+      const list = children.get(under);
+      if (list === undefined) children.set(under, [page]);
+      else list.push(page);
+    }
+    const out: OutlinedPage[] = [];
+    const stack: OutlinedPage[] = [...(children.get(null) ?? [])].reverse().map((page) => ({ ...page, depth: 0 }));
+    const seen = new Set<string>();
+    while (stack.length > 0) {
+      const page = stack.pop()!;
+      if (seen.has(page.id)) continue;
+      seen.add(page.id);
+      out.push(page);
+      const kids = children.get(page.id) ?? [];
+      for (let i = kids.length - 1; i >= 0; i--) stack.push({ ...kids[i], depth: page.depth + 1 });
+    }
+    outline = out;
+  }
+  return outline.slice(0, limit);
+}
+
 /**
  * Les pages de l'arbre de l'espace `spaceId` que voit le compte (`null` : pas encore lues, ou plus
  * d'espace affiché). Appelé par `App` à chaque arbre lu, et quand on quitte l'espace ou l'application.
  * Une page à la corbeille n'y entre pas.
  */
 export function publishPages(spaceId: string | null, nodes: readonly PageNode[] | null): void {
-  const pages =
-    nodes === null
-      ? []
-      : nodes.filter((node) => node.trashedAt === null).map((node) => ({ id: node.id, title: node.title }));
-  if (spaceId === directory.spaceId && samePages(pages, directory.pages)) return;
+  const kept = nodes === null ? [] : nodes.filter((node) => node.trashedAt === null);
+  const pages = kept.map((node) => ({ id: node.id, title: node.title }));
+  const parents = new Map<string, string>();
+  for (const node of kept) if (node.parentId !== null) parents.set(node.id, node.parentId);
+  if (spaceId === directory.spaceId && samePages(pages, directory.pages) && sameParents(parents, directory.parents)) {
+    return;
+  }
   directory =
     pages.length === 0 && spaceId === null
       ? EMPTY
       : {
           spaceId,
           pages,
+          parents,
           titles: new Map(pages.map((page) => [page.id, page.title])),
           folded: pages.map((page) => fold(page.title)),
         };
+  outline = null;
   for (const listener of [...listeners]) listener();
 }
 

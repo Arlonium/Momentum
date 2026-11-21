@@ -356,6 +356,38 @@ test("the_page_list_says_why_it_is_empty_and_enter_does_not_send", async () => {
   expect(enter.defaultPrevented).toBe(true);
 });
 
+test("sub_pages_come_under_their_page_set_in", async () => {
+  // Recette du lot 5, B3 (R1553) : l'arbre publié est rangé par page parente, si bien qu'une
+  // sous-page venait après les autres pages de la racine. Sans recherche, la liste suit l'arbre,
+  // chaque sous-page sous sa page, en retrait de sa profondeur ; une recherche montre ses pages à
+  // plat. Une page sous une page qui n'est pas dans l'arbre est à la racine de ce qu'on voit.
+  publishPages("pro", [
+    page("p", { spaceId: "pro", title: "Projet", position: "a0" }),
+    page("a", { spaceId: "pro", title: "Autre", position: "a1" }),
+    page("d", { spaceId: "pro", title: "Détails", parentId: "p", position: "a0" }),
+    page("n", { spaceId: "pro", title: "Notes", parentId: "d", position: "a0" }),
+    page("s", { spaceId: "pro", title: "Suite", parentId: "p", position: "a1" }),
+    page("o", { spaceId: "pro", title: "Orpheline", parentId: "ailleurs", position: "a0" }),
+  ]);
+  await opened();
+  await click(radios("scope").find((input) => input.value === "pages")!);
+  const items = () => [...dialog().querySelectorAll<HTMLElement>('[aria-label="Pages proposées"] li')];
+  const shown = () =>
+    items().map((item) => `${item.style.getPropertyValue("--depth") || "0"} ${item.textContent?.trim()}`);
+  expect(shown()).toEqual(["0 Projet", "1 Détails", "2 Notes", "1 Suite", "0 Autre", "0 Orpheline"]);
+  // Cochée puis décochée, une sous-page reste à sa place.
+  const box = (title: string) =>
+    items()
+      .find((item) => item.textContent?.trim() === title)!
+      .querySelector<HTMLInputElement>("input")!;
+  await click(box("Notes"));
+  await click(box("Notes"));
+  expect(shown()).toEqual(["0 Projet", "1 Détails", "2 Notes", "1 Suite", "0 Autre", "0 Orpheline"]);
+  // Une recherche : ses pages, à plat.
+  await type(field("Chercher une page"), "s");
+  expect(shown().every((line) => line.startsWith("0 "))).toBe(true);
+});
+
 test("a_page_unchecked_keeps_its_place", async () => {
   publishPages("pro", [
     page("a", { spaceId: "pro", title: "Agenda" }),

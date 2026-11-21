@@ -2388,6 +2388,11 @@ button.tree-toggle:hover {
   list-style: none;
 }
 
+/* Une sous-page en retrait de sa profondeur, sous sa page (R1553). */
+.mm-token-offered li {
+  padding-inline-start: calc(var(--depth, 0) * 20px);
+}
+
 .mm-token-expiry {
   align-self: flex-start;
 }
