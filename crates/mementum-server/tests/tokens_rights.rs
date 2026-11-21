@@ -6,6 +6,8 @@
 //! un vrai jeton.
 
 mod common;
+// La seule limite connue de ce binaire ne se produit que sous Windows (voir `known_limits`).
+#[cfg(windows)]
 #[path = "../../mementum-sync/tests/common/limit.rs"]
 mod limit;
 
@@ -1436,6 +1438,7 @@ async fn until(what: &str, ready: impl Fn() -> bool) {
     }
 }
 
+#[cfg(windows)]
 mod known_limits {
     use super::limit::known_limit;
     use super::*;
@@ -1446,6 +1449,10 @@ mod known_limits {
     /// octets non lus, le système coupe par `RST`, et la réponse est perdue pour ce client. Aucun
     /// outil n'appelle cette route ; la lever demanderait de lire et jeter le corps d'un jeton
     /// refusé, ce que la porte ne fait pas pour ne rien lire d'une route fermée.
+    ///
+    /// Sous Windows seulement : sous Linux (CI du 2026-11-21, `e0c17a6`), le noyau garde assez
+    /// d'octets reçus pour que la réponse arrive avant le `RST`, et la perte ne se produit pas
+    /// avec ce client ; la limite y reste possible avec un corps plus gros ou un réseau lent.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_token_refused_before_the_body_of_put_mmd_may_lose_its_answer() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
