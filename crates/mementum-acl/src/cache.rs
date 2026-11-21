@@ -26,7 +26,8 @@ struct Entries {
 /// retiré entre-temps resterait en cache.
 ///
 /// Le cache est borné en nœuds visibles gardés, pas en entrées (Ruling R59) : c'est ce qui
-/// pèse en mémoire, 36 octets par nœud. Un calcul compte pour ses nœuds visibles, plus
+/// pèse en mémoire, 40 octets par nœud (le rang de son parent compris). Un calcul compte
+/// pour ses nœuds visibles, plus
 /// [`FIXED_COST`] pour ce qu'il coûte même vide (sa case dans la table, son `Arc`, son `Vec` :
 /// 150 à 300 octets) ; des calculs vides ne le font donc pas grossir sans fin. Chaque unité du
 /// plafond pèse ainsi une quarantaine d'octets au plus. Plein, il se vide d'un coup avant de

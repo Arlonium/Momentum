@@ -476,6 +476,7 @@ async fn planned_move(
                 section: under.section,
                 in_trash: false,
                 visible_parent: Some(parent),
+                barred: under.barred,
             };
             (None, Some(access))
         }

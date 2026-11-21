@@ -5,7 +5,9 @@
 //!   `parse` ne relit qu'elle.
 //! - `access.rs` : [`SpaceAccess::compute`], le calcul pur de ce qu'une personne voit d'un
 //!   espace, et à quel niveau ; [`chain_level`], le même niveau pour une seule page, d'après
-//!   les lignes de sa chaîne.
+//!   les lignes de sa chaîne ; [`SpaceAccess::narrowed`] et [`SpaceAccess::narrowed_node`], ce
+//!   calcul restreint à la portée, au niveau et à l'interdit d'un jeton d'API (lot 5, Ruling
+//!   R1217), qui ne peut que retirer.
 //! - `cache.rs` : [`AccessCache`], ces calculs gardés tant que la révision de l'espace ne bouge
 //!   pas, dans la limite d'un nombre de nœuds visibles (Ruling R59).
 //!
@@ -21,6 +23,43 @@ use uuid::Uuid;
 
 pub use access::{NodeAccess, SpaceAccess, TreeNode, chain_level};
 pub use cache::AccessCache;
+
+/// Des actions refusées quel que soit le niveau : l'interdit d'un jeton d'API (lot 5, Rulings
+/// R1216, R1218). Vide pour une session. Il voyage dans [`NodeAccess`], si bien qu'une route n'a
+/// rien à faire pour le respecter : [`NodeAccess::allows`] le lit après le niveau.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Barred(u16);
+
+impl Barred {
+    /// Aucune action refusée.
+    pub const NONE: Barred = Barred(0);
+
+    /// Ces actions-là refusées.
+    pub const fn of(actions: &[Action]) -> Barred {
+        let mut bits = 0;
+        let mut i = 0;
+        while i < actions.len() {
+            bits |= actions[i].bit();
+            i += 1;
+        }
+        Barred(bits)
+    }
+
+    /// `action` est-elle refusée ?
+    pub fn contains(self, action: Action) -> bool {
+        self.0 & action.bit() != 0
+    }
+
+    /// Les actions refusées par l'un ou l'autre.
+    pub fn union(self, other: Barred) -> Barred {
+        Barred(self.0 | other.0)
+    }
+
+    /// Aucune action n'est refusée.
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+}
 
 /// Niveau d'accès à une page, du plus faible au plus fort.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -215,6 +254,11 @@ pub enum Action {
 }
 
 impl Action {
+    /// Le bit de l'action dans un [`Barred`].
+    const fn bit(self) -> u16 {
+        1 << (self as u16)
+    }
+
     /// Le niveau minimal de l'action (tableau « Action / Niveau minimal » du plan).
     fn min_level(self) -> Level {
         match self {

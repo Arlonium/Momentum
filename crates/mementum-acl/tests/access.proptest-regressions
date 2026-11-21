@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 79ac9af1c5bb02c524dc488c7b311d7868ce31a5b22c4535cc2b213287902ff5 # shrinks to space = Space { nodes: [TreeNode { id: 00000000-0000-0000-0000-0000000007d0, parent_id: None, trashed: false }], grants: [] }, who = 0, role = Owner, cap = Read, barred = Barred(0), picked = None
+cc f5851407113bb0a5e9577378d32667507926e8a13221bc3ec572d0a57aff5054 # shrinks to space = Space { nodes: [TreeNode { id: 00000000-0000-0000-0000-0000000007d0, parent_id: None, trashed: false }], grants: [] }, who = 0, role = Owner, cap = Read, barred = Barred(0), picked = Some([])

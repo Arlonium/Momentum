@@ -4,7 +4,10 @@ use std::collections::HashMap;
 
 use uuid::Uuid;
 
-use crate::{Action, Grant, Level, Role, Section, Subject};
+use crate::{Action, Barred, Grant, Level, Role, Section, Subject};
+
+/// Le rang d'une page sans parent visible, dans [`SpaceAccess::parents`].
+const NO_PARENT: u32 = u32::MAX;
 
 /// Un nœud de l'arbre d'un espace, réduit à ce dont le calcul des accès a besoin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +29,16 @@ pub struct NodeAccess {
     pub in_trash: bool,
     /// Le parent s'il est visible. `None` : racine, ou parent que la personne ne voit pas.
     pub visible_parent: Option<Uuid>,
+    /// Les actions refusées quel que soit le niveau (l'interdit d'un jeton d'API, Ruling R1216) ;
+    /// vide pour une session.
+    pub barred: Barred,
+}
+
+impl NodeAccess {
+    /// Le niveau permet-il `action`, et l'interdit la laisse-t-il ? Ne regarde pas la corbeille.
+    pub fn allows(&self, action: Action) -> bool {
+        self.level.allows(action) && !self.barred.contains(action)
+    }
 }
 
 /// Ce qu'une personne voit d'un espace. Calculé une fois par révision de l'espace (voir
@@ -35,6 +48,10 @@ pub struct SpaceAccess {
     role: Option<Role>,
     /// Les nœuds visibles, triés par id (recherche dichotomique).
     visible: Vec<(Uuid, NodeAccess)>,
+    /// Pour chaque nœud de `visible`, au même rang, le rang de son parent visible
+    /// ([`NO_PARENT`] sans lui) : 4 octets par page, pour remonter les parents visibles par des
+    /// lectures d'un tableau, sans recherche (Rulings R1217, R1575).
+    parents: Vec<u32>,
 }
 
 impl SpaceAccess {
@@ -65,6 +82,7 @@ impl SpaceAccess {
             return SpaceAccess {
                 role: None,
                 visible: Vec::new(),
+                parents: Vec::new(),
             };
         };
 
@@ -117,6 +135,7 @@ impl SpaceAccess {
                         section,
                         in_trash: chain.in_trash,
                         visible_parent: node.parent_id.filter(|_| parent_visible),
+                        barred: Barred::NONE,
                     },
                 ));
             }
@@ -127,10 +146,156 @@ impl SpaceAccess {
         visible.sort_unstable_by_key(|&(id, _)| id);
         // Gardé en cache : pas de place réservée en trop.
         visible.shrink_to_fit();
+        let parents = ranks_of_parents(&visible);
         SpaceAccess {
             role: Some(role),
             visible,
+            parents,
         }
+    }
+
+    /// Ce calcul restreint à un jeton d'API (Ruling R1217) : ne restent que les pages qu'il voit
+    /// déjà et qui sont dans la portée, à un niveau qui ne dépasse pas `cap`, avec `barred` en
+    /// plus de leur interdit. La restriction ne peut que retirer : elle ne lit aucune ligne
+    /// d'accès, et ne rend jamais une page que ce calcul ne rend pas, ni un niveau plus haut.
+    ///
+    /// `roots` (triées par identifiant) : les pages de la portée, chacune avec ses sous-pages.
+    /// Une page est dans la portée si la chaîne de ses **parents visibles** atteint l'une d'elles
+    /// (Ruling R1574) : une page que la personne voit sous une racine qu'elle ne voit plus en est
+    /// sortie. `None` : toute la portée de l'espace. Le parent visible d'une page de la portée
+    /// reste nommé s'il est lui-même dans la portée, sinon il devient `None` (une racine de la
+    /// portée sous une page hors d'elle) ; avec `roots`, toute page est en « Partagé » et le
+    /// rôle devient `guest` ; sans, la section reste, et le rôle vaut au plus `member`.
+    ///
+    /// En proportion des pages vues, par les rangs des parents ([`SpaceAccess::parents`]).
+    pub fn narrowed(&self, cap: Level, barred: Barred, roots: Option<&[Uuid]>) -> SpaceAccess {
+        debug_assert!(roots.is_none_or(|roots| roots.is_sorted()));
+        let in_scope = match roots {
+            None => vec![true; self.visible.len()],
+            Some(roots) => self.scope_of_all(roots),
+        };
+        let mut new_rank = vec![NO_PARENT; self.visible.len()];
+        let mut visible = Vec::with_capacity(in_scope.iter().filter(|&&kept| kept).count());
+        for (i, &(id, _)) in self.visible.iter().enumerate() {
+            if in_scope[i] {
+                new_rank[i] = rank(visible.len());
+                visible.push((id, self.visible[i].1));
+            }
+        }
+        let mut parents = Vec::with_capacity(visible.len());
+        for (i, &(_, access)) in self.visible.iter().enumerate() {
+            if !in_scope[i] {
+                continue;
+            }
+            let parent = self.parents[i];
+            let parent_in_scope = parent != NO_PARENT && in_scope[parent as usize];
+            let kept = rank_index(new_rank[i]);
+            visible[kept].1 = restrict(access, cap, barred, roots.is_some(), parent_in_scope);
+            parents.push(if parent_in_scope {
+                new_rank[parent as usize]
+            } else {
+                NO_PARENT
+            });
+        }
+        SpaceAccess {
+            role: self.role.map(|role| narrowed_role(role, roots.is_some())),
+            visible,
+            parents,
+        }
+    }
+
+    /// Ce que [`SpaceAccess::narrowed`] donnerait à la seule page `id`, sans restreindre tout
+    /// l'espace (Ruling R1256) : la page est jugée par la remontée de ses parents visibles
+    /// jusqu'à une page de `roots`, par leurs rangs, puis son niveau est ramené sous `cap` et
+    /// `barred` posé. `None` : la personne ne la voit pas, ou elle est hors de la portée. En
+    /// proportion de la profondeur de la page (Ruling R1575).
+    pub fn narrowed_node(
+        &self,
+        id: Uuid,
+        cap: Level,
+        barred: Barred,
+        roots: Option<&[Uuid]>,
+    ) -> Option<NodeAccess> {
+        debug_assert!(roots.is_none_or(|roots| roots.is_sorted()));
+        let i = self.rank_of(id)?;
+        let access = self.visible[i].1;
+        let (in_scope, parent_in_scope) = match roots {
+            // Toute page vue est dans la portée, son parent visible aussi.
+            None => (true, access.visible_parent.is_some()),
+            Some(roots) => {
+                let above = self.reaches_a_root(self.parents[i], roots);
+                (above || roots.binary_search(&id).is_ok(), above)
+            }
+        };
+        in_scope.then(|| restrict(access, cap, barred, roots.is_some(), parent_in_scope))
+    }
+
+    /// Pour chaque nœud de `visible`, au même rang : son parent visible, lu par les rangs. Pour
+    /// les tests : il vaut toujours `visible_parent`.
+    pub fn parents_by_rank(&self) -> impl Iterator<Item = (Uuid, Option<Uuid>)> + '_ {
+        self.visible
+            .iter()
+            .zip(&self.parents)
+            .map(|(&(id, _), &parent)| {
+                let parent = (parent != NO_PARENT).then(|| self.visible[parent as usize].0);
+                (id, parent)
+            })
+    }
+
+    /// Le rang de `id` dans `visible`.
+    fn rank_of(&self, id: Uuid) -> Option<usize> {
+        self.visible
+            .binary_search_by_key(&id, |&(node, _)| node)
+            .ok()
+    }
+
+    /// La chaîne des parents visibles qui part du rang `from` (lui compris) atteint-elle une
+    /// page de `roots` ? Les parents visibles forment une forêt (un parent est visité avant ses
+    /// enfants dans `compute`) ; la borne ne sert qu'à ne jamais tourner sans fin.
+    fn reaches_a_root(&self, mut from: u32, roots: &[Uuid]) -> bool {
+        for _ in 0..=self.visible.len() {
+            if from == NO_PARENT {
+                return false;
+            }
+            let at = from as usize;
+            if roots.binary_search(&self.visible[at].0).is_ok() {
+                return true;
+            }
+            from = self.parents[at];
+        }
+        false
+    }
+
+    /// Pour chaque nœud de `visible`, au même rang : est-il dans la portée de `roots` ? Une
+    /// remontée par nœud, chaque nœud jugé une fois (les chemins remontés sont notés).
+    fn scope_of_all(&self, roots: &[Uuid]) -> Vec<bool> {
+        const UNKNOWN: u8 = 0;
+        const IN: u8 = 1;
+        const OUT: u8 = 2;
+        let mut state = vec![UNKNOWN; self.visible.len()];
+        let mut path = Vec::new();
+        for start in 0..self.visible.len() {
+            let mut at = start;
+            let verdict = loop {
+                if state[at] != UNKNOWN {
+                    break state[at];
+                }
+                if roots.binary_search(&self.visible[at].0).is_ok() {
+                    state[at] = IN;
+                    break IN;
+                }
+                path.push(at);
+                let parent = self.parents[at];
+                if parent == NO_PARENT || path.len() > self.visible.len() {
+                    break OUT;
+                }
+                at = parent as usize;
+            };
+            for node in path.drain(..) {
+                state[node] = verdict;
+            }
+        }
+        state.into_iter().map(|s| s == IN).collect()
     }
 
     /// Le rôle de la personne dans l'espace.
@@ -146,10 +311,10 @@ impl SpaceAccess {
             .map(|i| &self.visible[i].1)
     }
 
-    /// Son niveau sur `id` permet-il `action` ? Ne regarde pas la corbeille : l'appelant
-    /// refuse lui-même d'écrire dans une page `in_trash`.
+    /// Son niveau sur `id` permet-il `action`, et l'interdit d'un jeton la laisse-t-il ? Ne
+    /// regarde pas la corbeille : l'appelant refuse lui-même d'écrire dans une page `in_trash`.
     pub fn can(&self, action: Action, id: Uuid) -> bool {
-        self.node(id).is_some_and(|a| a.level.allows(action))
+        self.node(id).is_some_and(|a| a.allows(action))
     }
 
     /// Les nœuds qu'elle voit, corbeille comprise, par id croissant.
@@ -160,6 +325,68 @@ impl SpaceAccess {
     /// Le nombre de nœuds qu'elle voit : ce que pèse le calcul dans le cache.
     pub(crate) fn visible_count(&self) -> usize {
         self.visible.len()
+    }
+}
+
+/// Le rang d'un nœud de `visible`, en 32 bits : un espace a moins de quatre milliards de pages.
+fn rank(index: usize) -> u32 {
+    u32::try_from(index)
+        .ok()
+        .filter(|&r| r != NO_PARENT)
+        .expect("moins de 2^32 - 1 pages visibles")
+}
+
+fn rank_index(rank: u32) -> usize {
+    rank as usize
+}
+
+/// Les rangs des parents visibles de `visible` (triés par id), au même rang.
+fn ranks_of_parents(visible: &[(Uuid, NodeAccess)]) -> Vec<u32> {
+    let mut parents: Vec<u32> = visible
+        .iter()
+        .map(|(_, access)| {
+            access
+                .visible_parent
+                .and_then(|parent| visible.binary_search_by_key(&parent, |&(id, _)| id).ok())
+                .map_or(NO_PARENT, rank)
+        })
+        .collect();
+    parents.shrink_to_fit();
+    parents
+}
+
+/// Les accès d'une page de la portée d'un jeton : le niveau ramené sous `cap`, l'interdit
+/// ajouté, « Partagé » pour un jeton à racines, et le parent visible gardé s'il est dans la
+/// portée.
+fn restrict(
+    access: NodeAccess,
+    cap: Level,
+    barred: Barred,
+    has_roots: bool,
+    parent_in_scope: bool,
+) -> NodeAccess {
+    NodeAccess {
+        level: access.level.min(cap),
+        section: if has_roots {
+            Section::Shared
+        } else {
+            access.section
+        },
+        in_trash: access.in_trash,
+        visible_parent: access.visible_parent.filter(|_| parent_in_scope),
+        barred: access.barred.union(barred),
+    }
+}
+
+/// Le rôle d'un compte vu par son jeton : `guest` pour un jeton à racines (ce que voit un
+/// invité, Ruling R57), au plus `member` sinon.
+fn narrowed_role(role: Role, has_roots: bool) -> Role {
+    if has_roots {
+        Role::Guest
+    } else if role.rank() > Role::Member.rank() {
+        Role::Member
+    } else {
+        role
     }
 }
 

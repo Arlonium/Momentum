@@ -8,8 +8,8 @@
 use std::sync::Arc;
 
 use mementum_acl::{
-    AccessCache, Action, Grant, Level, NodeAccess, Role, Section, SpaceAccess, Subject, TreeNode,
-    chain_level,
+    AccessCache, Action, Barred, Grant, Level, NodeAccess, Role, Section, SpaceAccess, Subject,
+    TreeNode, chain_level,
 };
 use proptest::prelude::*;
 use proptest::sample::Index;
@@ -308,6 +308,7 @@ fn shared_subpage_shows_as_root_for_the_guest() {
             section: Section::Shared,
             in_trash: false,
             visible_parent: None,
+            barred: Barred::NONE,
         })
     );
     assert_eq!(
@@ -317,6 +318,7 @@ fn shared_subpage_shows_as_root_for_the_guest() {
             section: Section::Shared,
             in_trash: false,
             visible_parent: Some(shared),
+            barred: Barred::NONE,
         })
     );
 
@@ -329,6 +331,7 @@ fn shared_subpage_shows_as_root_for_the_guest() {
             section: Section::Private,
             in_trash: false,
             visible_parent: Some(page),
+            barred: Barred::NONE,
         })
     );
     assert_eq!(access.node(deep).unwrap().visible_parent, Some(shared));
@@ -738,6 +741,244 @@ proptest! {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Restriction à un jeton d'API (lot 5, Rulings R1216, R1217, R1574).
+
+fn barred() -> impl Strategy<Value = Barred> {
+    prop::collection::vec(prop::sample::select(ACTIONS.to_vec()), 0..4)
+        .prop_map(|actions| Barred::of(&actions))
+}
+
+/// Les racines d'une portée, tirées parmi les pages de l'arbre (ou une page absente), triées ;
+/// `None` : tout l'espace.
+fn picked_roots(space: &Space, picked: &Option<Vec<Index>>) -> Option<Vec<Uuid>> {
+    picked.as_ref().map(|picked| {
+        let mut roots: Vec<Uuid> = picked
+            .iter()
+            .map(|i| match i.index(space.nodes.len() + 1) {
+                n if n == space.nodes.len() => absent_parent(),
+                n => space.nodes[n].id,
+            })
+            .collect();
+        roots.sort();
+        roots.dedup();
+        roots
+    })
+}
+
+fn picks() -> impl Strategy<Value = Option<Vec<Index>>> {
+    prop::option::of(prop::collection::vec(any::<Index>(), 0..4))
+}
+
+/// L'oracle de la portée (Ruling R1574) : la page, vue par le compte, et la chaîne de ses parents
+/// **visibles** atteint une racine. Écrit sans rien reprendre de la restriction : une marche sur
+/// `visible_parent`, jamais sur les `parent_id` de l'arbre.
+fn naively_in_scope(account: &SpaceAccess, id: Uuid, roots: Option<&[Uuid]>) -> bool {
+    let Some(mut access) = account.node(id) else {
+        return false;
+    };
+    let Some(roots) = roots else {
+        return true;
+    };
+    let mut current = id;
+    loop {
+        if roots.contains(&current) {
+            return true;
+        }
+        match access.visible_parent {
+            Some(parent) => {
+                current = parent;
+                access = account.node(parent).expect("un parent visible est vu");
+            }
+            None => return false,
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: 256, ..ProptestConfig::default() })]
+
+    /// La restriction ne peut que retirer : chaque page qu'elle garde, le compte la voit, à un
+    /// niveau au moins égal, et sous `cap` ; elle porte au moins l'interdit demandé ; aucune
+    /// action n'y est permise que le compte n'ait pas ; le rôle ne monte jamais, ni au-delà de
+    /// `member`.
+    #[test]
+    fn a_narrowed_access_never_exceeds_the_account(
+        space in space(), who in 0..PEOPLE, role in role(), cap in level(),
+        barred in barred(), picked in picks(),
+    ) {
+        let account = SpaceAccess::compute(&space.nodes, &space.grants, person(who), Some(role));
+        let roots = picked_roots(&space, &picked);
+        let narrowed = account.narrowed(cap, barred, roots.as_deref());
+        for (id, kept) in narrowed.visible() {
+            let seen = account.node(id);
+            prop_assert!(seen.is_some_and(|seen| seen.level >= kept.level), "{} : {:?}", id, kept);
+            prop_assert!(kept.level <= cap);
+            for action in ACTIONS {
+                if barred.contains(action) {
+                    prop_assert!(kept.barred.contains(action));
+                }
+                prop_assert!(!narrowed.can(action, id) || account.can(action, id));
+                prop_assert!(!narrowed.can(action, id) || !barred.contains(action));
+            }
+        }
+        let rank = |role: Option<Role>| role.map(Role::rank);
+        prop_assert!(rank(narrowed.role()) <= rank(account.role()));
+        prop_assert!(rank(narrowed.role()) <= Some(Role::Member.rank()));
+    }
+
+    /// Une portée de pages ne voit que leurs sous-arbres, lus par les parents visibles (l'oracle
+    /// `naively_in_scope`) ; le parent visible d'une page gardée n'est nommé que s'il est gardé
+    /// aussi ; avec des racines, tout est en « Partagé » et le rôle est `guest` ; sans, la
+    /// section et ce qui est vu ne changent pas.
+    #[test]
+    fn a_narrowed_access_to_pages_sees_their_subtrees_only(
+        space in space(), who in 0..PEOPLE, role in role(), cap in level(),
+        barred in barred(), picked in picks(),
+    ) {
+        let account = SpaceAccess::compute(&space.nodes, &space.grants, person(who), Some(role));
+        let roots = picked_roots(&space, &picked);
+        let narrowed = account.narrowed(cap, barred, roots.as_deref());
+        for node in &space.nodes {
+            let expected = naively_in_scope(&account, node.id, roots.as_deref());
+            let kept = narrowed.node(node.id);
+            prop_assert_eq!(kept.is_some(), expected, "{:?} ({:?})", node, roots);
+            let Some(kept) = kept else { continue };
+            let seen = account.node(node.id).unwrap();
+            let parent = seen.visible_parent.filter(|p| narrowed.node(*p).is_some());
+            prop_assert_eq!(kept.visible_parent, parent);
+            let section = if roots.is_some() { Section::Shared } else { seen.section };
+            prop_assert_eq!(kept.section, section);
+            prop_assert_eq!(kept.in_trash, seen.in_trash);
+            prop_assert_eq!(kept.level, seen.level.min(cap));
+        }
+        if roots.is_some() {
+            prop_assert_eq!(narrowed.role(), Some(Role::Guest));
+        }
+    }
+
+    /// Une page jugée seule, par la remontée de ses parents visibles, reçoit exactement ce que la
+    /// restriction de tout l'espace lui donne, ou rien (Ruling R1256).
+    #[test]
+    fn a_page_judged_alone_is_judged_as_narrowed(
+        space in space(), who in 0..PEOPLE, role in prop::option::of(role()), cap in level(),
+        barred in barred(), picked in picks(),
+    ) {
+        let account = SpaceAccess::compute(&space.nodes, &space.grants, person(who), role);
+        let roots = picked_roots(&space, &picked);
+        let narrowed = account.narrowed(cap, barred, roots.as_deref());
+        for node in &space.nodes {
+            prop_assert_eq!(
+                account.narrowed_node(node.id, cap, barred, roots.as_deref()),
+                narrowed.node(node.id).copied(),
+                "{:?} ({:?})", node, roots
+            );
+        }
+        prop_assert_eq!(account.narrowed_node(absent_parent(), cap, barred, None), None);
+    }
+
+    /// Les rangs gardés avec le calcul disent les parents visibles, restreint ou non.
+    #[test]
+    fn parent_ranks_match_visible_parents(
+        space in space(), who in 0..PEOPLE, role in role(), cap in level(), picked in picks(),
+    ) {
+        let account = SpaceAccess::compute(&space.nodes, &space.grants, person(who), Some(role));
+        let roots = picked_roots(&space, &picked);
+        let narrowed = account.narrowed(cap, Barred::NONE, roots.as_deref());
+        for access in [&account, &narrowed] {
+            let by_rank: Vec<(Uuid, Option<Uuid>)> = access.parents_by_rank().collect();
+            let expected: Vec<(Uuid, Option<Uuid>)> =
+                access.visible().map(|(id, a)| (id, a.visible_parent)).collect();
+            prop_assert_eq!(by_rank, expected);
+        }
+    }
+}
+
+/// Une page que le compte voit par une ligne posée sous une racine de la portée qu'il ne voit
+/// plus est hors de la portée de ses jetons (Ruling R1574), seule comme dans tout l'espace ; la
+/// racine rendue, elle y revient.
+#[test]
+fn a_page_seen_under_a_root_the_account_no_longer_sees_is_out_of_scope() {
+    let (alice, root_page, between, page) = (id(1), id(10), id(11), id(12));
+    let nodes = vec![
+        root(root_page),
+        child(between, root_page),
+        child(page, between),
+    ];
+    let own_line = grant(page, Subject::User(alice), Level::Edit);
+    let scope = [root_page];
+    // La racine vue : la page est dans la portée.
+    let lines = vec![
+        grant(root_page, Subject::User(alice), Level::Read),
+        own_line,
+    ];
+    let account = SpaceAccess::compute(&nodes, &lines, alice, Some(Role::Member));
+    let judged = account.narrowed_node(page, Level::Edit, Barred::NONE, Some(&scope));
+    assert_eq!(judged.map(|a| a.visible_parent), Some(Some(between)));
+    // La racine perdue : la page reste vue du compte, hors de la portée.
+    let account = SpaceAccess::compute(&nodes, &[own_line], alice, Some(Role::Member));
+    assert!(account.node(page).is_some(), "le compte la voit encore");
+    assert_eq!(
+        account.narrowed_node(page, Level::Edit, Barred::NONE, Some(&scope)),
+        None
+    );
+    let narrowed = account.narrowed(Level::Edit, Barred::NONE, Some(&scope));
+    assert_eq!(narrowed.node(page), None);
+    assert_eq!(narrowed.visible().count(), 0);
+}
+
+/// Une racine de la portée sous une page hors d'elle n'a pas de parent visible, et toute page d'un
+/// jeton à racines est en « Partagé » (Ruling R1217) ; une racine sous une autre racine garde son
+/// parent, qui est dans la portée.
+#[test]
+fn a_root_of_scope_has_no_visible_parent_and_is_shared() {
+    let (mona, team, scoped, nested, under) = (id(1), id(10), id(11), id(12), id(13));
+    let nodes = vec![
+        root(team),
+        child(scoped, team),
+        child(nested, scoped),
+        child(under, nested),
+    ];
+    let lines = vec![grant(team, Subject::Members, Level::Edit)];
+    let account = SpaceAccess::compute(&nodes, &lines, mona, Some(Role::Owner));
+    assert_eq!(account.node(scoped).unwrap().section, Section::Space);
+    let roots = [scoped, nested];
+    let narrowed = account.narrowed(Level::Read, Barred::NONE, Some(&roots));
+    assert_eq!(narrowed.node(team), None);
+    assert_eq!(narrowed.role(), Some(Role::Guest));
+    let top = narrowed.node(scoped).unwrap();
+    assert_eq!((top.visible_parent, top.section), (None, Section::Shared));
+    assert_eq!((top.level, top.in_trash), (Level::Read, false));
+    let inner = narrowed.node(nested).unwrap();
+    assert_eq!(inner.visible_parent, Some(scoped));
+    assert_eq!(narrowed.node(under).unwrap().visible_parent, Some(nested));
+    for page in [scoped, nested, under] {
+        assert_eq!(
+            account.narrowed_node(page, Level::Read, Barred::NONE, Some(&roots)),
+            narrowed.node(page).copied()
+        );
+    }
+}
+
+/// L'interdit d'un jeton refuse une action que le niveau permet, et seulement elle.
+#[test]
+fn barred_refuses_what_the_level_allows() {
+    let barred = Barred::of(&[Action::Share, Action::Move]);
+    let access = NodeAccess {
+        level: Level::Full,
+        section: Section::Space,
+        in_trash: false,
+        visible_parent: None,
+        barred,
+    };
+    for action in ACTIONS {
+        let refused = matches!(action, Action::Share | Action::Move);
+        assert_eq!(access.allows(action), !refused, "{action:?}");
+    }
+    assert!(Barred::NONE.is_empty() && !barred.is_empty());
+    assert_eq!(barred.union(Barred::NONE), barred);
 }
 
 // ---------------------------------------------------------------------------

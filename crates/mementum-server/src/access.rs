@@ -503,6 +503,7 @@ pub(crate) mod tests {
             section: Section::Space,
             in_trash: false,
             visible_parent: None,
+            barred: mementum_acl::Barred::NONE,
         };
         let response = permit(&access, action)
             .expect_err("un refus")
