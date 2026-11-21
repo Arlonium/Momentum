@@ -159,8 +159,53 @@ fn rewritten(blocks: &[Block], anchors: &Anchors, below: &mut dyn FnMut(u64) -> 
     blocks
 }
 
-/// Une liste d'une à quatre opérations, bâtie sur `blocks`, les blocs lus par l'agent.
+/// Comme les routes (`unknown_not_foreign`, R33) : un bloc `unknown` écrit par un MMD n'est jamais
+/// recréé en élément étranger, `foreign` est retiré de ce que l'agent écrit.
+fn unknown_not_foreign(blocks: &mut [Block]) {
+    for b in blocks {
+        if b.kind == "unknown" {
+            b.props.remove("foreign");
+        }
+        unknown_not_foreign(&mut b.children);
+    }
+}
+
+/// Les blocs sans la `data` des blocs `unknown` marqués étrangers : un tel bloc, marqué par un
+/// client sur une `data` qui n'est pas un nœud, est récrit par toute écriture du serveur (défaut
+/// D13 de la passe de fin du lot 5, `known_limits` de `tests/diff.rs`) ; les comparaisons des
+/// essais le laissent à ce test.
+pub fn without_foreign_data(blocks: &[Block]) -> Vec<Block> {
+    fn strip(blocks: &mut [Block]) {
+        for b in blocks {
+            if b.kind == "unknown"
+                && b.props.get("foreign") == Some(&mementum_md::PropValue::Bool(true))
+            {
+                b.props.remove("data");
+            }
+            strip(&mut b.children);
+        }
+    }
+    let mut blocks = blocks.to_vec();
+    strip(&mut blocks);
+    blocks
+}
+
+/// Une liste d'une à quatre opérations, bâtie sur `blocks`, les blocs lus par l'agent, avec ses
+/// MMD tels que les routes les donnent au plan (sans `foreign`).
 pub fn random_ops(blocks: &[Block], below: &mut dyn FnMut(u64) -> u64) -> Vec<Operation> {
+    let mut ops = generated_ops(blocks, below);
+    for op in &mut ops {
+        match op {
+            Operation::Insert { blocks, .. }
+            | Operation::ReplaceBlock { blocks, .. }
+            | Operation::ReplacePage { blocks, .. } => unknown_not_foreign(blocks),
+            _ => {}
+        }
+    }
+    ops
+}
+
+fn generated_ops(blocks: &[Block], below: &mut dyn FnMut(u64) -> u64) -> Vec<Operation> {
     let mut known = Vec::new();
     ids(blocks, &mut known);
     let anchors = Anchors::of(blocks);
@@ -208,15 +253,20 @@ pub fn random_ops(blocks: &[Block], below: &mut dyn FnMut(u64) -> u64) -> Vec<Op
 /// près qu'un bloc sans identifiant dans le plan en reçoit un neuf de l'écriture (les blocs
 /// neufs sont nommés avant le plan, R1337 ; un bloc que la page portait sans identifiant, celui
 /// d'une page créée par le serveur et jamais ouverte, en reçoit un aussi). C'est la promesse de
-/// `ops` (« le plan appliqué est le plan vérifié »), au nommage près.
+/// `ops` (« le plan appliqué est le plan vérifié »), au nommage près, et sans la `data` des blocs
+/// marqués étrangers ([`without_foreign_data`], D13).
 pub fn plan_written(page: &[Block], plan: &[Block]) -> bool {
+    same_but_names(&without_foreign_data(page), &without_foreign_data(plan))
+}
+
+fn same_but_names(page: &[Block], plan: &[Block]) -> bool {
     page.len() == plan.len()
         && page.iter().zip(plan).all(|(p, q)| {
             (q.id.is_empty() || p.id == q.id)
                 && p.kind == q.kind
                 && p.props == q.props
                 && p.content == q.content
-                && plan_written(&p.children, &q.children)
+                && same_but_names(&p.children, &q.children)
         })
 }
 

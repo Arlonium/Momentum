@@ -1488,7 +1488,11 @@ fn scenario(ops: &[Op]) {
                                 );
                             }
                             if let Some(blocks) = written.blocks.take() {
-                                assert_eq!(blocks, now, "étape {step} ({op:?}) : l'arbre écrit");
+                                assert_eq!(
+                                    agent_ops::without_foreign_data(&blocks),
+                                    agent_ops::without_foreign_data(&now),
+                                    "étape {step} ({op:?}) : l'arbre écrit"
+                                );
                             }
                             if written.update != [0, 0] {
                                 served.journal.push(written.update);

@@ -472,7 +472,11 @@ impl Served {
                     );
                 }
                 if let Some(blocks) = written.blocks.take() {
-                    assert_eq!(blocks, now, "l'écriture d'un agent : l'arbre écrit");
+                    assert_eq!(
+                        agent_ops::without_foreign_data(&blocks),
+                        agent_ops::without_foreign_data(&now),
+                        "l'écriture d'un agent : l'arbre écrit"
+                    );
                 }
                 if written.update == [0, 0] {
                     return Ok(false);
