@@ -1833,6 +1833,52 @@ fn the_second_command_judges_the_touched_blocks_against_the_encoded_state() {
     assert_eq!(plan.changed_since(&encoded, &key), ["p2"]);
 }
 
+/// Task S4 du lot 5, tour de correction : `changed_since` ne juge que le contenu des blocs que
+/// l'appel remplace. Une frappe dans l'ancre d'un `insert` (touchée par sa place seule) ne fait pas
+/// recouper la version ; un bloc remplacé dont seule la place a changé non plus (le plan refait la
+/// juge) ; un bloc remplacé dont le contenu a changé, si.
+#[test]
+fn changed_since_judges_the_content_of_the_whole_blocks_only() {
+    let key = HashKey::new();
+    let page = page_with("Un ^p1\n\nDeux ^p2\n");
+    let encoded = hashes(&page.read_blocks(), &key);
+    let ops = [
+        Operation::Insert {
+            at: Place::After("p1".into()),
+            blocks: md("Inséré\n"),
+        },
+        Operation::ReplaceBlock {
+            anchor: "p2".into(),
+            blocks: md("Deux remplacé\n"),
+            allow_deleting_content: false,
+        },
+    ];
+    let planned = |page: &PageDoc| {
+        let blocks = page.read_blocks();
+        let revision = page.revision();
+        let ctx = PlanContext {
+            revision: &revision,
+            ..current(&key)
+        };
+        let plan = ops::plan(&blocks, &ops, &ctx).unwrap();
+        (plan.touched().to_vec(), plan.changed_since(&encoded, &key))
+    };
+    // L'ancre change de texte : elle n'est touchée que par sa place.
+    page.write_diff(&parse("Un de l'humain ^p1\n\nDeux ^p2\n").unwrap())
+        .unwrap();
+    let (touched, changed) = planned(&page);
+    assert_eq!(touched, ["p1", "p2"]);
+    assert!(changed.is_empty(), "{changed:?}");
+    // Le bloc remplacé change de place, pas de contenu.
+    page.write_diff(&parse("Un de l'humain ^p1\n\nAvant ^p0\n\nDeux ^p2\n").unwrap())
+        .unwrap();
+    assert!(planned(&page).1.is_empty());
+    // Puis de contenu.
+    page.write_diff(&parse("Un de l'humain ^p1\n\nAvant ^p0\n\nDeux de l'humain ^p2\n").unwrap())
+        .unwrap();
+    assert_eq!(planned(&page).1, ["p2"]);
+}
+
 /// I3 : un plan ne s'écrit que sur la révision dont il a lu les blocs.
 #[test]
 fn apply_refuses_a_plan_made_on_another_revision() {

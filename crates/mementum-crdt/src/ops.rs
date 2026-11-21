@@ -248,6 +248,10 @@ pub struct Plan<'a> {
     revision: String,
     blocks: Vec<Block>,
     touched: Vec<String>,
+    /// Ceux de `touched` que l'appel touche entiers (contenu, sous-blocs et place) ; les autres ne
+    /// le sont que par leur place (l'ancre d'un `insert`, la destination d'un `move_block`, un bloc
+    /// que `replace_page` déplace sans le changer).
+    whole: HashSet<String>,
 }
 
 impl Plan<'_> {
@@ -262,24 +266,34 @@ impl Plan<'_> {
         &self.touched
     }
 
-    /// Les blocs de [`Plan::touched`] qui ne sont plus ce qu'ils étaient dans un état d'avant
-    /// (`encoded`, ses empreintes sous `key`) : contenu ou place changés, partis, ou arrivés depuis.
-    /// La seconde commande d'une opération destructrice (R1234) refait le plan **avec la base de
-    /// l'agent**, puis juge ainsi ses blocs touchés contre l'état encodé pour la version.
+    /// Les blocs de [`Plan::touched`] que l'appel remplace (touchés entiers) dont le contenu n'est
+    /// plus celui d'un état d'avant (`encoded`, ses empreintes sous `key`), ou qui sont partis, ou
+    /// arrivés depuis. La seconde commande d'une opération destructrice (R1234) refait le plan
+    /// **avec la base de l'agent**, puis juge ainsi contre l'état encodé ce que la version doit
+    /// garder : le contenu de ce que l'appel remplace. Un bloc touché par sa seule place (l'ancre
+    /// d'un `insert`) n'y est pas : l'appel n'en remplace rien, et sa place est jugée par le plan
+    /// refait (Task S4 du lot 5, tour de correction : une frappe dans l'ancre d'un `insert` faisait
+    /// recouper une version, puis pouvait refuser l'écriture).
     pub fn changed_since(&self, encoded: &BlockHashes, key: &HashKey) -> Vec<String> {
         let then = Judge::index(encoded);
         let now = Judge::index(&hashes(self.current, key));
         self.touched
             .iter()
+            .filter(|id| self.whole.contains(*id))
             .filter(|id| {
                 let k = id_key(id);
                 match (then.get(&k), now.get(&k)) {
-                    (Some(Some(a)), Some(Some(b))) => a != b,
+                    (Some(Some(a)), Some(Some(b))) => a.0 != b.0,
                     _ => true,
                 }
             })
             .cloned()
             .collect()
+    }
+
+    /// Les blocs lus que l'appel touche entiers.
+    pub fn touched_whole(&self) -> &HashSet<String> {
+        &self.whole
     }
 }
 
@@ -293,6 +307,20 @@ impl PageDoc {
             return Err(CrdtError::StalePlan);
         }
         self.write_diff_over(plan.current, &plan.blocks)
+    }
+
+    /// [`PageDoc::apply`], refusé sans rien écrire si l'écriture est estimée au-delà de
+    /// `budget_nanos` (`Ok(Err(coût))`, `PageDoc::write_diff_within`) : une seule préparation et un
+    /// seul appariement des blocs pour l'estimation et l'écriture.
+    pub fn apply_within(
+        &self,
+        plan: &Plan<'_>,
+        budget_nanos: u128,
+    ) -> Result<Result<DiffWritten, crate::WriteCost>, CrdtError> {
+        if self.revision() != plan.revision {
+            return Err(CrdtError::StalePlan);
+        }
+        self.write_diff_within(plan.current, &plan.blocks, budget_nanos)
     }
 }
 
@@ -375,6 +403,7 @@ pub fn plan<'a>(
         current,
         blocks,
         touched: planner.touched,
+        whole: planner.whole,
         revision: ctx.revision.to_string(),
     })
 }
@@ -779,6 +808,8 @@ struct Planner<'a, 'c> {
     index: usize,
     last_structural: Option<usize>,
     touched: Vec<String>,
+    /// Ceux de `touched` touchés entiers.
+    whole: HashSet<String>,
     seen: HashSet<String>,
     conflicts: Vec<String>,
     in_conflict: HashSet<String>,
@@ -816,6 +847,7 @@ impl<'a, 'c> Planner<'a, 'c> {
             index: 0,
             last_structural: None,
             touched: Vec::new(),
+            whole: HashSet::new(),
             seen: HashSet::new(),
             conflicts: Vec::new(),
             in_conflict: HashSet::new(),
@@ -908,7 +940,7 @@ impl<'a, 'c> Planner<'a, 'c> {
         {
             self.conflict(id.clone());
         }
-        self.record(id);
+        self.record(id, whole);
     }
 
     fn conflict(&mut self, id: String) {
@@ -917,9 +949,16 @@ impl<'a, 'c> Planner<'a, 'c> {
         }
     }
 
-    /// Note que l'appel touche le bloc de la page `id`, sans le juger.
-    fn record(&mut self, id: String) {
-        if !id.is_empty() && self.page_ids.contains(&id) && self.seen.insert(id.clone()) {
+    /// Note que l'appel touche le bloc de la page `id` (entier, ou par sa place seule), sans le
+    /// juger. Touché d'une façon puis entier, il l'est entier.
+    fn record(&mut self, id: String, whole: bool) {
+        if id.is_empty() || !self.page_ids.contains(&id) {
+            return;
+        }
+        if whole {
+            self.whole.insert(id.clone());
+        }
+        if self.seen.insert(id.clone()) {
             self.touched.push(id);
         }
     }
@@ -1397,9 +1436,12 @@ impl<'a, 'c> Planner<'a, 'c> {
         let before = hashes(&now, self.ctx.key);
         let order = self.work.preorder();
         for (node, h) in order.into_iter().zip(before.as_slice()) {
-            if written.get(&h.id) != Some(&(h.content, h.place)) {
+            let kept = written.get(&h.id);
+            if kept != Some(&(h.content, h.place)) {
+                // Retiré, ou son contenu changé : touché entier ; déplacé seulement : sa place.
+                let whole = kept.is_none_or(|(content, _)| *content != h.content);
                 let id = self.work.nodes[node].block.id.clone();
-                self.record(id);
+                self.record(id, whole);
             }
         }
         self.work = Work::of(target);

@@ -42,6 +42,7 @@ use std::sync::Arc;
 
 use mementum_md::{Block, Content, Inline, PropValue, Props, Styles, Table, normalize};
 use mementum_schema::{PropSpec, block as spec_of};
+use uuid::Uuid;
 use yrs::branch::{Branch, BranchID};
 use yrs::types::Attrs;
 use yrs::types::text::YChange;
@@ -56,6 +57,7 @@ use crate::blocknote::{
     BLOCK_CONTAINER, BLOCK_GROUP, COLUMN, COLUMN_LIST, Ids, attr_string, elements, marks,
     prop_attribute, styles_of, write_children, write_content, write_inline, write_nodes,
 };
+use crate::cost::{WriteCost, diff_cost_of};
 use crate::foreign::Foreign;
 use crate::guard::{MARKS, value_refusal};
 use crate::kept_ids::keep_ids;
@@ -64,7 +66,7 @@ use crate::table::write_table;
 use crate::{CrdtError, PageDoc};
 
 /// Ce que [`PageDoc::write_diff`] a écrit.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DiffWritten {
     /// La mise à jour (v1) qui fait toute l'écriture, ses deux transactions comprises : à écrire
     /// au journal, puis à diffuser. `[0, 0]` (vide) quand rien ne diffère : aucune transaction
@@ -79,6 +81,11 @@ pub struct DiffWritten {
     /// L'écriture est retombée sur la récriture complète (la page porte ce que `read_blocks`
     /// normalise) : toute frappe concurrente de la page est perdue.
     pub fell_back: bool,
+    /// Les blocs de la page après l'écriture, tels que `read_blocks` les lira (normalisés,
+    /// identifiants compris), quand l'écriture ne retombe pas et que chaque bloc écrit garde
+    /// l'identifiant que l'arbre préparé lui donnait ; `None` sinon : relire la page (Task S4 du
+    /// lot 5, tour de correction : l'acteur relisait 10 000 blocs après chaque écriture d'agent).
+    pub blocks: Option<Vec<Block>>,
 }
 
 impl PageDoc {
@@ -105,15 +112,52 @@ impl PageDoc {
         current: &[Block],
         blocks: &[Block],
     ) -> Result<DiffWritten, CrdtError> {
+        match self.write_within(current, blocks, None)? {
+            Ok(written) => Ok(written),
+            Err(_) => unreachable!("sans budget, rien n'est refusé pour son coût"),
+        }
+    }
+
+    /// Comme [`PageDoc::write_diff_over`], refusée sans rien écrire si son coût estimé dépasse
+    /// `budget_nanos` (`Ok(Err(coût))`) : l'estimation de [`crate::diff_cost`], sur les blocs que
+    /// l'écriture vient de préparer et d'apparier, sans refaire `keep_ids` (Task S4 du lot 5,
+    /// tour de correction : l'acteur estimait puis écrivait, et payait l'appariement deux fois).
+    pub fn write_diff_within(
+        &self,
+        current: &[Block],
+        blocks: &[Block],
+        budget_nanos: u128,
+    ) -> Result<Result<DiffWritten, WriteCost>, CrdtError> {
+        self.write_within(current, blocks, Some(budget_nanos))
+    }
+
+    fn write_within(
+        &self,
+        current: &[Block],
+        blocks: &[Block],
+        budget_nanos: Option<u128>,
+    ) -> Result<Result<DiffWritten, WriteCost>, CrdtError> {
         let mut target = writable(&prepared(blocks))?;
         keep_ids(current, &mut target);
+        if let Some(budget) = budget_nanos {
+            let cost = diff_cost_of(current, &target);
+            if u128::from(cost.nanos) > budget {
+                return Ok(Err(cost));
+            }
+        }
+        // Les blocs neufs reçoivent leur identifiant ici, avant le plan, pour que l'arbre écrit
+        // se rende tel que la page le lira (`DiffWritten::blocks`) ; un identifiant neuf ne répond
+        // à aucun bloc de la page, comme un identifiant vide.
+        for b in &mut target {
+            fill_missing_ids(b);
+        }
         let plan = {
             let txn = self.doc.transact();
             plan_page(&txn, &self.fragment, current, &target)
         };
         match plan {
-            Some(plan) => self.write_plan(plan),
-            None => self.fall_back(current, target),
+            Some(plan) => self.write_plan(plan, target).map(Ok),
+            None => self.fall_back(current, target).map(Ok),
         }
     }
 
@@ -137,10 +181,13 @@ impl PageDoc {
             update,
             touched: once(touched),
             fell_back: true,
+            blocks: None,
         })
     }
 
-    fn write_plan(&self, mut plan: Plan) -> Result<DiffWritten, CrdtError> {
+    /// `target` : l'arbre que le plan écrit, ses blocs neufs déjà nommés ([`fill_missing_ids`]) ;
+    /// rendu tel quel dans [`DiffWritten::blocks`] si l'écriture garde tous ses identifiants.
+    fn write_plan(&self, mut plan: Plan, target: Vec<Block>) -> Result<DiffWritten, CrdtError> {
         // Les identifiants des blocs écrits, posés d'avance : aucun ne prend celui d'un bloc
         // gardé ; écrits ensuite tels quels.
         let mut ids = Ids::taken(std::mem::take(&mut plan.kept));
@@ -157,12 +204,27 @@ impl PageDoc {
                 subtree_ids(b, &mut written);
             }
         }
+        // L'arbre écrit est `target` tant qu'aucun bloc écrit n'a changé d'identifiant (un
+        // identifiant que portaient deux blocs, un nœud étranger qui reprend le sien) : sinon
+        // l'appelant relit la page.
+        let blocks = {
+            let mut named = Vec::new();
+            for b in &target {
+                subtree_ids(b, &mut named);
+            }
+            let named: HashSet<&String> = named.iter().collect();
+            written
+                .iter()
+                .all(|id| named.contains(id))
+                .then_some(target)
+        };
         plan.touched.extend(written);
         if !plan.deletes() && !plan.writes() {
             return Ok(DiffWritten {
                 update: Update::EMPTY_V1.to_vec(),
                 touched: Vec::new(),
                 fell_back: false,
+                blocks,
             });
         }
         let removed = if plan.deletes() {
@@ -195,6 +257,7 @@ impl PageDoc {
             update,
             touched: once(plan.touched),
             fell_back: false,
+            blocks,
         })
     }
 }
@@ -316,6 +379,18 @@ fn once(ids: Vec<String>) -> Vec<String> {
     ids.into_iter()
         .filter(|id| seen.insert(id.clone()))
         .collect()
+}
+
+/// Donne un identifiant neuf à chaque bloc de l'arbre qui n'en a pas (un nœud étranger hors
+/// enveloppe excepté : il reprend le sien à l'écriture, `assign`).
+fn fill_missing_ids(b: &mut Block) {
+    let unwrapped = Foreign::of(b).is_some_and(|node| node.unwrapped());
+    if b.id.is_empty() && !unwrapped {
+        b.id = Uuid::now_v7().to_string();
+    }
+    for c in &mut b.children {
+        fill_missing_ids(c);
+    }
 }
 
 /// Pose l'identifiant d'un bloc à écrire et de ses descendants comme `write_node` le ferait

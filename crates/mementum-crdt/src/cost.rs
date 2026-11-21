@@ -161,11 +161,17 @@ const CUT_PS: u128 = 2_000;
 pub fn diff_cost(current: &[Block], written: &[Block]) -> WriteCost {
     let mut target = crate::diff::prepared(written);
     crate::kept_ids::keep_ids(current, &mut target);
+    diff_cost_of(current, &target)
+}
+
+/// [`diff_cost`] des blocs `target` déjà préparés et appariés à la page (`keep_ids` fait) : ce
+/// que l'écriture estime d'elle-même avant d'écrire (`PageDoc::write_diff_within`).
+pub(crate) fn diff_cost_of(current: &[Block], target: &[Block]) -> WriteCost {
     let mut tally = Tally::default();
-    tally.diff_lists(current, &target);
+    tally.diff_lists(current, target);
     let mut page = Tally::default();
     page.siblings(current);
-    let read = ((blocks_in(current) + blocks_in(&target)) as u128).saturating_mul(DIFF_BLOCK_PS);
+    let read = ((blocks_in(current) + blocks_in(target)) as u128).saturating_mul(DIFF_BLOCK_PS);
     let items = (page.elements + page.text_items) as u128;
     let merges = (tally.merges as u128)
         .saturating_mul(items)

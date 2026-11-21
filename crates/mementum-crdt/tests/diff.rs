@@ -696,6 +696,10 @@ fn a_page_that_read_blocks_normalizes_falls_back_on_the_full_rewrite() {
         let target = mmd_of(&page) + "\nAjouté\n";
         let written = diff(&page, &target);
         assert!(written.fell_back, "{what}");
+        assert_eq!(
+            written.blocks, None,
+            "{what} : l'arbre écrit est à relire après un repli"
+        );
         assert_eq!(mmd_of(&page), target, "{what}");
         assert_update_is_whole(&page, &state, &written, what);
         // Une fois récrite, la page se lit élément pour bloc, et l'écriture suivante n'y retombe
@@ -835,6 +839,10 @@ proptest! {
         match (written, expected) {
             (Ok(written), Ok(_)) => {
                 prop_assert_eq!(shown(&page.read_blocks()), shown(&oracle.read_blocks()));
+                // L'arbre rendu par l'écriture est la page relue, identifiants compris.
+                if let Some(blocks) = &written.blocks {
+                    prop_assert_eq!(blocks, &page.read_blocks());
+                }
                 let replica = PageDoc::from_updates([state.as_slice(), written.update.as_slice()]).unwrap();
                 prop_assert_eq!(replica.read_blocks(), page.read_blocks());
                 prop_assert_eq!(live::tree(replica.yrs_doc()), live::tree(page.yrs_doc()));
@@ -2416,4 +2424,44 @@ mod known_limits {
             ],
         );
     }
+}
+
+/// Task S4 du lot 5, tour de correction : l'écriture rend l'arbre qu'elle a écrit, identifiants des
+/// blocs neufs compris, tel que la page le relit ; l'acteur ne relit plus la page après une écriture
+/// d'agent. Aussi quand rien ne diffère.
+#[test]
+fn a_diff_write_gives_back_the_blocks_it_wrote() {
+    let page = page_with("Un\n\n- Deux\n  - Enfant\n\nTrois\n");
+    let mut target = page.read_blocks();
+    target[0] = parse("Un **changé**\n").unwrap().remove(0);
+    target.insert(2, parse("Neuf\n").unwrap().remove(0));
+    target[1]
+        .children
+        .push(parse("Petit neuf\n").unwrap().remove(0));
+    let written = page.write_diff(&target).unwrap();
+    assert!(!written.fell_back);
+    let blocks = written.blocks.expect("l'arbre écrit");
+    assert_eq!(blocks, page.read_blocks());
+    assert!(blocks.iter().all(|b| !b.id.is_empty()));
+    let same = page.write_diff(&page.read_blocks()).unwrap();
+    assert_eq!(same.update, [0, 0]);
+    assert_eq!(same.blocks, Some(page.read_blocks()));
+}
+
+/// Task S4 du lot 5, tour de correction : avec un budget, l'écriture estimée au-delà est refusée
+/// sans rien écrire, et rend son estimation ; en deçà, elle écrit comme `write_diff_over`.
+#[test]
+fn a_write_within_a_budget_refuses_beyond_it_and_writes_nothing() {
+    let page = page_with("Un\n\nDeux\n");
+    let (state, current) = (page.encode_state(), page.read_blocks());
+    let target = parse("Un\n\nDeux\n\nTrois\n").unwrap();
+    let refused = page.write_diff_within(&current, &target, 1).unwrap();
+    assert!(matches!(refused, Err(cost) if cost.nanos > 1));
+    assert_eq!(page.encode_state(), state, "la page a changé");
+    let written = page
+        .write_diff_within(&current, &target, u128::MAX)
+        .unwrap()
+        .expect("sous le budget");
+    assert_eq!(written.blocks, Some(page.read_blocks()));
+    assert_eq!(mmd_of(&page), "Un\n\nDeux\n\nTrois\n");
 }
