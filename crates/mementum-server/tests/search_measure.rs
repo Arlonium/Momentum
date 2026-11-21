@@ -423,6 +423,9 @@ async fn measure_search_on_10000_pages() {
             );
         }
         let (p50, p95, worst) = percentiles(times);
+        // Lot 5, Task X2 (Ruling R1642) : une recherche filtrée tient le même budget à l'échelle
+        // de référence.
+        route_p95.push((name, p95));
         said.push(format!(
             "la route, membre, {name}, plancher compris : p50 {p50:.1} ms, p95 {p95:.1} ms, la \
              pire {worst:.1} ms"
