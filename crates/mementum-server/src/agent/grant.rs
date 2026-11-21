@@ -153,3 +153,53 @@ impl TokenGrant {
         shape
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use mementum_acl::Section;
+
+    use super::*;
+
+    fn grant(level: Level, scope: Scope, can_trash: bool) -> TokenGrant {
+        TokenGrant {
+            token_id: Uuid::nil(),
+            level,
+            scope,
+            can_trash,
+        }
+    }
+
+    /// Lot 5, correction groupée (mutation S5-09 de la relecture finale) : les accès d'une page
+    /// qu'un jeton vient de créer ou de placer (`AppState::own_access`) portent l'interdit du
+    /// jeton, et le niveau ramené sous le sien ; « Partagé » pour un jeton à racines.
+    #[test]
+    fn an_own_page_carries_the_bar_and_the_level_of_the_token() {
+        let full = NodeAccess {
+            level: Level::Full,
+            section: Section::Private,
+            in_trash: false,
+            visible_parent: None,
+            barred: Barred::default(),
+        };
+        let always = [Action::Share, Action::Delete, Action::Move];
+        let edit = grant(Level::Edit, Scope::All, false).narrow_own(full);
+        assert_eq!(edit.level, Level::Edit);
+        assert_eq!(edit.section, Section::Private);
+        for action in always.into_iter().chain([Action::Trash, Action::Restore]) {
+            assert!(!edit.allows(action), "{action:?}");
+        }
+        assert!(edit.allows(Action::Edit) && edit.allows(Action::Rename));
+        let trashing = grant(Level::Edit, Scope::All, true).narrow_own(full);
+        assert!(trashing.allows(Action::Trash) && trashing.allows(Action::Restore));
+        for action in always {
+            assert!(!trashing.allows(action), "{action:?}");
+        }
+        let pages = Scope::Pages {
+            space: Uuid::nil(),
+            roots: vec![Uuid::nil()],
+        };
+        let read = grant(Level::Read, pages, false).narrow_own(full);
+        assert_eq!((read.level, read.section), (Level::Read, Section::Shared));
+        assert!(!read.allows(Action::Edit));
+    }
+}
