@@ -5,7 +5,7 @@
 //! - **niveau** : `read` ou `edit` (pas de `full` au lot 5, Ruling R1218), le plafond de tout
 //!   niveau du compte ;
 //! - **interdit** ([`TokenGrant::barred`]) : `Share`, `Delete` et `Move` pour tout jeton, `Trash`
-//!   sans l'option `can_trash`, quel que soit le niveau.
+//!   et `Restore` sans l'option `can_trash`, quel que soit le niveau.
 //!
 //! La restriction elle-même est dans `mementum-acl` (`SpaceAccess::narrowed`, `narrowed_node`) :
 //! elle part du calcul du compte, ne lit aucune ligne d'accès, et ne peut que retirer.
@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use mementum_acl::{Action, Barred, Level, NodeAccess, SpaceAccess};
 use mementum_store::{LiveToken, TokenLevel, TokenScope};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 /// Par où un appel est venu : une session (cookie), ou un jeton d'API (`Authorization: Bearer
@@ -79,12 +80,14 @@ impl TokenGrant {
         }
     }
 
-    /// Les actions refusées à ce jeton quel que soit le niveau.
+    /// Les actions refusées à ce jeton quel que soit le niveau. Sans l'option corbeille, ni mettre à
+    /// la corbeille, ni en sortir (Ruling R1345 récrit : deux gestes sous confirmation humaine,
+    /// §6.5, que l'option coche à la place de la personne).
     pub fn barred(&self) -> Barred {
         if self.can_trash {
             ALWAYS_BARRED
         } else {
-            ALWAYS_BARRED.union(Barred::of(&[Action::Trash]))
+            ALWAYS_BARRED.union(Barred::of(&[Action::Trash, Action::Restore]))
         }
     }
 
@@ -121,14 +124,32 @@ impl TokenGrant {
     /// au jeton (`AppState::own_access`, Ruling R1216) : la page est dans sa portée (elle est sous
     /// une page qu'il voit, ou à la racine d'un espace qu'il ouvre).
     pub fn narrow_own(&self, access: NodeAccess) -> NodeAccess {
-        NodeAccess {
-            level: access.level.min(self.level),
-            section: match self.scope {
-                Scope::Pages { .. } => mementum_acl::Section::Shared,
-                Scope::All | Scope::Space(_) => access.section,
-            },
-            barred: access.barred.union(self.barred()),
-            ..access
+        access.narrowed(self.level, self.barred(), self.roots().is_some())
+    }
+
+    /// La forme du jeton, pour le cache des restrictions (Ruling R1354) : ce qui décide de ce qu'il
+    /// voit d'un espace, et rien d'autre (le compte, le niveau, l'interdit, les racines triées ; une
+    /// portée « tous les espaces » et une portée « cet espace » restreignent cet espace pareil).
+    /// Deux jetons de même forme partagent l'entrée ; un hachage préfixé, qu'aucun compte ne porte.
+    pub fn shape(&self, account: Uuid) -> [u8; 16] {
+        let mut hash = Sha256::new()
+            .chain_update(b"mementum:forme-de-jeton:")
+            .chain_update(account.as_bytes())
+            .chain_update(self.level.as_str().as_bytes())
+            .chain_update([u8::from(self.can_trash)]);
+        match self.roots() {
+            None => hash.update([0]),
+            Some(roots) => {
+                hash.update([1]);
+                hash.update((roots.len() as u64).to_le_bytes());
+                for root in roots {
+                    hash.update(root.as_bytes());
+                }
+            }
         }
+        let digest = hash.finalize();
+        let mut shape = [0u8; 16];
+        shape.copy_from_slice(&digest[..16]);
+        shape
     }
 }

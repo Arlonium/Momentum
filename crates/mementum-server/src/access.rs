@@ -37,8 +37,8 @@
 //! du compte du jeton, restreint ici, et nulle part ailleurs : les fonctions gardent leur
 //! signature et lisent elles-mêmes `AuthUser::via`. Un espace hors de la portée du jeton vaut un
 //! espace sans rôle, avant toute lecture ; une route de tout l'espace ([`AppState::space_access`])
-//! reçoit le calcul du compte restreint (`SpaceAccess::narrowed`, gardé sous `(jeton, espace,
-//! rev)` dans le cache des accès, Ruling R1347) ; une route d'une
+//! reçoit le calcul du compte restreint (`SpaceAccess::narrowed`, gardé sous `(forme du jeton,
+//! espace, rev)` dans le cache des accès, Rulings R1347, R1354) ; une route d'une
 //! page ([`AppState::seen_node`]) juge la page seule, par la remontée de ses parents visibles
 //! (`SpaceAccess::narrowed_node`), si bien qu'une page hors de la portée reçoit son `404` sans que
 //! tout l'espace soit restreint ; [`AppState::own_access`] restreint aussi. L'interdit d'un jeton
@@ -167,9 +167,9 @@ fn barred(action: Action) -> ApiError {
             "un jeton d'API ne range pas une page sous une autre, ni à la racine : il ne la \
              déplace que parmi ses sœurs"
         }
-        Action::Trash => {
-            "ce jeton d'API ne met pas de page à la corbeille : crée un jeton avec l'option \
-             « corbeille »"
+        Action::Trash | Action::Restore => {
+            "ce jeton d'API ne met pas de page à la corbeille et ne l'en sort pas : crée un jeton \
+             avec l'option « corbeille »"
         }
         _ => "ce jeton d'API ne permet pas cette action : passe par l'application",
     })
@@ -323,7 +323,7 @@ impl AppState {
                 let Some(access) = token.narrow_node(&account, id) else {
                     return Ok(None);
                 };
-                let space = self.narrowed_space(token, &account, node.space_id, rev);
+                let space = self.narrowed_space(user, token, &account, node.space_id, rev);
                 Ok(Some((node, access, space)))
             }
         }
@@ -377,28 +377,32 @@ impl AppState {
         };
         Ok(Some(match user.token() {
             None => account,
-            Some(token) => self.narrowed_space(token, &account, space_id, rev),
+            Some(token) => self.narrowed_space(user, token, &account, space_id, rev),
         }))
     }
 
-    /// Le calcul du compte `account`, fait à la révision `rev`, restreint au jeton `token` : gardé
-    /// dans le cache des accès sous `(jeton, espace, rev)`, la révision du calcul qu'il restreint
-    /// (Ruling R1347 : à 100 000 pages, la restriction coûtait 2,6 ms à chaque page lue par jeton).
-    /// Un jeton ne change jamais de niveau ni de portée, et une page de sa portée qui part avance
-    /// la révision : la clé suffit.
+    /// Le calcul du compte de `user`, `account`, fait à la révision `rev`, restreint au jeton
+    /// `token` : gardé dans le cache des accès sous la forme du jeton (`TokenGrant::shape` : le
+    /// compte, le niveau, l'interdit, les racines), l'espace et la révision du calcul qu'il
+    /// restreint (Rulings R1347, R1354 : à 100 000 pages, la restriction coûtait 2,6 ms à chaque page
+    /// lue par jeton). Deux jetons de même forme partagent l'entrée, si bien que vingt jetons d'un
+    /// compte n'en prennent pas plus que de formes ; une forme ne change jamais, et une page de la
+    /// portée qui part avance la révision : la clé suffit.
     fn narrowed_space(
         &self,
+        user: &AuthUser,
         token: &TokenGrant,
         account: &SpaceAccess,
         space_id: Uuid,
         rev: i64,
     ) -> Arc<SpaceAccess> {
-        if let Some(kept) = self.access.get(token.token_id, space_id, rev) {
+        let shape = token.shape(user.id);
+        if let Some(kept) = self.access.get_narrowed(shape, space_id, rev) {
             return kept;
         }
         let narrowed = Arc::new(token.narrow_space(account));
         self.access
-            .put(token.token_id, space_id, rev, Arc::clone(&narrowed));
+            .put_narrowed(shape, space_id, rev, Arc::clone(&narrowed));
         narrowed
     }
 
@@ -1579,7 +1583,13 @@ pub(crate) mod tests {
             visible_parent: None,
             barred: grant.barred(),
         };
-        for action in [Action::Share, Action::Delete, Action::Move, Action::Trash] {
+        for action in [
+            Action::Share,
+            Action::Delete,
+            Action::Move,
+            Action::Trash,
+            Action::Restore,
+        ] {
             let refused = permit(&full, action).expect_err("refusé").into_response();
             assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{action:?}");
             let body = axum::body::to_bytes(refused.into_body(), usize::MAX)
@@ -1599,6 +1609,7 @@ pub(crate) mod tests {
             ..grant
         };
         assert!(!with_trash.barred().contains(Action::Trash));
+        assert!(!with_trash.barred().contains(Action::Restore));
         assert!(with_trash.barred().contains(Action::Share));
         // La page qu'un compte voit en accès complet, jugée par son jeton : le niveau du jeton et
         // son interdit, la session gardant les siens.
@@ -1672,5 +1683,50 @@ pub(crate) mod tests {
             .unwrap();
         assert!(!Arc::ptr_eq(&narrowed, &after));
         assert_eq!(after.node(second).unwrap().level, Level::Edit);
+    }
+
+    /// La restriction est rangée sous la forme du jeton, pas sous son identifiant (Ruling R1354) :
+    /// deux jetons de même forme (compte, niveau, interdit, racines) partagent l'entrée, si bien que
+    /// vingt jetons d'un compte ne prennent pas vingt entrées ; deux formes en prennent deux.
+    #[tokio::test]
+    async fn tokens_of_one_shape_share_one_narrowing() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let space = state
+            .store
+            .create_space("Mien", Some(olga.id))
+            .await
+            .unwrap();
+        let members = Grant {
+            subject: Subject::Members,
+            level: Level::Full,
+        };
+        page_with(&state, space.id, olga.id, members).await;
+        let narrowing = |user: &AuthUser| {
+            let state = state.clone();
+            let user = user.clone();
+            async move {
+                state
+                    .find_space_access(&user, space.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            }
+        };
+        let one = by_token(&olga, Level::Edit, crate::auth::Scope::All);
+        let two = by_token(&olga, Level::Edit, crate::auth::Scope::Space(space.id));
+        let reader = by_token(&olga, Level::Read, crate::auth::Scope::All);
+        let first = narrowing(&one).await;
+        assert!(
+            Arc::ptr_eq(&first, &narrowing(&two).await),
+            "même forme : une entrée"
+        );
+        let other = narrowing(&reader).await;
+        assert!(!Arc::ptr_eq(&first, &other), "deux formes : deux entrées");
+        assert!(Arc::ptr_eq(&other, &narrowing(&reader).await));
+        // Le calcul de la session reste le sien.
+        let session = state.space_access(&olga, space.id).await.unwrap();
+        assert!(!Arc::ptr_eq(&session, &first));
     }
 }
