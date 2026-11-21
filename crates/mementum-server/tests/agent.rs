@@ -380,6 +380,83 @@ async fn a_filter_only_narrows_the_allowed_set() {
         .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_filter");
 }
 
+/// Lot 5, correction groupée (mutation S7-07 de la relecture finale, Ruling R1248) : le filtre
+/// réduit l'ensemble donné à l'index, il ne trie pas ce que l'index a rendu. Vingt-deux pages
+/// d'Olga, mieux classées (le mot dans leur titre, et trois fois dans leur texte), ne passent pas
+/// le filtre « créée par Mona » ; les deux pages de Mona, moins bien classées, le passent : la
+/// recherche filtrée rend les deux, sans suite. Filtrées après l'index, les vingt premières pages
+/// rendues étaient d'Olga, et la réponse n'en gardait aucune.
+#[tokio::test]
+async fn a_filter_reaches_pages_ranked_below_twenty_that_do_not_pass_it() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    for i in 0..22 {
+        page_with(
+            &team,
+            &format!("Pivoine {i}"),
+            "Pivoine, pivoine, pivoine.\n",
+        )
+        .await;
+    }
+    let mut mona_pages = Vec::new();
+    for i in 0..2 {
+        let page = team
+            .mona
+            .create(json!({
+                "spaceId": team.space.to_string(),
+                "title": format!("Note {i}"),
+                "section": "space",
+            }))
+            .await;
+        team.mona
+            .put_mmd(
+                &page.id,
+                "Une pivoine, une seule, dans un texte assez long pour peser moins que les autres.\n",
+            )
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+        mona_pages.push(page.id);
+    }
+    t.indexer.settled().await;
+    let uri = format!("/api/v1/spaces/{}/search", team.space);
+    let pages = |reply: Reply| -> (Vec<String>, Value) {
+        reply.assert_status(StatusCode::OK);
+        let body = reply.json();
+        let found = body["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["pageId"].as_str().unwrap().to_string())
+            .collect();
+        (found, body["more"].clone())
+    };
+    // La précondition : sans filtre, les vingt premières pages sont celles d'Olga.
+    let (first, more) = pages(
+        team.olga
+            .browser
+            .post(&uri, json!({ "q": "pivoine" }))
+            .await,
+    );
+    assert_eq!((first.len(), more), (20, Value::Bool(true)));
+    assert!(
+        first.iter().all(|page| !mona_pages.contains(page)),
+        "{first:?}"
+    );
+    let (by_mona, more) = pages(
+        team.olga
+            .browser
+            .post(
+                &uri,
+                json!({ "q": "pivoine", "createdBy": team.mona.id.to_string() }),
+            )
+            .await,
+    );
+    let mut by_mona = by_mona;
+    by_mona.sort();
+    mona_pages.sort();
+    assert_eq!((by_mona, more), (mona_pages, Value::Bool(false)));
+}
+
 /// Vingt et une pages d'Olga que Mona voit, qui portent le mot ; puis cinq pages privées d'Olga
 /// qui le portent davantage (mieux classées) et passeraient le filtre « créée par Olga ». Les
 /// réponses de Mona, à `after` 0 et 20 (`more`, lignes, `indexing`), restent les mêmes, octet pour
