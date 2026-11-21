@@ -41,7 +41,6 @@ import {
   useId,
   useRef,
   useState,
-  type CSSProperties,
   type FormEvent,
   type ReactNode,
   type RefObject,
@@ -111,14 +110,19 @@ function treeOf(space: SpaceInfo | null): boolean {
   return space !== null && publishedSpace() === space.id;
 }
 
+/** Les pages proposées, avec leur profondeur quand elles suivent l'arbre, et combien la liste en tait. */
+type Offered = { pages: (FoundPage & { depth?: number })[]; hidden: number };
+
 /**
  * Les pages proposées pour `query` : celles de l'arbre de `space` s'il est l'arbre publié. Sans
- * recherche, dans l'ordre de l'arbre, chaque sous-page sous sa page avec sa profondeur (R1553) ; une
+ * recherche, dans l'ordre de l'arbre, toutes les pages de la racine d'abord, leurs sous-pages
+ * dépliées dans la place qui reste, et le nombre de celles qui n'y tiennent pas (R1553, R1690) ; une
  * recherche, à plat.
  */
-function offer(space: SpaceInfo | null, query: string): (FoundPage & { depth?: number })[] {
-  if (!treeOf(space)) return [];
-  return query.trim() === "" ? outlinePages(OFFERED) : findPages(query, OFFERED);
+function offer(space: SpaceInfo | null, query: string): Offered {
+  if (!treeOf(space)) return { pages: [], hidden: 0 };
+  if (query.trim() === "") return outlinePages(OFFERED);
+  return { pages: findPages(query, OFFERED), hidden: 0 };
 }
 
 /**
@@ -165,11 +169,11 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
   const [scope, setScope] = useState<TokenScope>(start?.scope ?? (current !== null ? "space" : "all"));
   const [spaceId, setSpaceId] = useState(start?.spaceId ?? current?.id ?? spaces[0]?.id ?? "");
   const [query, setQuery] = useState("");
-  const [offered, setOffered] = useState<(FoundPage & { depth?: number })[]>(() => offer(current, ""));
+  const [offered, setOffered] = useState<Offered>(() => offer(current, ""));
   const [chosen, setChosen] = useState<FoundPage[]>(start?.chosen ?? []);
   /** Les pages choisies hors de la liste proposée, figées comme elle : décochées, elles restent. */
   const [kept, setKept] = useState<FoundPage[]>(() =>
-    (start?.chosen ?? []).filter((p) => !offered.some((o) => o.id === p.id)),
+    (start?.chosen ?? []).filter((p) => !offered.pages.some((o) => o.id === p.id)),
   );
   // La corbeille ne vaut qu'avec « Modification » (mettre à la corbeille et en sortir demandent de
   // modifier, I4) : sous « Lecture », la case est grisée et décochée, et le serveur la refuse.
@@ -239,10 +243,10 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
   };
 
   const search = (next: string) => {
-    const pages = offer(current, next);
+    const shown = offer(current, next);
     setQuery(next);
-    setOffered(pages);
-    setKept(chosen.filter((p) => !pages.some((o) => o.id === p.id)));
+    setOffered(shown);
+    setKept(chosen.filter((p) => !shown.pages.some((o) => o.id === p.id)));
   };
 
   const toggle = (found: FoundPage) =>
@@ -599,7 +603,7 @@ type PickerProps = {
   searchRef: RefObject<HTMLInputElement | null>;
   query: string;
   /** Avec leur profondeur dans l'arbre quand on ne cherche rien (R1553). */
-  offered: readonly (FoundPage & { depth?: number })[];
+  offered: Offered;
   kept: readonly FoundPage[];
   chosen: readonly FoundPage[];
   /** L'arbre publié est celui de l'espace de la portée. */
@@ -617,29 +621,39 @@ function PagePicker({ searchRef, query, offered, kept, chosen, treeRead, onSearc
   const isChosen = (id: string) => chosen.some((p) => p.id === id);
   const full = chosen.length >= MAX_PAGES;
   let empty: string | null = null;
-  if (offered.length === 0) {
+  if (offered.pages.length === 0) {
     if (!treeRead) {
       empty =
         "Les pages de cet espace ne sont pas encore lues : ouvre-le dans la barre latérale, puis rouvre cette fenêtre.";
     } else if (query.trim() === "") empty = "Cet espace n'a aucune page que tu vois.";
     else empty = "Aucune page de l'arbre ne porte ce titre.";
   }
-  // Une sous-page en retrait de sa profondeur (`--depth`, comme une ligne de la barre latérale).
-  const box = (found: FoundPage, depth = 0) => (
-    <li key={found.id} style={depth > 0 ? ({ "--depth": depth } as CSSProperties) : undefined}>
-      <label className="mm-token-check">
-        <input
-          type="checkbox"
-          checked={isChosen(found.id)}
-          disabled={full && !isChosen(found.id)}
-          onChange={() => onToggle(found)}
-        />
-        <span className="mm-isolate" dir="auto">
-          {found.title || "Sans titre"}
-        </span>
-      </label>
+  const label = (found: FoundPage) => (
+    <label className="mm-token-check">
+      <input
+        type="checkbox"
+        checked={isChosen(found.id)}
+        disabled={full && !isChosen(found.id)}
+        onChange={() => onToggle(found)}
+      />
+      <span className="mm-isolate" dir="auto">
+        {found.title || "Sans titre"}
+      </span>
+    </label>
+  );
+  // Une sous-page dans une liste imbriquée sous sa page (R1553, R1690) : le retrait se voit, et un
+  // lecteur d'écran dit le niveau, et la liste « Sous-pages de « Projet » ».
+  const item = (branch: Branch) => (
+    <li key={branch.page.id}>
+      {label(branch.page)}
+      {branch.children.length > 0 && (
+        <ul className="mm-token-sub" aria-label={`Sous-pages de « ${branch.page.title || "Sans titre"} »`}>
+          {branch.children.map(item)}
+        </ul>
+      )}
     </li>
   );
+  const hidden = offered.hidden;
   return (
     <div className="mm-token-pages">
       <input
@@ -659,8 +673,15 @@ function PagePicker({ searchRef, query, offered, kept, chosen, treeRead, onSearc
         <p className="mm-token-choice-hint">{empty}</p>
       ) : (
         <ul className="mm-token-offered" aria-label="Pages proposées">
-          {offered.map((found) => box(found, found.depth))}
+          {nested(offered.pages).map(item)}
         </ul>
+      )}
+      {hidden > 0 && (
+        <p className="mm-token-choice-hint mm-token-more">
+          {hidden > 1
+            ? `et ${hidden} autres pages : cherche-les par leur titre.`
+            : "et 1 autre page : cherche-la par son titre."}
+        </p>
       )}
       <p className="mm-token-choice-hint" role="status">
         {chosen.length === 0
@@ -669,9 +690,30 @@ function PagePicker({ searchRef, query, offered, kept, chosen, treeRead, onSearc
       </p>
       {kept.length > 0 && (
         <ul className="mm-token-offered" aria-label="Autres pages choisies">
-          {kept.map((found) => box(found))}
+          {kept.map((found) => (
+            <li key={found.id}>{label(found)}</li>
+          ))}
         </ul>
       )}
     </div>
   );
+}
+
+/** Une page proposée et ses sous-pages proposées. */
+type Branch = { page: FoundPage; children: Branch[] };
+
+/** Les pages proposées, rangées en arbre d'après leur profondeur (une page vient avant ses sous-pages). */
+function nested(pages: readonly (FoundPage & { depth?: number })[]): Branch[] {
+  const top: Branch[] = [];
+  /** La dernière branche vue à chaque profondeur : les pages au-dessus de la page en cours. */
+  const path: Branch[] = [];
+  for (const page of pages) {
+    const depth = Math.min(page.depth ?? 0, path.length);
+    const branch: Branch = { page, children: [] };
+    if (depth === 0) top.push(branch);
+    else path[depth - 1].children.push(branch);
+    path.length = depth;
+    path.push(branch);
+  }
+  return top;
 }

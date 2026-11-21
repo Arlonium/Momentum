@@ -2388,9 +2388,15 @@ button.tree-toggle:hover {
   list-style: none;
 }
 
-/* Une sous-page en retrait de sa profondeur, sous sa page (R1553). */
-.mm-token-offered li {
-  padding-inline-start: calc(var(--depth, 0) * 20px);
+/* Les sous-pages, une liste imbriquée sous leur page, en retrait (R1553). */
+.mm-token-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 4px 0 0;
+  padding: 0;
+  padding-inline-start: 20px;
+  list-style: none;
 }
 
 .mm-token-expiry {

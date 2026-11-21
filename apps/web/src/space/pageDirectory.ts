@@ -50,41 +50,72 @@ function sameParents(a: ReadonlyMap<string, string>, b: ReadonlyMap<string, stri
   return true;
 }
 
-/** Les pages publiées dans l'ordre de l'arbre, bâties à la première demande ([`outlinePages`]). */
-let outline: readonly OutlinedPage[] | null = null;
+/** Les pages de la racine et les sous-pages de chaque page, bâties à la première demande. */
+type Tree = { readonly roots: readonly FoundPage[]; readonly children: ReadonlyMap<string, readonly FoundPage[]> };
 
-/**
- * Les pages publiées dans l'ordre où l'arbre les montre (recette du lot 5, B3, R1553) : chaque page
- * suivie de ses sous-pages, en profondeur, chacune avec sa profondeur. L'arbre que rend le serveur
- * est rangé par page parente (`pages` aussi) : une sous-page y vient après les pages de la racine.
- * Une page dont la page parente n'est pas publiée est à la racine de ce qu'on voit. Au plus `limit`.
- */
-export function outlinePages(limit: number): OutlinedPage[] {
-  if (outline === null) {
+/** L'arbre des pages publiées ([`outlinePages`]), refait au prochain arbre publié. */
+let tree: Tree | null = null;
+
+function treeOfPages(): Tree {
+  if (tree === null) {
     const { pages, parents } = directory;
-    const children = new Map<string | null, FoundPage[]>();
     const known = new Set(pages.map((page) => page.id));
+    const roots: FoundPage[] = [];
+    const children = new Map<string, FoundPage[]>();
     for (const page of pages) {
       const parent = parents.get(page.id);
-      const under = parent !== undefined && known.has(parent) ? parent : null;
-      const list = children.get(under);
-      if (list === undefined) children.set(under, [page]);
+      if (parent === undefined || !known.has(parent)) {
+        roots.push(page);
+        continue;
+      }
+      const list = children.get(parent);
+      if (list === undefined) children.set(parent, [page]);
       else list.push(page);
     }
-    const out: OutlinedPage[] = [];
-    const stack: OutlinedPage[] = [...(children.get(null) ?? [])].reverse().map((page) => ({ ...page, depth: 0 }));
-    const seen = new Set<string>();
-    while (stack.length > 0) {
+    tree = { roots, children };
+  }
+  return tree;
+}
+
+/** Ce que montre une liste qui suit l'arbre ([`outlinePages`]) : ses pages, et combien elle en tait. */
+export type Outline = { pages: OutlinedPage[]; hidden: number };
+
+/**
+ * Les pages publiées dans l'ordre où l'arbre les montre (recette du lot 5, B3, Rulings R1553, R1690) :
+ * chaque page suivie de ses sous-pages, en profondeur, chacune avec sa profondeur. L'arbre que rend
+ * le serveur est rangé par page parente (`pages` aussi) : une sous-page y vient après les pages de la
+ * racine. Une page dont la page parente n'est pas publiée est à la racine de ce qu'on voit.
+ *
+ * Au plus `limit` pages, et **toutes les pages de la racine d'abord** : leurs sous-pages ne sont
+ * dépliées que dans la place qui reste, dans l'ordre de l'arbre ; sans cela, la première page qui a
+ * des sous-pages repoussait les autres pages de la racine hors de la liste. `hidden` dit combien de
+ * pages la liste tait.
+ */
+export function outlinePages(limit: number): Outline {
+  const { roots, children } = treeOfPages();
+  const total = directory.pages.length;
+  if (roots.length >= limit) {
+    const pages = roots.slice(0, limit).map((page) => ({ ...page, depth: 0 }));
+    return { pages, hidden: total - pages.length };
+  }
+  let room = limit - roots.length;
+  const pages: OutlinedPage[] = [];
+  const seen = new Set<string>();
+  for (const root of roots) {
+    pages.push({ ...root, depth: 0 });
+    seen.add(root.id);
+    const stack: OutlinedPage[] = [...(children.get(root.id) ?? [])].reverse().map((page) => ({ ...page, depth: 1 }));
+    while (room > 0 && stack.length > 0) {
       const page = stack.pop()!;
       if (seen.has(page.id)) continue;
       seen.add(page.id);
-      out.push(page);
+      pages.push(page);
+      room -= 1;
       const kids = children.get(page.id) ?? [];
       for (let i = kids.length - 1; i >= 0; i--) stack.push({ ...kids[i], depth: page.depth + 1 });
     }
-    outline = out;
   }
-  return outline.slice(0, limit);
+  return { pages, hidden: total - pages.length };
 }
 
 /**
@@ -110,7 +141,7 @@ export function publishPages(spaceId: string | null, nodes: readonly PageNode[] 
           titles: new Map(pages.map((page) => [page.id, page.title])),
           folded: pages.map((page) => fold(page.title)),
         };
-  outline = null;
+  tree = null;
   for (const listener of [...listeners]) listener();
 }
 

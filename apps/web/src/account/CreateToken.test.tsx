@@ -356,11 +356,20 @@ test("the_page_list_says_why_it_is_empty_and_enter_does_not_send", async () => {
   expect(enter.defaultPrevented).toBe(true);
 });
 
+/** Les pages proposées, chacune « profondeur titre » : la profondeur est celle des listes imbriquées. */
+const outlined = () =>
+  [...dialog().querySelectorAll<HTMLElement>('[aria-label="Pages proposées"] li')].map((item) => {
+    let depth = 0;
+    for (let up = item.parentElement?.closest("li"); up; up = up.parentElement?.closest("li")) depth += 1;
+    return `${depth} ${item.querySelector("label")?.textContent?.trim()}`;
+  });
+
 test("sub_pages_come_under_their_page_set_in", async () => {
-  // Recette du lot 5, B3 (R1553) : l'arbre publié est rangé par page parente, si bien qu'une
+  // Recette du lot 5, B3 (R1553, R1690) : l'arbre publié est rangé par page parente, si bien qu'une
   // sous-page venait après les autres pages de la racine. Sans recherche, la liste suit l'arbre,
-  // chaque sous-page sous sa page, en retrait de sa profondeur ; une recherche montre ses pages à
-  // plat. Une page sous une page qui n'est pas dans l'arbre est à la racine de ce qu'on voit.
+  // chaque sous-page dans une liste imbriquée sous sa page (le retrait se voit, et un lecteur d'écran
+  // dit le niveau et « Sous-pages de « Projet » ») ; une recherche montre ses pages à plat. Une page
+  // sous une page qui n'est pas dans l'arbre est à la racine de ce qu'on voit.
   publishPages("pro", [
     page("p", { spaceId: "pro", title: "Projet", position: "a0" }),
     page("a", { spaceId: "pro", title: "Autre", position: "a1" }),
@@ -371,21 +380,61 @@ test("sub_pages_come_under_their_page_set_in", async () => {
   ]);
   await opened();
   await click(radios("scope").find((input) => input.value === "pages")!);
-  const items = () => [...dialog().querySelectorAll<HTMLElement>('[aria-label="Pages proposées"] li')];
-  const shown = () =>
-    items().map((item) => `${item.style.getPropertyValue("--depth") || "0"} ${item.textContent?.trim()}`);
-  expect(shown()).toEqual(["0 Projet", "1 Détails", "2 Notes", "1 Suite", "0 Autre", "0 Orpheline"]);
+  expect(outlined()).toEqual(["0 Projet", "1 Détails", "2 Notes", "1 Suite", "0 Autre", "0 Orpheline"]);
+  const under = dialog().querySelector('[aria-label="Sous-pages de « Projet »"]')!;
+  expect(under.tagName).toBe("UL");
+  expect([...under.children].map((item) => item.querySelector("label")?.textContent?.trim())).toEqual([
+    "Détails",
+    "Suite",
+  ]);
   // Cochée puis décochée, une sous-page reste à sa place.
   const box = (title: string) =>
-    items()
-      .find((item) => item.textContent?.trim() === title)!
+    [...dialog().querySelectorAll<HTMLLabelElement>('[aria-label="Pages proposées"] label')]
+      .find((label) => label.textContent?.trim() === title)!
       .querySelector<HTMLInputElement>("input")!;
   await click(box("Notes"));
   await click(box("Notes"));
-  expect(shown()).toEqual(["0 Projet", "1 Détails", "2 Notes", "1 Suite", "0 Autre", "0 Orpheline"]);
+  expect(outlined()).toEqual(["0 Projet", "1 Détails", "2 Notes", "1 Suite", "0 Autre", "0 Orpheline"]);
+  // Tout tient : rien n'est tu.
+  expect(dialog().querySelector(".mm-token-more")).toBeNull();
   // Une recherche : ses pages, à plat.
   await type(field("Chercher une page"), "s");
-  expect(shown().every((line) => line.startsWith("0 "))).toBe(true);
+  expect(outlined().every((line) => line.startsWith("0 "))).toBe(true);
+});
+
+test("the_pages_of_the_root_are_always_offered_and_the_rest_is_counted", async () => {
+  // Relecture des corrections de la recette (R1690) : la liste par défaut en montre huit, et neuf
+  // sous-pages de la première page repoussaient les deux autres pages de la racine hors de la liste.
+  // Toutes les pages de la racine viennent d'abord ; les sous-pages dans la place qui reste ; une
+  // ligne inerte dit combien la liste en tait.
+  publishPages("pro", [
+    page("p", { spaceId: "pro", title: "Projet", position: "a0" }),
+    page("q", { spaceId: "pro", title: "Questions", position: "a1" }),
+    page("r", { spaceId: "pro", title: "Réunions", position: "a2" }),
+    ...Array.from({ length: 9 }, (_, i) =>
+      page(`s${i}`, { spaceId: "pro", title: `Sous-page ${i + 1}`, parentId: "p", position: `a${i}` }),
+    ),
+  ]);
+  await opened();
+  await click(radios("scope").find((input) => input.value === "pages")!);
+  expect(outlined()).toEqual([
+    "0 Projet",
+    "1 Sous-page 1",
+    "1 Sous-page 2",
+    "1 Sous-page 3",
+    "1 Sous-page 4",
+    "1 Sous-page 5",
+    "0 Questions",
+    "0 Réunions",
+  ]);
+  const more = dialog().querySelector<HTMLElement>(".mm-token-more")!;
+  expect(more.textContent).toBe("et 4 autres pages : cherche-les par leur titre.");
+  // Inerte : ni case, ni bouton, ni lien.
+  expect(more.querySelector("input, button, a")).toBeNull();
+  // Une recherche les trouve.
+  await type(field("Chercher une page"), "Sous-page 9");
+  expect(outlined()).toEqual(["0 Sous-page 9"]);
+  expect(dialog().querySelector(".mm-token-more")).toBeNull();
 });
 
 test("a_page_unchecked_keeps_its_place", async () => {
