@@ -25,6 +25,8 @@ pub struct ApiError {
     body: ErrorBody,
     /// Secondes de l'en-tête `Retry-After` (`429 too_many_attempts`).
     retry_after: Option<u64>,
+    /// La réponse porte `WWW-Authenticate: Bearer` (`401 invalid_token`, Ruling R1215).
+    bearer: bool,
 }
 
 impl ApiError {
@@ -37,6 +39,7 @@ impl ApiError {
                 line: None,
             },
             retry_after: None,
+            bearer: false,
         }
     }
 
@@ -608,6 +611,45 @@ impl ApiError {
         )
     }
 
+    /// `401 invalid_token`, avec `WWW-Authenticate: Bearer` : le `Bearer mmt_…` ne porte pas un
+    /// jeton vivant. La même réponse pour un jeton mal formé, inconnu, révoqué, échu, ou d'un
+    /// compte parti (Ruling R1215) : elle ne dit rien à qui essaie.
+    pub fn invalid_token() -> ApiError {
+        let mut error = ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::InvalidToken,
+            "jeton d'API révoqué, échu ou inconnu : crée-en un autre dans ton compte",
+        );
+        error.bearer = true;
+        error
+    }
+
+    /// `403 token_not_allowed` : un jeton d'API sur une route qui ne s'ouvre qu'à une session
+    /// (Ruling R1222). Rien n'est lu ni écrit.
+    pub fn token_not_allowed() -> ApiError {
+        ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::TokenNotAllowed,
+            "cette route ne s'ouvre pas à un jeton d'API : passe par l'application ; rien n'a été \
+             fait",
+        )
+    }
+
+    /// `429 token_busy`, avec `Retry-After` : le débit du jeton, ou celui de son compte, est
+    /// atteint (Ruling R1241). Rien n'est fait.
+    pub fn token_busy(retry_after: u64) -> ApiError {
+        let mut error = ApiError::new(
+            StatusCode::TOO_MANY_REQUESTS,
+            ErrorCode::TokenBusy,
+            format!(
+                "trop d'appels par jeton dans la dernière minute pour ce compte : réessaie dans \
+                 {retry_after} s ; rien n'a été fait"
+            ),
+        );
+        error.retry_after = Some(retry_after);
+        error
+    }
+
     /// `400 invalid_request` : le corps d'un envoi s'est interrompu avant sa fin.
     pub fn interrupted_upload() -> ApiError {
         ApiError::new(
@@ -637,12 +679,21 @@ pub(crate) fn internal(error: impl std::fmt::Display) -> ApiError {
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
+        let code = self.body.error;
         let mut response = (self.status, Json(self.body)).into_response();
         if let Some(seconds) = self.retry_after {
             response
                 .headers_mut()
                 .insert(header::RETRY_AFTER, HeaderValue::from(seconds));
         }
+        if self.bearer {
+            response
+                .headers_mut()
+                .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
+        }
+        // Le code, lisible sans relire le corps : le journal d'activité d'un jeton le garde
+        // (`agent/calls.rs`, Ruling R1244).
+        response.extensions_mut().insert(code);
         response
     }
 }

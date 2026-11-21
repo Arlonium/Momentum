@@ -66,7 +66,7 @@ use mementum_schema::PropSpec;
 use mementum_store::{AtRoot, NewNode, Node, NodeKind, Place, Sibling, StoreError};
 use uuid::Uuid;
 
-use crate::access::{at_least, permit};
+use crate::access::{at_least, permit, permit_root_page};
 use crate::auth::{AuthUser, SessionUser};
 use crate::error::ApiError;
 
@@ -159,7 +159,7 @@ pub(crate) async fn trash_list(
             let at = node.trashed_at?;
             let access = access
                 .node(node.id)
-                .filter(|access| access.level.allows(Action::Restore))?;
+                .filter(|access| access.allows(Action::Restore))?;
             Some((at, page_node(node, access, Some(at))))
         })
         .collect();
@@ -226,7 +226,7 @@ pub(crate) async fn create(
                 )
             })?;
             let space = state.space_access(&user, space_id).await?;
-            let role = at_least(&space, Role::Member)?;
+            let role = permit_root_page(&space, &user)?;
             let subject = match body.section.unwrap_or_default() {
                 RootSection::Space => Subject::Members,
                 RootSection::Private => Subject::User(user.id),
@@ -631,7 +631,7 @@ pub(crate) async fn put_mmd(
     // la part du compte prise, refus sur-le-champ.
     let place = state
         .page_writes
-        .reserve(id, user.id)
+        .reserve(id, user.party())
         .ok_or_else(ApiError::page_busy)?;
     // Ruling R200 : une écriture du serveur à la fois par page, comme la restauration d'une
     // version. Le verrou se prend une fois le corps lu, et ce qui suit va au bout, verrou

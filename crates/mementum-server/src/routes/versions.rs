@@ -118,7 +118,7 @@ pub(crate) async fn restore(
     // dans la file est prise sur la part du compte, comme celle d'un `PUT /mmd` (R494).
     let write = state
         .page_writes
-        .reserve(id, user.id)
+        .reserve(id, user.party())
         .ok_or_else(ApiError::page_busy)?
         .lock()
         .await;

@@ -26,25 +26,26 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::Context;
 use argon2::Argon2;
 use argon2::password_hash::{self, PasswordHasher, PasswordVerifier};
-use axum::extract::{FromRequestParts, Request};
+use axum::extract::{FromRequestParts, MatchedPath, RawPathParams, Request};
 use axum::http::request::Parts;
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware::Next;
-use axum::response::Response;
+use axum::response::{IntoResponse, Response};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cookie::time::Duration;
 use cookie::{Cookie, SameSite};
-use mementum_store::{Backup, Store, User};
+use mementum_store::{Backup, Call, CallOutcome, CallSurface, LiveToken, Store, User};
 use sha2::{Digest, Sha256};
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+pub use crate::agent::grant::{Scope, TokenGrant, Via};
 use crate::error::ApiError;
 use crate::types::ErrorCode;
 use crate::{AppState, config, now_ms};
@@ -267,15 +268,19 @@ pub(crate) fn session_hash(headers: &HeaderMap) -> Option<[u8; 32]> {
         .and_then(|cookie| token_hash(cookie.value()))
 }
 
-/// Le compte de la session : cookie → session → compte, sinon `401
-/// unauthenticated`. À demander en argument d'une route qui exige une
-/// session ; la base est relue à chaque appel.
+/// Le compte de l'appel : celui de la session (cookie → session → compte), ou celui d'un jeton
+/// d'API que la porte des jetons a laissé passer ([`token_gate`]) ; sinon `401
+/// unauthenticated`. À demander en argument d'une route qui exige un compte ; la base est relue
+/// à chaque appel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuthUser {
     pub id: Uuid,
     pub email: String,
     pub name: String,
     pub instance_admin: bool,
+    /// Par où l'appel est venu. Seuls `access.rs` et `agent/` le lisent : une route n'en juge
+    /// aucun droit (lot 5, Ruling R1216).
+    pub via: Via,
 }
 
 impl From<User> for AuthUser {
@@ -285,7 +290,336 @@ impl From<User> for AuthUser {
             email: user.email,
             name: user.name,
             instance_admin: user.instance_admin,
+            via: Via::Session,
         }
+    }
+}
+
+impl AuthUser {
+    /// Le jeton de l'appel, s'il est venu par un jeton d'API.
+    pub(crate) fn token(&self) -> Option<&TokenGrant> {
+        match &self.via {
+            Via::Session => None,
+            Via::Token(grant) => Some(grant),
+        }
+    }
+
+    /// La part de l'appel dans les gardes par compte (une recherche à la fois, deux écritures
+    /// par page, une duplication à la fois) : le compte pour une session ; pour tout jeton du
+    /// compte, une part à eux, distincte de celle de sa session (Ruling R1242). Un identifiant
+    /// tiré du compte, qu'aucun compte ne porte.
+    pub(crate) fn party(&self) -> Uuid {
+        match self.via {
+            Via::Session => self.id,
+            Via::Token(_) => {
+                let digest = Sha256::new()
+                    .chain_update(b"mementum:jetons:")
+                    .chain_update(self.id.as_bytes())
+                    .finalize();
+                let mut bytes = [0u8; 16];
+                bytes.copy_from_slice(&digest[..16]);
+                Uuid::from_bytes(bytes)
+            }
+        }
+    }
+}
+
+/// Le préfixe d'un jeton d'API (Ruling R1213) : `mmt_` suivi des 43 caractères de [`new_token`].
+pub const TOKEN_PREFIX: &str = "mmt_";
+
+/// Les routes qu'un jeton d'API ouvre, par méthode et chemin déclaré (lot 5, Ruling R1222) ;
+/// toute autre route le refuse (`403 token_not_allowed`), avant que rien ne soit lu ou écrit.
+/// Une route neuve entre dans cette liste ou dans [`SESSION_ONLY_ROUTES`] : un test lit le
+/// routeur (`only_listed_routes_accept_a_token`). `GET /api/v1/me` et `GET …/members`
+/// s'ouvriront avec leur réponse sans adresse e-mail (Ruling R1247, Task S7) ; les routes des
+/// agents (`…/document`, `…/operations`, `…/pages/batch`) et `/mcp` avec leurs tâches.
+pub const TOKEN_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/api/v1/spaces/{id}/tree"),
+    ("POST", "/api/v1/spaces/{id}/search"),
+    ("POST", "/api/v1/pages"),
+    ("GET", "/api/v1/pages/{id}"),
+    ("PATCH", "/api/v1/pages/{id}"),
+    ("POST", "/api/v1/pages/{id}/trash"),
+    ("POST", "/api/v1/pages/{id}/restore"),
+    ("POST", "/api/v1/pages/{id}/duplicate"),
+    ("GET", "/api/v1/pages/{id}/mmd"),
+    ("GET", "/api/v1/pages/{id}/backlinks"),
+    ("GET", "/api/v1/pages/{id}/files/{file_id}"),
+];
+
+/// Les routes qui ne s'ouvrent jamais à un jeton (Ruling R1222) : les comptes et les sessions, les
+/// espaces et leurs membres, les invitations, le partage, la suppression définitive, les favoris,
+/// les commentaires, l'historique, les fichiers envoyés, `PUT …/mmd`, `/sync` et `/events`.
+pub const SESSION_ONLY_ROUTES: &[(&str, &str)] = &[
+    ("GET", "/health"),
+    ("GET", "/api/v1/info"),
+    ("POST", "/api/v1/auth/signup"),
+    ("POST", "/api/v1/auth/login"),
+    ("POST", "/api/v1/auth/logout"),
+    ("POST", "/api/v1/auth/password"),
+    ("GET", "/api/v1/me"),
+    ("POST", "/api/v1/spaces"),
+    ("PATCH", "/api/v1/spaces/{id}"),
+    ("GET", "/api/v1/spaces/{id}/members"),
+    ("PATCH", "/api/v1/spaces/{id}/members/{user_id}"),
+    ("DELETE", "/api/v1/spaces/{id}/members/{user_id}"),
+    ("GET", "/api/v1/spaces/{id}/invitations"),
+    ("POST", "/api/v1/spaces/{id}/invitations"),
+    ("DELETE", "/api/v1/invitations/{id}"),
+    ("POST", "/api/v1/invitations/lookup"),
+    ("POST", "/api/v1/invitations/accept"),
+    ("GET", "/api/v1/spaces/{id}/trash"),
+    ("GET", "/api/v1/spaces/{id}/favorites"),
+    ("DELETE", "/api/v1/pages/{id}"),
+    ("PUT", "/api/v1/pages/{id}/favorite"),
+    ("DELETE", "/api/v1/pages/{id}/favorite"),
+    ("PUT", "/api/v1/pages/{id}/mmd"),
+    ("GET", "/api/v1/pages/{id}/access"),
+    ("PUT", "/api/v1/pages/{id}/access/general"),
+    ("PUT", "/api/v1/pages/{id}/access/users/{user_id}"),
+    ("DELETE", "/api/v1/pages/{id}/access/users/{user_id}"),
+    ("POST", "/api/v1/pages/{id}/invitations"),
+    ("GET", "/api/v1/pages/{id}/comments"),
+    ("POST", "/api/v1/pages/{id}/comments"),
+    ("PATCH", "/api/v1/pages/{id}/comments/{thread_id}"),
+    ("DELETE", "/api/v1/pages/{id}/comments/{thread_id}"),
+    ("POST", "/api/v1/pages/{id}/comments/{thread_id}/replies"),
+    (
+        "PATCH",
+        "/api/v1/pages/{id}/comments/{thread_id}/messages/{comment_id}",
+    ),
+    (
+        "DELETE",
+        "/api/v1/pages/{id}/comments/{thread_id}/messages/{comment_id}",
+    ),
+    (
+        "PUT",
+        "/api/v1/pages/{id}/comments/{thread_id}/messages/{comment_id}/reactions/{emoji}",
+    ),
+    (
+        "DELETE",
+        "/api/v1/pages/{id}/comments/{thread_id}/messages/{comment_id}/reactions/{emoji}",
+    ),
+    ("GET", "/api/v1/files/limits"),
+    ("POST", "/api/v1/pages/{id}/files"),
+    ("POST", "/api/v1/pages/{id}/files/copies"),
+    ("GET", "/api/v1/pages/{id}/versions"),
+    ("GET", "/api/v1/pages/{id}/versions/{version_id}/state"),
+    ("POST", "/api/v1/pages/{id}/versions/{version_id}/restore"),
+    ("GET", "/sync/{id}"),
+    ("GET", "/events/{id}"),
+];
+
+/// Ce que porte l'en-tête `Authorization` d'une requête (Ruling R1214).
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Bearer<'a> {
+    /// Rien qui soit un jeton d'API : la session joue, comme sans en-tête.
+    Absent,
+    /// `Bearer mmt_…` : le texte du jeton, sans son préfixe.
+    Token(&'a str),
+    /// Un en-tête qui ne se lit pas comme un seul jeton là où il en faut un : `401
+    /// invalid_token`, jamais la session.
+    Invalid,
+}
+
+/// L'en-tête `Authorization` de la requête, sur la route `path` (Ruling R1214). Seul un `Bearer`
+/// qui commence par `mmt_` est un jeton ; donné avec un autre `Authorization`, ou deux fois,
+/// c'est un refus. Tout autre `Authorization` est ignoré (un mandataire d'authentification devant
+/// l'instance peut en poser un sur chaque requête du navigateur), sauf sur `/mcp`, qui n'accepte
+/// qu'un jeton (Ruling R1237) : là, c'est un refus.
+pub(crate) fn bearer<'a>(headers: &'a HeaderMap, path: &str) -> Bearer<'a> {
+    let values: Vec<&HeaderValue> = headers.get_all(header::AUTHORIZATION).iter().collect();
+    let tokens: Vec<Option<&str>> = values
+        .iter()
+        .map(|value| {
+            let text = value.to_str().ok()?;
+            let (scheme, rest) = text.split_once(' ')?;
+            let rest = rest.trim_start_matches(' ');
+            (scheme.eq_ignore_ascii_case("bearer") && rest.starts_with(TOKEN_PREFIX))
+                .then(|| &rest[TOKEN_PREFIX.len()..])
+        })
+        .collect();
+    let on_mcp = path == "/mcp" || path.starts_with("/mcp/");
+    match tokens.as_slice() {
+        [] => Bearer::Absent,
+        [Some(token)] => Bearer::Token(token),
+        _ if tokens.iter().any(Option::is_some) || on_mcp => Bearer::Invalid,
+        _ => Bearer::Absent,
+    }
+}
+
+/// Ce que la porte des jetons a laissé passer : le compte du jeton, restreint (`via`).
+#[derive(Clone)]
+struct TokenCaller(AuthUser);
+
+/// Ce qu'une route d'agent (Task S7) ou `/mcp` (Task M2) dit de l'appel pour son journal
+/// d'activité, dans les extensions de sa réponse : ce que la porte ne peut pas lire elle-même.
+/// Les champs absents gardent ce que la porte a lu (la route, la page ou l'espace du chemin,
+/// l'issue d'après le statut, le code d'après l'erreur).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CallDetails {
+    pub(crate) surface: Option<CallSurface>,
+    pub(crate) tool: Option<String>,
+    pub(crate) space_id: Option<Uuid>,
+    pub(crate) node_id: Option<Uuid>,
+    pub(crate) outcome: Option<CallOutcome>,
+    pub(crate) code: Option<String>,
+    pub(crate) revision_before: Option<String>,
+    pub(crate) revision_after: Option<String>,
+    pub(crate) blocks_touched: Option<i64>,
+}
+
+/// Les octets de corps qu'une requête annonce, pour le débit d'un jeton (Ruling R1241) : sa
+/// longueur annoncée ; sans elle, un corps envoyé par morceaux compte pour la borne d'un corps
+/// (2 Mio), qu'il ne peut pas dépasser ; sans corps, rien.
+fn announced_body(headers: &HeaderMap) -> u64 {
+    if let Some(length) = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
+        return length;
+    }
+    if headers.contains_key(header::TRANSFER_ENCODING) {
+        crate::MAX_BODY_BYTES as u64
+    } else {
+        0
+    }
+}
+
+/// La porte des jetons d'API (lot 5, Rulings R1214, R1215, R1222, R1241, R1244), posée sur chaque
+/// route déclarée (`route_layer`), donc après la couche de `guard.rs` (`403 bad_origin` d'une
+/// écriture). Une requête sans `Bearer mmt_…` passe telle quelle. Avec un jeton, dans l'ordre :
+/// `403 bad_origin` pour une `Origin` d'un autre site, même sur un `GET` ; `401 invalid_token`
+/// pour un jeton qui n'est pas vivant (la session n'est jamais regardée) ; `403
+/// token_not_allowed` hors de [`TOKEN_ROUTES`] ; `429 token_busy` au-delà du débit du jeton ou de
+/// son compte (`agent/calls.rs`). Puis la route reçoit le compte du jeton par [`AuthUser`], qui
+/// juge le compte attendu (`409 account_changed`, Ruling R540) ; l'appel admis laisse une ligne
+/// au journal d'activité du jeton, un refus du débit un compte seulement.
+pub(crate) async fn token_gate(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    matched: Option<MatchedPath>,
+    params: Result<RawPathParams, axum::extract::rejection::RawPathParamsRejection>,
+    mut request: Request,
+    next: Next,
+) -> Response {
+    let path = matched.as_ref().map(MatchedPath::as_str).unwrap_or("");
+    let text = match bearer(request.headers(), path) {
+        Bearer::Absent => return next.run(request).await,
+        Bearer::Invalid => return ApiError::invalid_token().into_response(),
+        Bearer::Token(text) => text.to_string(),
+    };
+    if !crate::guard::origin_allowed(
+        crate::guard::request_origin(request.headers()),
+        crate::guard::request_host(request.headers(), request.uri()),
+        state.public_origin.as_deref(),
+    ) {
+        return crate::guard::bad_origin().into_response();
+    }
+    let now = now_ms();
+    let (token, user) = match live_token(&state, &text, now).await {
+        Ok(Some(found)) => found,
+        Ok(None) => return ApiError::invalid_token().into_response(),
+        Err(error) => return error.into_response(),
+    };
+    let method = match request.method().as_str() {
+        "HEAD" => "GET",
+        method => method,
+    };
+    let route = (method, path);
+    if matched.is_none() || !TOKEN_ROUTES.contains(&route) {
+        return ApiError::token_not_allowed().into_response();
+    }
+    let tool = format!("{method} {path}");
+    let bytes = announced_body(request.headers());
+    if let Err(wait) = state
+        .calls
+        .admit(user.id, token.id, bytes, tokio::time::Instant::now())
+    {
+        state.calls.busy(token.id, now);
+        let seconds = wait.as_millis().div_ceil(1000).max(1) as u64;
+        return ApiError::token_busy(seconds).into_response();
+    }
+    let grant = Arc::new(TokenGrant::from_live(&token));
+    let caller = AuthUser {
+        via: Via::Token(grant),
+        ..AuthUser::from(user)
+    };
+    request.extensions_mut().insert(TokenCaller(caller));
+    let (space_id, node_id) = path_ids(path, params.ok().as_ref());
+    let response = next.run(request).await;
+    let details = response
+        .extensions()
+        .get::<CallDetails>()
+        .cloned()
+        .unwrap_or_default();
+    let status = response.status();
+    let outcome = if status.is_server_error() {
+        CallOutcome::Error
+    } else if status.is_client_error() {
+        CallOutcome::Refused
+    } else {
+        CallOutcome::Ok
+    };
+    let code = response
+        .extensions()
+        .get::<ErrorCode>()
+        .and_then(|code| serde_json::to_value(code).ok())
+        .and_then(|code| code.as_str().map(str::to_string));
+    state.calls.record(Call {
+        token_id: token.id,
+        at: now,
+        surface: details.surface.unwrap_or(CallSurface::Rest),
+        tool: details.tool.unwrap_or(tool),
+        space_id: details.space_id.or(space_id),
+        node_id: details.node_id.or(node_id),
+        outcome: details.outcome.unwrap_or(outcome),
+        code: details.code.or(code),
+        revision_before: details.revision_before,
+        revision_after: details.revision_after,
+        blocks_touched: details.blocks_touched,
+    });
+    response
+}
+
+/// Le jeton vivant de ce texte (sans le préfixe), et son compte ; `None` pour un texte qui n'est
+/// pas un jeton, un jeton qui n'est pas vivant, ou un compte parti. Deux lectures, rien d'écrit
+/// (un anonyme ne remplit aucune voie de la file, Ruling R517).
+async fn live_token(
+    state: &AppState,
+    text: &str,
+    now: i64,
+) -> Result<Option<(LiveToken, User)>, ApiError> {
+    let Some(hash) = token_hash(text) else {
+        return Ok(None);
+    };
+    let Some(token) = state
+        .store
+        .token_by_hash(hash, now)
+        .await
+        .map_err(|e| ApiError::internal(&e))?
+    else {
+        return Ok(None);
+    };
+    let user = state
+        .store
+        .get_user(token.user_id)
+        .await
+        .map_err(|e| ApiError::internal(&e))?;
+    Ok(user.map(|user| (token, user)))
+}
+
+/// La page ou l'espace que nomme le chemin d'une route (`{id}`), pour le journal d'activité.
+fn path_ids(path: &str, params: Option<&RawPathParams>) -> (Option<Uuid>, Option<Uuid>) {
+    let id = params
+        .and_then(|params| params.iter().find(|(name, _)| *name == "id"))
+        .and_then(|(_, value)| Uuid::try_parse(value).ok());
+    if path.starts_with("/api/v1/pages/") {
+        (None, id)
+    } else if path.starts_with("/api/v1/spaces/") {
+        (id, None)
+    } else {
+        (None, None)
     }
 }
 
@@ -293,6 +627,26 @@ impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<AuthUser, ApiError> {
+        // Un jeton que la porte a laissé passer : le compte du jeton, restreint ; la session
+        // n'est jamais regardée (Ruling R1214).
+        if let Some(TokenCaller(user)) = parts.extensions.get::<TokenCaller>() {
+            let user = user.clone();
+            check_named_account(
+                parts
+                    .headers
+                    .get_all(ACCOUNT_HEADER)
+                    .iter()
+                    .map(|v| v.to_str().ok()),
+                user.id,
+                "en-tête X-Mementum-Account",
+            )?;
+            mementum_store::attribute_writes_to(user.id);
+            return Ok(user);
+        }
+        // Un jeton qui n'est pas passé par la porte ne retombe jamais sur la session.
+        if bearer(&parts.headers, parts.uri.path()) != Bearer::Absent {
+            return Err(ApiError::invalid_token());
+        }
         let hash = session_hash(&parts.headers).ok_or_else(ApiError::unauthenticated)?;
         let user = state
             .store
@@ -380,12 +734,67 @@ impl FromRequestParts<AppState> for SessionUser {
         state: &AppState,
     ) -> Result<SessionUser, ApiError> {
         let user = AuthUser::from_request_parts(parts, state).await?;
+        // Les routes qui relisent leur session ne s'ouvrent pas à un jeton (Ruling R1222) : la
+        // porte les refuse déjà, ceci n'en est que le second verrou.
+        if user.token().is_some() {
+            return Err(ApiError::token_not_allowed());
+        }
         let session = session_hash(&parts.headers).ok_or_else(ApiError::unauthenticated)?;
         Ok(SessionUser { user, session })
     }
 }
 
+/// Ce qu'un appel long relit juste avant d'écrire (Rulings R89, R209) : sa session, ou son jeton
+/// d'API (lot 5 : `AppState::caller_still_live`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Proof {
+    Session([u8; 32]),
+    Token(Uuid),
+}
+
+/// Le compte de l'appel, comme [`AuthUser`], avec de quoi le relire plus tard ([`Proof`]) : pour
+/// une route ouverte aux jetons qui relit, juste avant d'écrire, que l'appel vaut encore (la
+/// duplication).
+#[derive(Debug, Clone)]
+pub(crate) struct LiveCaller {
+    pub(crate) user: AuthUser,
+    pub(crate) proof: Proof,
+}
+
+impl FromRequestParts<AppState> for LiveCaller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<LiveCaller, ApiError> {
+        let user = AuthUser::from_request_parts(parts, state).await?;
+        let proof = match user.token() {
+            Some(token) => Proof::Token(token.token_id),
+            None => {
+                Proof::Session(session_hash(&parts.headers).ok_or_else(ApiError::unauthenticated)?)
+            }
+        };
+        Ok(LiveCaller { user, proof })
+    }
+}
+
 impl AppState {
+    /// `401` si l'appel ne vaut plus : sa session fermée ou échue (`unauthenticated`, Ruling
+    /// R209), son jeton révoqué, échu ou parti (`invalid_token`, lot 5).
+    pub(crate) async fn caller_still_live(&self, proof: Proof) -> Result<(), ApiError> {
+        match proof {
+            Proof::Session(session) => self.session_still_live(session).await,
+            Proof::Token(token) => {
+                if self.store.token_is_live(token, now_ms()).await? {
+                    Ok(())
+                } else {
+                    Err(ApiError::invalid_token())
+                }
+            }
+        }
+    }
+
     /// `401 unauthenticated` si la session `session` ne vaut plus : fermée (déconnexion,
     /// changement de mot de passe, connexion par-dessus) ou échue (Ruling R209).
     pub(crate) async fn session_still_live(&self, session: [u8; 32]) -> Result<(), ApiError> {
@@ -1177,5 +1586,107 @@ mod tests {
             Ok(())
         );
         assert_eq!(tracked(&throttle), (2, LOGIN_TRACKED_MAX));
+    }
+
+    fn headers(values: &[&str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(header::AUTHORIZATION, value.parse().unwrap());
+        }
+        headers
+    }
+
+    /// Seul un `Bearer mmt_…` est un jeton ; tout autre `Authorization` est ignoré hors de `/mcp`,
+    /// refusé sur `/mcp` ; un jeton accompagné d'un autre en-tête est un refus (Ruling R1214).
+    #[test]
+    fn only_a_bearer_with_the_prefix_is_a_token() {
+        let page = "/api/v1/pages/{id}";
+        assert_eq!(bearer(&headers(&[]), page), Bearer::Absent);
+        assert_eq!(
+            bearer(&headers(&["Bearer mmt_abc"]), page),
+            Bearer::Token("abc")
+        );
+        assert_eq!(
+            bearer(&headers(&["bearer  mmt_abc"]), page),
+            Bearer::Token("abc")
+        );
+        for other in ["Bearer abc", "Basic YTpi", "Bearer mmtx_abc", "mmt_abc"] {
+            assert_eq!(bearer(&headers(&[other]), page), Bearer::Absent, "{other}");
+            assert_eq!(
+                bearer(&headers(&[other]), "/mcp"),
+                Bearer::Invalid,
+                "{other}"
+            );
+            assert_eq!(bearer(&headers(&[other]), "/mcp/readonly"), Bearer::Invalid);
+        }
+        assert_eq!(
+            bearer(&headers(&["Bearer mmt_abc"]), "/mcp"),
+            Bearer::Token("abc")
+        );
+        assert_eq!(
+            bearer(&headers(&["Bearer mmt_abc", "Basic YTpi"]), page),
+            Bearer::Invalid
+        );
+        assert_eq!(
+            bearer(&headers(&["Bearer mmt_abc", "Bearer mmt_abc"]), page),
+            Bearer::Invalid
+        );
+        assert_eq!(
+            bearer(&headers(&["Basic YTpi", "Bearer x"]), page),
+            Bearer::Absent
+        );
+    }
+
+    /// Un agent qui cherche ne prend pas la place de son propriétaire (Ruling R1242) : tous les
+    /// jetons d'un compte partagent une part des gardes par compte, distincte de celle de sa
+    /// session. Deux recherches par jeton (une admise, une en attente) laissent passer celle de
+    /// la session tout de suite, et la seconde du jeton n'est pas refusée pour autant.
+    #[tokio::test]
+    async fn an_agent_searching_does_not_take_the_place_of_its_owner() {
+        let session = AuthUser {
+            id: Uuid::now_v7(),
+            email: "mona@exemple.fr".to_string(),
+            name: "Mona".to_string(),
+            instance_admin: false,
+            via: Via::Session,
+        };
+        let token = |id| AuthUser {
+            via: Via::Token(Arc::new(TokenGrant {
+                token_id: id,
+                level: mementum_acl::Level::Read,
+                scope: Scope::All,
+                can_trash: false,
+            })),
+            ..session.clone()
+        };
+        let (one, two) = (token(Uuid::now_v7()), token(Uuid::now_v7()));
+        assert_eq!(
+            one.party(),
+            two.party(),
+            "les jetons d'un compte partagent une part"
+        );
+        assert_ne!(one.party(), session.party());
+        assert_eq!(session.party(), session.id);
+        let searches = crate::Searches::default();
+        let Ok(first) = searches.enter(one.party()).await else {
+            panic!("la première recherche de l'agent est admise");
+        };
+        let waiting = {
+            let searches = searches.clone();
+            let party = two.party();
+            tokio::spawn(async move { searches.enter(party).await.is_ok() })
+        };
+        let owner = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            searches.enter(session.party()),
+        )
+        .await
+        .expect("la recherche de la session n'attend pas l'agent");
+        assert!(owner.is_ok());
+        drop(first);
+        assert!(
+            waiting.await.unwrap(),
+            "la seconde de l'agent n'a pas été refusée"
+        );
     }
 }

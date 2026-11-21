@@ -66,6 +66,8 @@ pub struct TestApp {
     pub store: Store,
     /// Le hub de l'application.
     pub hub: Arc<mementum_sync::Hub>,
+    /// L'écriture du journal d'activité des jetons (lot 5) : `flush` écrit tout de suite.
+    pub calls: mementum_server::agent::calls::CallsHandle,
 }
 
 pub struct Reply {
@@ -176,6 +178,7 @@ impl TestApp {
             hub: started.hub().clone(),
             indexer: started.indexer.clone(),
             searches: started.searches.clone(),
+            calls: started.calls.clone(),
             router: started.router,
             cfg,
         }
@@ -186,6 +189,7 @@ impl TestApp {
     pub async fn stop(self) -> (TestDir, Config) {
         self.hub.shutdown().await;
         self.indexer.stop().await;
+        self.calls.stop().await;
         self.store.close().await;
         (self._dir, self.cfg)
     }
@@ -289,6 +293,49 @@ impl TestApp {
             browser,
         }
     }
+}
+
+/// Un jeton d'API de `user`, écrit par le store (lot 5) : jamais un vrai jeton, il est tiré
+/// ici. Rend son texte (`mmt_…`, ce que porte `Authorization: Bearer`) et son identifiant.
+pub async fn api_token(
+    store: &Store,
+    user: Uuid,
+    level: mementum_store::TokenLevel,
+    scope: mementum_store::TokenScope,
+    can_trash: bool,
+) -> (String, Uuid) {
+    let (text, hash) = mementum_server::auth::new_token();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let row = store
+        .create_token(mementum_store::NewToken {
+            user_id: user,
+            name: "agent de test".to_string(),
+            hash,
+            hint: text[text.len() - 4..].to_string(),
+            level,
+            scope,
+            can_trash,
+            expires_at: None,
+            now,
+        })
+        .await
+        .unwrap();
+    (
+        format!("{}{text}", mementum_server::auth::TOKEN_PREFIX),
+        row.id,
+    )
+}
+
+/// La requête, avec `Authorization: Bearer <jeton>`.
+pub fn with_bearer(mut req: Request<Body>, token: &str) -> Request<Body> {
+    req.headers_mut().insert(
+        header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    req
 }
 
 /// Ce que contient la base écrite par [`lot1_database`] : un coffre, une page

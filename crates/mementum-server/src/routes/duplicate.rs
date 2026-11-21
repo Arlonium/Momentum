@@ -59,8 +59,8 @@ use mementum_store::{CopiedAttachment, CopiedPage, NewCopy, Node, NodeKind, Sibl
 use mementum_sync::SyncError;
 use uuid::Uuid;
 
-use crate::access::{at_least, permit, permit_level};
-use crate::auth::{AuthUser, SessionUser};
+use crate::access::{permit, permit_level, permit_root_page};
+use crate::auth::{AuthUser, LiveCaller};
 use crate::duplications::Busy;
 use crate::error::ApiError;
 use crate::routes::pages::{MAX_TITLE_CHARS, page_id, page_node};
@@ -183,7 +183,7 @@ impl AppState {
             .await?
             .ok_or_else(ApiError::page_not_found)?;
         permit(&access, Action::Read)?;
-        let destination = destination(&space, &access)?;
+        let destination = destination(&space, &access, user)?;
         if access.in_trash {
             return Err(ApiError::trashed());
         }
@@ -206,7 +206,11 @@ impl AppState {
 
 /// Où va la copie d'une page d'accès `access` (voir le module). La corbeille n'y entre pas :
 /// l'appelant la refuse ensuite, pour la page comme pour sa page parente.
-fn destination(space: &SpaceAccess, access: &NodeAccess) -> Result<Destination, ApiError> {
+fn destination(
+    space: &SpaceAccess,
+    access: &NodeAccess,
+    user: &AuthUser,
+) -> Result<Destination, ApiError> {
     if let Some(parent) = access.visible_parent
         && let Some(above) = space.node(parent)
         && permit_level(above, Action::CreateChild).is_ok()
@@ -216,7 +220,8 @@ fn destination(space: &SpaceAccess, access: &NodeAccess) -> Result<Destination, 
             access: *above,
         });
     }
-    let role = at_least(space, Role::Member)?;
+    // À la racine : ce qu'il faut pour y créer une page, niveau d'un jeton compris (R1218).
+    let role = permit_root_page(space, user)?;
     Ok(Destination::Private { role })
 }
 
@@ -396,10 +401,10 @@ fn copied_doc(
 /// voit (voir le module).
 pub(crate) async fn duplicate(
     State(state): State<AppState>,
-    caller: SessionUser,
+    caller: LiveCaller,
     path: Result<Path<String>, PathRejection>,
 ) -> Result<(StatusCode, Json<PageNode>), ApiError> {
-    let SessionUser { user, session } = caller;
+    let LiveCaller { user, proof } = caller;
     let id = page_id(path)?;
     // Premier contrôle : les refus, avant de lire quoi que ce soit d'une page.
     let first = state.duplication(&user, id).await?;
@@ -408,7 +413,7 @@ pub(crate) async fn duplicate(
     // est bâti d'ici là est compté au budget, écrit ou non.
     // La garde est partagée avec chaque calcul (constat N1) : une requête abandonnée pendant une
     // construction garde sa place, et compte le document, jusqu'à la fin de ce calcul.
-    let running = Arc::new(state.duplications.begin(user.id).map_err(busy)?);
+    let running = Arc::new(state.duplications.begin(user.party()).map_err(busy)?);
     let space_id = first.node.space_id;
     let nodes = state.store.list_nodes(space_id).await?;
     let sources = seen_subtree(&first.space, &nodes, id, MAX_DUPLICATED_PAGES);
@@ -472,8 +477,9 @@ pub(crate) async fn duplicate(
         let _running = running;
         let mut built = built;
         for _ in 0..DUPLICATE_RETRIES {
-            // Second contrôle, juste avant d'écrire : la session, la page, la destination.
-            state.session_still_live(session).await?;
+            // Second contrôle, juste avant d'écrire : la session (ou le jeton), la page, la
+            // destination.
+            state.caller_still_live(proof).await?;
             let now = state.duplication(&user, id).await?;
             let (parent_id, after, grants, access) = match now.destination {
                 Destination::Beside { parent, access } => {

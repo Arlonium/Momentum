@@ -87,6 +87,31 @@
 //! (Ruling R542). L'envoi d'un fichier lit et jette son corps avant ce refus, comme avant les
 //! autres refus faits à un compte (Rulings R505, R545).
 //!
+//! **Jetons d'API** (lot 5, `auth.rs` et `agent/`, Rulings R1213 à R1218, R1222, R1241, R1242,
+//! R1244). Un appel peut venir d'un agent, avec `Authorization: Bearer mmt_…` : c'est alors un
+//! appel du compte du jeton, restreint (la colonne « Session » vaut pour lui, sous la portée, le
+//! niveau et l'interdit du jeton). Seul un `Bearer` qui commence par `mmt_` est un jeton ; la
+//! requête ignore alors le cookie de session, et ne retombe jamais sur lui ; tout autre
+//! `Authorization` est ignoré (sauf sur `/mcp`, à venir). Une porte posée sur chaque route
+//! déclarée (`auth::token_gate`) juge, dans l'ordre : `403 bad_origin` pour une `Origin` d'un autre
+//! site, lecture comprise ; `401 invalid_token` (avec `WWW-Authenticate: Bearer`) pour un jeton mal
+//! formé, inconnu, révoqué, échu ou d'un compte parti, une seule réponse ; `403 token_not_allowed`
+//! hors des routes ouvertes (`auth::TOKEN_ROUTES` : l'arbre, la recherche, la création d'une page,
+//! la lecture, le renommage et la place d'une page parmi ses sœurs, la corbeille et la
+//! restauration, la duplication, le MMD en lecture, les rétroliens, la lecture d'un fichier ; toute
+//! autre route est dans `auth::SESSION_ONLY_ROUTES`, `PUT …/mmd`, `/sync` et `/events` compris),
+//! rien de lu ni d'écrit ; `429 token_busy` (avec `Retry-After`) au-delà de 120 appels par minute
+//! glissante pour le jeton, ou de 240 pour tous les jetons de son compte, ou de 16 et 32 Mio de
+//! corps (`MEMENTUM_TOKEN_CALLS_PER_MIN`, `MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN`) ; puis le compte
+//! attendu (`409 account_changed`) et l'ordre de toujours. Une page hors de la portée d'un jeton
+//! reçoit la réponse d'une page inconnue. Un jeton ne partage pas, ne supprime pas pour de bon, ne
+//! change pas une page de parent (ni ne la passe à la racine), ne met à la corbeille qu'avec son
+//! option, et ne crée à la racine qu'au niveau « Modification » et membre de l'espace, dans les deux
+//! sections. Les gardes par compte (une recherche à la fois, deux écritures par page, une
+//! duplication à la fois) donnent à tous les jetons d'un compte une part à eux, distincte de celle
+//! de sa session. Chaque appel admis laisse une ligne au journal d'activité du jeton, écrite par
+//! paquets ; un refus du débit n'écrit qu'un compte.
+//!
 //! **Droits** (`access.rs`, le seul chemin par lequel les routes les calculent ; ce qui écrit
 //! un droit durable est revérifié par le store dans la transaction qui l'écrit, Ruling R100) :
 //! la colonne « Session » donne ce qu'il faut : un rôle dans l'espace pour les
@@ -241,6 +266,7 @@
 //! marqué `guard::FileResponse`, garde son `Cache-Control: private, no-cache`.
 
 mod access;
+pub mod agent;
 pub mod auth;
 pub mod config;
 mod duplications;
@@ -369,6 +395,9 @@ pub(crate) struct AppState {
     /// Le débit des recherches, par compte : une admise et une en attente, quatre calculs de
     /// front pour l'instance (`searches.rs`, Ruling R910).
     searches: Searches,
+    /// Le débit des appels par jeton d'API et leur journal d'activité (`agent/calls.rs`, Rulings
+    /// R1241, R1244).
+    calls: Arc<agent::calls::Calls>,
 }
 
 /// Millisecondes Unix.
@@ -421,6 +450,8 @@ pub struct Started {
     /// Le débit des recherches : ses compteurs. Pour les tests.
     #[doc(hidden)]
     pub searches: Searches,
+    /// L'écriture du journal d'activité des jetons, en fond : arrêtée avant la base.
+    pub calls: agent::calls::CallsHandle,
     store: Store,
     hub: Arc<Hub>,
 }
@@ -445,6 +476,7 @@ impl Started {
     pub async fn shutdown(self) {
         self.hub.shutdown().await;
         self.indexer.stop().await;
+        self.calls.stop().await;
         self.store.close().await;
     }
 }
@@ -612,8 +644,15 @@ async fn build(cfg: &Config) -> anyhow::Result<Started> {
         duplications: Arc::default(),
         indexer: indexer.clone(),
         searches: Searches::default(),
+        calls: Arc::new(agent::calls::Calls::new(agent::calls::Limits {
+            token_calls: cfg.token_calls_per_min,
+            account_calls: cfg.account_token_calls_per_min,
+            ..agent::calls::Limits::default()
+        })),
     };
+    let calls = state.calls.spawn_writer(store.clone());
     Ok(Started {
+        calls,
         searches: state.searches.clone(),
         router: router(state),
         indexer,
@@ -776,6 +815,12 @@ fn router(state: AppState) -> Router {
         )
         .route("/sync/{id}", get(sync::sync))
         .route("/events/{id}", get(routes::events::events))
+        // Sur chaque route déclarée, pas sur les fallbacks : la porte des jetons d'API lit le
+        // chemin déclaré (lot 5, Rulings R1214, R1222).
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::token_gate,
+        ))
         .fallback(async || {
             ApiError::new(StatusCode::NOT_FOUND, ErrorCode::NotFound, "route inconnue")
         })

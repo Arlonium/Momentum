@@ -136,6 +136,11 @@ pub(crate) fn caller(
         return Err(guard::bad_origin());
     }
     let user = user?;
+    // Ni `/sync` ni `/events` ne s'ouvrent à un jeton d'API (Ruling R1222) : la porte des jetons
+    // les refuse déjà ; ceci n'en est que le second verrou.
+    if user.token().is_some() {
+        return Err(ApiError::token_not_allowed());
+    }
     // Ruling R541 : le paramètre `account` tient lieu de l'en-tête, que l'extracteur a déjà
     // vérifié s'il est là ; même règle, juste après le `401`.
     // Noms et valeurs décodés : un nom écrit en `%xx` est vu.

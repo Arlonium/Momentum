@@ -33,6 +33,19 @@
 //! corbeille, qui ne l'empêche pas (Ruling R203) : `404`, `403` sous `edit`, puis le `404` d'une
 //! version.
 //!
+//! **Jetons d'API** (lot 5, Rulings R1216, R1217, R1256, R1574). Un appel par jeton est un appel
+//! du compte du jeton, restreint ici, et nulle part ailleurs : les fonctions gardent leur
+//! signature et lisent elles-mêmes `AuthUser::via`. Un espace hors de la portée du jeton vaut un
+//! espace sans rôle, avant toute lecture ; une route de tout l'espace ([`AppState::space_access`])
+//! reçoit le calcul du compte restreint (`SpaceAccess::narrowed`, sans cache) ; une route d'une
+//! page ([`AppState::seen_node`]) juge la page seule, par la remontée de ses parents visibles
+//! (`SpaceAccess::narrowed_node`), si bien qu'une page hors de la portée reçoit son `404` sans que
+//! tout l'espace soit restreint ; [`AppState::own_access`] restreint aussi. L'interdit d'un jeton
+//! (`NodeAccess::barred` : partager, supprimer pour de bon, changer de parent, la corbeille sans
+//! l'option) voyage dans le `NodeAccess`, que [`permit`] lit après le niveau : une route n'a rien à
+//! faire pour le respecter. [`permit_root_page`] juge une création à la racine (membre, et le
+//! niveau « Modification » d'un jeton).
+//!
 //! **Cache** : la clé est `spaces.rev`, que le store incrémente dans la transaction de toute
 //! écriture qui change une entrée du calcul des accès. Deux étages, tous deux rangés sous elle :
 //! - les données de l'espace ([`InputsCache`]) : ses nœuds, ses lignes d'accès et ses rôles,
@@ -130,10 +143,51 @@ pub(crate) fn permit(access: &NodeAccess, action: Action) -> Result<(), ApiError
             .unwrap_or(Level::Full);
         return Err(below(needed, access.level));
     }
+    // L'interdit d'un jeton d'API, après le niveau (Rulings R1216, R1218) : vide pour une
+    // session.
+    if access.barred.contains(action) {
+        return Err(barred(action));
+    }
     if access.in_trash && writes(action) {
         return Err(ApiError::trashed());
     }
     Ok(())
+}
+
+/// `403 forbidden` : un jeton d'API ne fait pas `action`, quel que soit son niveau. Le message dit
+/// que c'est le jeton, et quoi faire.
+fn barred(action: Action) -> ApiError {
+    ApiError::forbidden(match action {
+        Action::Share => "un jeton d'API ne partage pas une page : passe par l'application",
+        Action::Delete => {
+            "un jeton d'API ne supprime pas une page pour de bon : passe par l'application"
+        }
+        Action::Move => {
+            "un jeton d'API ne range pas une page sous une autre, ni à la racine : il ne la \
+             déplace que parmi ses sœurs"
+        }
+        Action::Trash => {
+            "ce jeton d'API ne met pas de page à la corbeille : crée un jeton avec l'option \
+             « corbeille »"
+        }
+        _ => "ce jeton d'API ne permet pas cette action : passe par l'application",
+    })
+}
+
+/// Créer une page à la racine de l'espace `space` (ou y poser la copie d'une page) : être
+/// membre, et, pour un jeton d'API, avoir le niveau « Modification » (Ruling R1218), dans les deux
+/// sections. Rend le rôle, comme [`at_least`].
+pub(crate) fn permit_root_page(space: &SpaceAccess, user: &AuthUser) -> Result<Role, ApiError> {
+    let role = at_least(space, Role::Member)?;
+    if let Some(token) = user.token()
+        && !token.level.allows(Action::Edit)
+    {
+        return Err(ApiError::forbidden(
+            "ce jeton d'API ne fait que lire : il faut un jeton « Modification » pour créer une \
+             page",
+        ));
+    }
+    Ok(role)
 }
 
 /// `403 forbidden` : il faut `needed` sur la page, la personne a `held`.
@@ -250,19 +304,34 @@ impl AppState {
         let Some(node) = self.store.get_node(id).await.map_err(internal)? else {
             return Ok(None);
         };
-        let Some(space) = self.find_space_access(user, node.space_id).await? else {
+        let Some(account) = self.account_access(user, node.space_id).await? else {
             return Ok(None);
         };
-        let Some(access) = space.node(id).copied() else {
-            return Ok(None);
-        };
-        Ok(Some((node, access, space)))
+        match user.token() {
+            None => {
+                let Some(access) = account.node(id).copied() else {
+                    return Ok(None);
+                };
+                Ok(Some((node, access, account)))
+            }
+            // Un jeton : la page est jugée seule, par la remontée de ses parents visibles
+            // (Ruling R1256), si bien qu'une page hors de la portée reçoit sa réponse sans que
+            // tout l'espace soit restreint ; dans la portée, la route reçoit l'espace restreint,
+            // où elle lit d'autres pages (une sœur, la page parente, des sources).
+            Some(token) => {
+                let Some(access) = token.narrow_node(&account, id) else {
+                    return Ok(None);
+                };
+                Ok(Some((node, access, Arc::new(token.narrow_space(&account)))))
+            }
+        }
     }
 
     /// Ce que les seules lignes posées sur une page (`own`) donnent à `user`, sans ses
     /// ancêtres : ses accès à cette page si elle était à la racine de l'espace, hors corbeille.
     /// `None` : elles ne lui donnent rien. Pour dire ce que devient une page qu'on vient de
-    /// créer ou de changer de parent, sans relire les droits de tout l'espace.
+    /// créer ou de changer de parent, sans relire les droits de tout l'espace. Pour un jeton
+    /// d'API, restreints à lui comme tout autre calcul (Ruling R1216).
     pub(crate) fn own_access(own: &[Grant], user: &AuthUser, role: Role) -> Option<NodeAccess> {
         // Une page seule dans son arbre : son id ne sert qu'à lui rattacher ses lignes.
         let alone = TreeNode {
@@ -272,7 +341,11 @@ impl AppState {
         };
         let lines: Vec<_> = own.iter().map(|grant| (alone.id, *grant)).collect();
         let access = SpaceAccess::compute(&[alone], &lines, user.id, Some(role));
-        access.node(alone.id).copied()
+        let access = access.node(alone.id).copied()?;
+        Some(match user.token() {
+            None => access,
+            Some(token) => token.narrow_own(access),
+        })
     }
 
     /// Les accès de `user` dans l'espace : lus dans le cache si `spaces.rev` n'a pas bougé ;
@@ -289,12 +362,35 @@ impl AppState {
     }
 
     /// Comme [`AppState::space_access`], mais `None` pour un espace inconnu ou sans rôle : la
-    /// route choisit sa réponse (une invitation introuvable, par exemple).
+    /// route choisit sa réponse (une invitation introuvable, par exemple). Pour un jeton d'API,
+    /// ce que voit son compte, restreint au jeton (Ruling R1217) ; un espace hors de sa portée
+    /// vaut un espace sans rôle, sans que rien de lui ne soit lu.
     pub(crate) async fn find_space_access(
         &self,
         user: &AuthUser,
         space_id: Uuid,
     ) -> Result<Option<Arc<SpaceAccess>>, ApiError> {
+        let Some(account) = self.account_access(user, space_id).await? else {
+            return Ok(None);
+        };
+        Ok(Some(match user.token() {
+            None => account,
+            // Sans cache : la restriction est faite à chaque appel (Rulings R1573, R1340).
+            Some(token) => Arc::new(token.narrow_space(&account)),
+        }))
+    }
+
+    /// Ce que voit le compte de l'appel, sans la restriction d'un jeton : par le cache des accès.
+    /// Pour un jeton, un espace hors de sa portée est `None` **avant** toute lecture, révision et
+    /// rôle compris (la règle de R99).
+    async fn account_access(
+        &self,
+        user: &AuthUser,
+        space_id: Uuid,
+    ) -> Result<Option<Arc<SpaceAccess>>, ApiError> {
+        if user.token().is_some_and(|token| !token.opens(space_id)) {
+            return Ok(None);
+        }
         // D'abord la révision courante : un calcul n'est pris du cache que s'il est rangé sous
         // elle, et des données, que si elles ne sont pas plus anciennes (voir l'en-tête).
         let Some(rev) = self.store.space_rev(space_id).await.map_err(internal)? else {
@@ -479,6 +575,7 @@ pub(crate) mod tests {
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
             duplications: Arc::default(),
             searches: crate::Searches::default(),
+            calls: Arc::default(),
         }
     }
 
@@ -1359,5 +1456,150 @@ pub(crate) mod tests {
         let access = state.space_access(&olga, space.id).await.unwrap();
         assert!(access.node(page).is_some());
         assert_eq!(state.inputs.loads(), 2);
+    }
+
+    /// Le compte `user`, appelant par un jeton de ce niveau, de cette portée.
+    fn by_token(user: &AuthUser, level: Level, scope: crate::auth::Scope) -> AuthUser {
+        AuthUser {
+            via: crate::auth::Via::Token(Arc::new(crate::auth::TokenGrant {
+                token_id: Uuid::now_v7(),
+                level,
+                scope,
+                can_trash: false,
+            })),
+            ..user.clone()
+        }
+    }
+
+    /// Une page de l'espace, créée par `by`, avec ces lignes.
+    async fn page_with(state: &AppState, space: Uuid, by: Uuid, grant: Grant) -> Uuid {
+        state
+            .store
+            .create_node(NewNode {
+                space_id: space,
+                parent_id: None,
+                after: None,
+                kind: NodeKind::Page,
+                title: "P".to_string(),
+                created_by: Some(by),
+                grants: vec![grant],
+                doc: None,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
+    /// Un espace hors de la portée d'un jeton vaut un espace sans rôle, et rien de lui n'est lu :
+    /// ni ses données (aucune lecture des données d'accès), ni ses pages (la règle de R99, lot 5).
+    #[tokio::test]
+    async fn a_space_out_of_scope_is_not_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let mine = state
+            .store
+            .create_space("Mien", Some(olga.id))
+            .await
+            .unwrap();
+        let other = state
+            .store
+            .create_space("Autre", Some(olga.id))
+            .await
+            .unwrap();
+        let members = Grant {
+            subject: Subject::Members,
+            level: Level::Full,
+        };
+        let page = page_with(&state, other.id, olga.id, members).await;
+        let token = by_token(&olga, Level::Edit, crate::auth::Scope::Space(mine.id));
+        let loads = state.inputs.loads();
+        assert!(
+            state
+                .find_space_access(&token, other.id)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(state.seen_node(&token, page).await.unwrap().is_none());
+        let status = state
+            .role_at_least(&token, other.id, Role::Guest)
+            .await
+            .unwrap_err()
+            .into_response()
+            .status();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(
+            state.inputs.loads(),
+            loads,
+            "l'espace hors de la portée n'est pas lu"
+        );
+        // Témoin : la session d'Olga le lit, et voit la page.
+        assert!(state.seen_node(&olga, page).await.unwrap().is_some());
+        assert_eq!(state.inputs.loads(), loads + 1);
+    }
+
+    /// Les deux barrières d'un jeton tiennent chacune seule : sans la porte (la route ouverte),
+    /// `permit` refuse encore de partager, de supprimer pour de bon et de changer une page de
+    /// parent, même à un niveau qui le permettrait, et la corbeille sans l'option (Ruling R1218).
+    #[tokio::test]
+    async fn no_token_shares_or_deletes_for_good() {
+        let grant = crate::auth::TokenGrant {
+            token_id: Uuid::now_v7(),
+            level: Level::Edit,
+            scope: crate::auth::Scope::All,
+            can_trash: false,
+        };
+        let full = NodeAccess {
+            level: Level::Full,
+            section: Section::Space,
+            in_trash: false,
+            visible_parent: None,
+            barred: grant.barred(),
+        };
+        for action in [Action::Share, Action::Delete, Action::Move, Action::Trash] {
+            let refused = permit(&full, action).expect_err("refusé").into_response();
+            assert_eq!(refused.status(), StatusCode::FORBIDDEN, "{action:?}");
+            let body = axum::body::to_bytes(refused.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert!(
+                body["message"].as_str().unwrap().contains("jeton"),
+                "{body}"
+            );
+        }
+        for action in [Action::Read, Action::Edit, Action::Rename, Action::Reorder] {
+            assert!(permit(&full, action).is_ok(), "{action:?}");
+        }
+        let with_trash = crate::auth::TokenGrant {
+            can_trash: true,
+            ..grant
+        };
+        assert!(!with_trash.barred().contains(Action::Trash));
+        assert!(with_trash.barred().contains(Action::Share));
+        // La page qu'un compte voit en accès complet, jugée par son jeton : le niveau du jeton et
+        // son interdit, la session gardant les siens.
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let space = state
+            .store
+            .create_space("Mien", Some(olga.id))
+            .await
+            .unwrap();
+        let own = Grant {
+            subject: Subject::User(olga.id),
+            level: Level::Full,
+        };
+        let page = page_with(&state, space.id, olga.id, own).await;
+        let token = by_token(&olga, Level::Edit, crate::auth::Scope::All);
+        let (_, access, _) = state.seen_node(&token, page).await.unwrap().unwrap();
+        assert_eq!(access.level, Level::Edit);
+        assert!(access.barred.contains(Action::Share));
+        for action in [Action::Share, Action::Delete, Action::Move] {
+            assert!(state.node_access(&token, page, action).await.is_err());
+            assert!(state.node_access(&olga, page, action).await.is_ok());
+        }
     }
 }

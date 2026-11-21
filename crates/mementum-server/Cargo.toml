@@ -11,7 +11,7 @@ publish = false
 anyhow.workspace = true
 # Mots de passe : Argon2id, hachage au format PHC.
 argon2.workspace = true
-axum = { workspace = true, features = ["http1", "json", "query", "tokio", "ws"] }
+axum = { workspace = true, features = ["http1", "json", "matched-path", "query", "tokio", "ws"] }
 # Jetons de session et d'invitation, écrits en base64url.
 base64.workspace = true
 # Le fichier d'une page servi par morceaux, sans le tenir en mémoire (Ruling R247).

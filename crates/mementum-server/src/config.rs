@@ -11,6 +11,8 @@
 //! | intervalle des versions d'une page, en secondes (1 au moins) | `MEMENTUM_VERSION_EVERY_SECS` | `--version-every-secs` | `600` |
 //! | taille la plus grande d'un fichier envoyé, en Mio (de 1 à 4 096) | `MEMENTUM_MAX_FILE_MB` | `--max-file-mb` | `100` |
 //! | calme attendu sur une page avant de l'indexer, en millisecondes (de 0 à 15 000) | `MEMENTUM_INDEX_AFTER_MS` | aucune | `2000` |
+//! | appels par minute d'un jeton d'API (de 1 à 100 000) | `MEMENTUM_TOKEN_CALLS_PER_MIN` | aucune | `120` |
+//! | appels par minute de tous les jetons d'un compte (de 1 à 100 000) | `MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN` | aucune | `240` |
 //!
 //! Une option de la ligne de commande l'emporte sur sa variable, qui
 //! l'emporte sur le défaut. Cinq derniers réglages n'ont ni variable ni
@@ -87,6 +89,16 @@ pub const INDEX_AFTER_MS_VAR: &str = "MEMENTUM_INDEX_AFTER_MS";
 /// ne serait jamais attendu, le plafond passant toujours avant lui.
 pub const MAX_INDEX_AFTER_MS: u64 = 15_000;
 
+/// Variable d'environnement des appels par minute d'un jeton d'API (lot 5, Ruling R1241).
+pub const TOKEN_CALLS_VAR: &str = "MEMENTUM_TOKEN_CALLS_PER_MIN";
+
+/// Variable d'environnement des appels par minute de tous les jetons d'un compte (lot 5, Ruling
+/// R1241).
+pub const ACCOUNT_TOKEN_CALLS_VAR: &str = "MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN";
+
+/// Le plus grand débit d'appels par minute qu'on peut régler, par jeton comme par compte.
+pub const MAX_CALLS_PER_MIN: u32 = 100_000;
+
 /// Le délai au-delà duquel un envoi qui ne reçoit plus rien est abandonné (Ruling R247).
 pub const UPLOAD_IDLE: Duration = Duration::from_secs(30);
 
@@ -142,6 +154,10 @@ pub struct Config {
     /// même écrite sans relâche (Ruling R906) : [`INDEX_AT_MOST`](crate::INDEX_AT_MOST) par
     /// défaut, quinze secondes. Ni variable ni option : seuls les tests le changent.
     pub index_at_most: Duration,
+    /// Appels par minute glissante d'un jeton d'API (Ruling R1241), 120 par défaut.
+    pub token_calls_per_min: u32,
+    /// Appels par minute glissante de tous les jetons d'un compte (Ruling R1241), 240 par défaut.
+    pub account_token_calls_per_min: u32,
 }
 
 impl Default for Config {
@@ -159,6 +175,8 @@ impl Default for Config {
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
             index_after: crate::INDEX_AFTER,
             index_at_most: crate::INDEX_AT_MOST,
+            token_calls_per_min: crate::agent::calls::TOKEN_CALLS_PER_MIN,
+            account_token_calls_per_min: crate::agent::calls::ACCOUNT_TOKEN_CALLS_PER_MIN,
         }
     }
 }
@@ -254,6 +272,14 @@ impl Config {
             Some(raw) => parse_index_after(&raw)?,
             None => crate::INDEX_AFTER,
         };
+        let token_calls_per_min = match set(&var, TOKEN_CALLS_VAR) {
+            Some(raw) => parse_calls_per_min(&raw, TOKEN_CALLS_VAR)?,
+            None => crate::agent::calls::TOKEN_CALLS_PER_MIN,
+        };
+        let account_token_calls_per_min = match set(&var, ACCOUNT_TOKEN_CALLS_VAR) {
+            Some(raw) => parse_calls_per_min(&raw, ACCOUNT_TOKEN_CALLS_VAR)?,
+            None => crate::agent::calls::ACCOUNT_TOKEN_CALLS_PER_MIN,
+        };
         Ok(Config {
             bind,
             data_dir: resolve_data_dir(data_dir, &var),
@@ -267,6 +293,8 @@ impl Config {
             max_duplicated_bytes: crate::MAX_DUPLICATED_BYTES,
             index_after,
             index_at_most: crate::INDEX_AT_MOST,
+            token_calls_per_min,
+            account_token_calls_per_min,
         })
     }
 
@@ -360,6 +388,21 @@ fn parse_index_after(raw: &OsStr) -> anyhow::Result<Duration> {
                 "{INDEX_AFTER_MS_VAR} invalide (« {} ») : attendu un nombre entier de \
                  millisecondes, de 0 à {MAX_INDEX_AFTER_MS} (2000 par défaut : une page est \
                  indexée deux secondes après sa dernière écriture)",
+                raw.to_string_lossy()
+            )
+        })
+}
+
+/// Un débit d'appels par minute, lu dans la variable `name` : un nombre entier, espaces de bord
+/// admises, de 1 à [`MAX_CALLS_PER_MIN`].
+fn parse_calls_per_min(raw: &OsStr, name: &str) -> anyhow::Result<u32> {
+    raw.to_str()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .filter(|calls| (1..=MAX_CALLS_PER_MIN).contains(calls))
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "{name} invalide (« {} ») : attendu un nombre entier d'appels par minute, de 1 \
+                 à {MAX_CALLS_PER_MIN}",
                 raw.to_string_lossy()
             )
         })
@@ -593,6 +636,47 @@ mod tests {
                 error.contains("MEMENTUM_INDEX_AFTER_MS") && error.contains(raw),
                 "{error}"
             );
+        }
+    }
+
+    /// Le débit des jetons d'API (Ruling R1241) : 120 appels par minute par jeton, 240 par compte,
+    /// par défaut ; chaque variable règle le sien, et une valeur qui n'en est pas une arrête le
+    /// démarrage en la nommant.
+    #[test]
+    fn token_rates_come_from_their_variables() {
+        let none = Config::resolve(None, None, None, None, None, None, vars(&[])).unwrap();
+        assert_eq!(
+            (none.token_calls_per_min, none.account_token_calls_per_min),
+            (120, 240)
+        );
+        let default = Config::default();
+        assert_eq!(
+            (
+                default.token_calls_per_min,
+                default.account_token_calls_per_min
+            ),
+            (120, 240)
+        );
+        let pairs = [
+            ("MEMENTUM_TOKEN_CALLS_PER_MIN", " 3 "),
+            ("MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN", "5"),
+        ];
+        let set = Config::resolve(None, None, None, None, None, None, vars(&pairs)).unwrap();
+        assert_eq!(
+            (set.token_calls_per_min, set.account_token_calls_per_min),
+            (3, 5)
+        );
+        for name in [
+            "MEMENTUM_TOKEN_CALLS_PER_MIN",
+            "MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN",
+        ] {
+            for raw in ["beaucoup", "0", "-1", "100001", "2.5"] {
+                let pairs = [(name, raw)];
+                let error = Config::resolve(None, None, None, None, None, None, vars(&pairs))
+                    .unwrap_err()
+                    .to_string();
+                assert!(error.contains(name) && error.contains(raw), "{error}");
+            }
         }
     }
 

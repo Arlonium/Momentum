@@ -122,7 +122,7 @@ pub(crate) async fn search(
     }
     let (seat, turn) = state
         .searches
-        .enter(user.id)
+        .enter(user.party())
         .await
         .map_err(|_| ApiError::search_busy())?;
     let started = Instant::now();

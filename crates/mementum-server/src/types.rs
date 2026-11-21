@@ -985,6 +985,17 @@ pub enum ErrorCode {
     /// (Ruling R910) : rien n'a été cherché pour elle, et sa réponse ne sert plus. L'en-tête
     /// `Retry-After` dit quand réessayer. Statut 429.
     SearchBusy,
+    /// `Authorization: Bearer mmt_…` qui ne porte pas un jeton d'API vivant : mal formé, inconnu,
+    /// révoqué, échu, ou d'un compte qui n'existe plus ; la même réponse dans tous les cas, avec
+    /// `WWW-Authenticate: Bearer` (lot 5, Ruling R1215). Statut 401.
+    InvalidToken,
+    /// Un jeton d'API sur une route qui ne s'ouvre qu'à une session (lot 5, Ruling R1222) : rien
+    /// n'est lu ni écrit. Statut 403.
+    TokenNotAllowed,
+    /// Le jeton, ou l'ensemble des jetons de son compte, a fait trop d'appels, ou envoyé trop
+    /// d'octets, dans la dernière minute (lot 5, Ruling R1241) : l'en-tête `Retry-After` dit quand
+    /// réessayer ; rien n'est fait. Statut 429.
+    TokenBusy,
 }
 
 /// Corps de toute réponse d'erreur.
