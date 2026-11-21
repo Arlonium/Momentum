@@ -154,11 +154,53 @@ export function navigate(path: string, { replace = false }: { replace?: boolean 
   window.dispatchEvent(new Event(CHANGE));
 }
 
+/** Une retenue de l'historique : l'adresse à garder, et qui prévenir d'un Précédent refusé. */
+type Hold = { address: string; onRefused: () => void };
+const holds = new Set<Hold>();
+/** Le verdict rendu pour chaque `popstate` : un seul par événement, quel que soit le nombre d'abonnés. */
+const verdicts = new WeakMap<Event, boolean>();
+
+const currentAddress = () => location.pathname + location.search + location.hash;
+
+/**
+ * Retient Précédent et Suivant tant que la fonction rendue n'est pas appelée : l'adresse d'à présent
+ * revient, aucun abonné ne voit la navigation, et `onRefused` est appelé (la fenêtre du jeton tout
+ * juste créé demande alors avant de fermer, lot 5). Un écouteur posé dans la fenêtre passerait après
+ * ceux du routeur, une fois la page partie : c'est ici, avant eux, que la navigation est jugée. Une
+ * navigation de l'application (`navigate`) n'est pas retenue : la fenêtre modale qui retient en
+ * empêche les gestes. Ni le rechargement ni la fermeture de l'onglet : c'est `beforeunload`.
+ */
+export function holdHistory(onRefused: () => void): () => void {
+  const hold: Hold = { address: currentAddress(), onRefused };
+  holds.add(hold);
+  return () => {
+    holds.delete(hold);
+  };
+}
+
+/** Le `popstate` `event` est-il refusé ? Le premier abonné qui le reçoit juge, et remet l'adresse. */
+function refusedPop(event: Event): boolean {
+  const known = verdicts.get(event);
+  if (known !== undefined) return known;
+  const [hold] = holds;
+  const refused = hold !== undefined && currentAddress() !== hold.address;
+  if (refused) {
+    // L'entrée d'où l'on vient revient en tête de l'historique : Précédent y ramènera, une fois lâché.
+    history.pushState(null, "", hold.address);
+    for (const each of [...holds]) each.onRefused();
+  }
+  verdicts.set(event, refused);
+  return refused;
+}
+
 function subscribe(onChange: () => void): () => void {
-  window.addEventListener("popstate", onChange);
+  const onPop = (event: Event) => {
+    if (!refusedPop(event)) onChange();
+  };
+  window.addEventListener("popstate", onPop);
   window.addEventListener(CHANGE, onChange);
   return () => {
-    window.removeEventListener("popstate", onChange);
+    window.removeEventListener("popstate", onPop);
     window.removeEventListener(CHANGE, onChange);
   };
 }

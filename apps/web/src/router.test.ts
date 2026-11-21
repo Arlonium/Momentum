@@ -5,6 +5,7 @@ import { beforeEach, expect, test, vi } from "vitest";
 import { renderHook } from "./test/hooks";
 import {
   blockPath,
+  holdHistory,
   navigate,
   pagePath,
   parseBlockTarget,
@@ -205,6 +206,33 @@ test("back_returns_to_the_block_before", async () => {
   });
   expect(location.hash).toBe("#b=un");
   expect(target.current).toEqual({ pageId: "x", blockId: "un" });
+});
+
+test("a_held_history_puts_the_address_back_and_says_so", async () => {
+  // Une fenêtre qui porte ce qu'on ne retrouverait pas (le jeton tout juste créé, lot 5) retient
+  // Précédent : l'adresse revient, le chemin suivi ne change pas, et elle est prévenue.
+  history.replaceState(null, "", "/s/a");
+  const path = await renderHook(usePathname, undefined);
+  await act(async () => navigate(tokensPath()));
+  expect(path.current).toBe("/account/tokens");
+  const refused = vi.fn();
+  const release = holdHistory(refused);
+  const back = async () =>
+    act(async () => {
+      const popped = new Promise((done) => window.addEventListener("popstate", done, { once: true }));
+      history.back();
+      await popped;
+    });
+  await back();
+  expect(location.pathname).toBe("/account/tokens");
+  expect(path.current).toBe("/account/tokens");
+  expect(refused).toHaveBeenCalledTimes(1);
+  // Lâchée, Précédent repart comme avant.
+  release();
+  await back();
+  expect(location.pathname).toBe("/s/a");
+  expect(path.current).toBe("/s/a");
+  expect(refused).toHaveBeenCalledTimes(1);
 });
 
 test("a_fragment_too_long_is_ignored_and_the_address_is_decoded_once", async () => {
