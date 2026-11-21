@@ -431,13 +431,13 @@ async fn measure_search_on_10000_pages() {
     let filter = Instant::now();
     let passing = t
         .store
-        .pages_matching(space, Some(author), Some(half), None)
+        .pages_matching(&ids, Some(author), Some(half), None)
         .await
         .unwrap()
         .len();
     said.push(format!(
-        "la lecture des pages qui passent les filtres auteur et date, seule : {:.1} ms, {passing} \
-         pages",
+        "la lecture des pages qui passent les filtres auteur et date, parmi toutes les pages vues, \
+         seule : {:.1} ms, {passing} pages",
         filter.elapsed().as_secs_f64() * 1000.0
     ));
 

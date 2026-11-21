@@ -237,24 +237,38 @@ async fn results(search: Search, turn: Arc<Turn>) -> Result<SearchResults, ApiEr
         after,
         filter,
     } = search;
-    // Les pages qui passent les filtres, lues dans la base sous les places : rien de ce qui en
-    // sort n'est jamais rendu sans être aussi vu par le compte (`allowed_pages`).
+    // Les pages qui passent les filtres, lues dans la base sous les places, **parmi celles que le
+    // compte voit** : le coût suit ce qu'il voit, jamais ce qu'il ne voit pas (tour de correction
+    // de S7, R1603), et rien de ce qui en sort n'est rendu sans être vu
+    // (`allowed_pages`).
     let passing = match filter {
         None => None,
-        Some(filter) => Some(
-            state
-                .store
-                .pages_matching(
-                    space_id,
-                    filter.created_by,
-                    filter.edited_after,
-                    filter.edited_before,
-                )
-                .await
-                .map_err(internal)?
-                .into_iter()
-                .collect::<HashSet<Uuid>>(),
-        ),
+        Some(filter) => {
+            let seen_access = access.clone();
+            let seen: Vec<Uuid> = tokio::task::spawn_blocking(move || {
+                seen_access
+                    .visible()
+                    .filter(|(_, seen)| !seen.in_trash)
+                    .map(|(page, _)| page)
+                    .collect()
+            })
+            .await
+            .map_err(internal)?;
+            Some(
+                state
+                    .store
+                    .pages_matching(
+                        &seen,
+                        filter.created_by,
+                        filter.edited_after,
+                        filter.edited_before,
+                    )
+                    .await
+                    .map_err(internal)?
+                    .into_iter()
+                    .collect::<HashSet<Uuid>>(),
+            )
+        }
     };
     let (searches, indexer) = (state.searches.clone(), state.indexer.clone());
     let computed = tokio::task::spawn_blocking(move || {

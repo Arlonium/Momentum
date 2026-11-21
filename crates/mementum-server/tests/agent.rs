@@ -380,36 +380,104 @@ async fn a_filter_only_narrows_the_allowed_set() {
         .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_filter");
 }
 
-/// Mona cherche les pages créées par Olga : la réponse est la même, octet pour octet, qu'Olga ait
-/// ou non une page privée qui passerait le filtre et porterait le mot.
+/// Vingt et une pages d'Olga que Mona voit, qui portent le mot ; puis cinq pages privées d'Olga
+/// qui le portent davantage (mieux classées) et passeraient le filtre « créée par Olga ». Les
+/// réponses de Mona, à `after` 0 et 20 (`more`, lignes, `indexing`), restent les mêmes, octet pour
+/// octet : le filtre ne fait que réduire ce qu'elle voit (R1389 ; tour de correction de S7).
 #[tokio::test]
 async fn a_filter_never_shows_an_unseen_page() {
     let t = open_app().await;
     let team = Team::new(&t).await;
-    page_with(&team, "Vue", "Le mot glycine est ici.\n").await;
+    for i in 0..21 {
+        page_with(&team, &format!("Vue {i}"), "Le mot glycine est ici.\n").await;
+    }
     t.indexer.settled().await;
     let uri = format!("/api/v1/spaces/{}/search", team.space);
-    let body = json!({ "q": "glycine", "createdBy": team.olga.id.to_string() });
-    let before = team.mona.browser.post(&uri, body.clone()).await;
-    before.assert_status(StatusCode::OK);
-    let private = team
-        .page(
+    let ask = |after: u32| {
+        let by = &team.mona.browser;
+        let uri = uri.clone();
+        let body = json!({ "q": "glycine", "createdBy": team.olga.id.to_string(), "after": after });
+        async move { by.post(&uri, body).await }
+    };
+    let before = [ask(0).await, ask(20).await];
+    assert_eq!(before[0].json()["results"].as_array().unwrap().len(), 20);
+    assert_eq!(before[0].json()["more"], true);
+    assert_eq!(before[1].json()["results"].as_array().unwrap().len(), 1);
+    for i in 0..5 {
+        let private = team
+            .page(
+                None,
+                &format!("Glycine glycine {i}"),
+                &[(Subject::User(team.olga.id), Level::Full)],
+            )
+            .await;
+        team.olga
+            .put_mmd(
+                &private.to_string(),
+                "Glycine, glycine, glycine : la glycine d'Olga.\n",
+            )
+            .await
+            .assert_status(StatusCode::NO_CONTENT);
+    }
+    t.indexer.settled().await;
+    // Olga les trouve : elles sont indexées, et mieux classées.
+    let olga = team
+        .olga
+        .browser
+        .post(
+            &uri,
+            json!({ "q": "glycine", "createdBy": team.olga.id.to_string() }),
+        )
+        .await;
+    assert!(
+        olga.json()["results"][0]["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("Glycine"),
+        "{}",
+        olga.text()
+    );
+    let after = [ask(0).await, ask(20).await];
+    for (before, after) in before.iter().zip(&after) {
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.text(), before.text());
+    }
+}
+
+/// Le coût d'une recherche filtrée suit ce que le compte voit (tour de correction de S7, la forme
+/// de R1201) : le store juge autant de pages, que des pages qu'il ne voit pas passent le filtre ou
+/// non.
+#[tokio::test]
+async fn a_filtered_search_reads_only_the_pages_the_account_sees() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    for i in 0..3 {
+        page_with(&team, &format!("Vue {i}"), "Le mot lavande est ici.\n").await;
+    }
+    t.indexer.settled().await;
+    let uri = format!("/api/v1/spaces/{}/search", team.space);
+    let body = json!({ "q": "lavande", "createdBy": team.olga.id.to_string() });
+    let judged = async || {
+        let before = t.store.filtered_pages_asked();
+        team.mona
+            .browser
+            .post(&uri, body.clone())
+            .await
+            .assert_status(StatusCode::OK);
+        t.store.filtered_pages_asked() - before
+    };
+    let without = judged().await;
+    assert!(without > 0, "aucune page jugée");
+    for i in 0..10 {
+        team.page(
             None,
-            "Privée",
+            &format!("Privée {i}"),
             &[(Subject::User(team.olga.id), Level::Full)],
         )
         .await;
-    team.olga
-        .put_mmd(&private.to_string(), "La glycine d'Olga.\n")
-        .await
-        .assert_status(StatusCode::NO_CONTENT);
+    }
     t.indexer.settled().await;
-    // Olga la trouve : elle est indexée.
-    let olga = team.olga.browser.post(&uri, body.clone()).await;
-    assert_eq!(olga.json()["results"].as_array().unwrap().len(), 2);
-    let after = team.mona.browser.post(&uri, body).await;
-    assert_eq!(after.status, before.status);
-    assert_eq!(after.text(), before.text());
+    assert_eq!(judged().await, without);
 }
 
 /// La date du contenu d'une page (`editedAt`) est posée par l'indexeur, d'après le journal

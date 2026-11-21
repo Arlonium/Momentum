@@ -309,6 +309,10 @@ pub struct Store {
     /// Les nœuds dont un titre a été demandé, pour les tests (`Store::titles_asked`).
     #[cfg(feature = "test-hooks")]
     titles_asked: Arc<std::sync::Mutex<Vec<Uuid>>>,
+    /// Les pages jugées par les filtres d'une recherche, pour les tests
+    /// (`Store::filtered_pages_asked`).
+    #[cfg(feature = "test-hooks")]
+    filtered_asked: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Store {
@@ -382,6 +386,8 @@ impl Store {
             excerpts_asked: Arc::default(),
             #[cfg(feature = "test-hooks")]
             titles_asked: Arc::default(),
+            #[cfg(feature = "test-hooks")]
+            filtered_asked: Arc::default(),
         })
     }
 

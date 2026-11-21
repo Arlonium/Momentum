@@ -1155,35 +1155,52 @@ impl Store {
         Ok(pages.into_iter().max())
     }
 
-    /// Les pages de l'espace qui passent les filtres d'une recherche (lot 5, Task S7, Ruling
-    /// R1248) : créées par `created_by`, dont le contenu date d'au moins `edited_after` et d'avant
-    /// `edited_before` (millisecondes Unix, `page_edits`) ; un filtre absent ne retient rien. Une
-    /// page sans date (pas encore indexée depuis sa création) ne passe aucun filtre de date. Ne
-    /// dit rien des droits : la route croise ce qu'elle rend avec les pages que le compte voit,
-    /// sans jamais l'élargir. Lue sans tour, par l'index des nœuds de l'espace.
+    /// Parmi `pages` (celles que le compte voit), celles qui passent les filtres d'une recherche
+    /// (lot 5, Task S7, Ruling R1248) : créées par `created_by`, dont le contenu date d'au moins
+    /// `edited_after` et d'avant `edited_before` (millisecondes Unix, `page_edits`) ; un filtre
+    /// absent ne retient rien. Une page sans date (pas encore indexée depuis sa création) ne passe
+    /// aucun filtre de date. Lue par lots de cinq cents identifiants, sans tour : **le coût suit
+    /// les pages données**, jamais celles de l'espace que le compte ne voit pas (tour de
+    /// correction de S7, R1603 : la durée d'une recherche filtrée ne dit rien d'elles).
     pub async fn pages_matching(
         &self,
-        space_id: Uuid,
+        pages: &[Uuid],
         created_by: Option<Uuid>,
         edited_after: Option<i64>,
         edited_before: Option<i64>,
     ) -> Result<Vec<Uuid>, StoreError> {
-        sqlx::query(
-            "SELECT n.id FROM nodes n LEFT JOIN page_edits e ON e.node_id = n.id \
-             WHERE n.space_id = ?1 AND n.kind = 'page' \
-               AND (?2 IS NULL OR n.created_by = ?2) \
-               AND (?3 IS NULL OR e.edited_at >= ?3) \
-               AND (?4 IS NULL OR e.edited_at < ?4)",
-        )
-        .bind(space_id.to_string())
-        .bind(created_by.map(|u| u.to_string()))
-        .bind(edited_after)
-        .bind(edited_before)
-        .fetch_all(&self.pool)
-        .await?
-        .iter()
-        .map(|r| parse_uuid(&r.get::<String, _>(0)))
-        .collect()
+        #[cfg(feature = "test-hooks")]
+        self.filtered_asked
+            .fetch_add(pages.len(), std::sync::atomic::Ordering::Relaxed);
+        let mut out = Vec::new();
+        for chunk in pages.chunks(500) {
+            let rows = sqlx::query(
+                "SELECT n.id FROM nodes n LEFT JOIN page_edits e ON e.node_id = n.id \
+                 WHERE n.id IN (SELECT value FROM json_each(?1)) \
+                   AND (?2 IS NULL OR n.created_by = ?2) \
+                   AND (?3 IS NULL OR e.edited_at >= ?3) \
+                   AND (?4 IS NULL OR e.edited_at < ?4)",
+            )
+            .bind(json_ids(chunk))
+            .bind(created_by.map(|u| u.to_string()))
+            .bind(edited_after)
+            .bind(edited_before)
+            .fetch_all(&self.pool)
+            .await?;
+            for r in rows {
+                out.push(parse_uuid(&r.get::<String, _>(0))?);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Combien d'identifiants de pages [`Store::pages_matching`] a jugés depuis l'ouverture de ce
+    /// store. Pour les tests seulement (fonction `test-hooks`, la forme de R1201) : une recherche
+    /// filtrée ne juge que les pages que le compte voit.
+    #[cfg(feature = "test-hooks")]
+    pub fn filtered_pages_asked(&self) -> usize {
+        self.filtered_asked
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// La date du contenu de ces pages (Ruling R1246), rangée par identifiant ; une page sans
