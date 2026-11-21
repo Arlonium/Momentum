@@ -135,6 +135,9 @@ pub struct SearchResults {
     pub hits: Vec<Hit>,
     /// Le curseur de la suite (`after`), s'il y en a une.
     pub more: Option<String>,
+    /// L'index n'est pas à jour pour une page que le jeton voit (une page vient d'être écrite) :
+    /// une page peut manquer, et une réponse vide n'est pas sûre.
+    pub indexing: bool,
 }
 
 /// Une page créée.
@@ -229,6 +232,9 @@ pub struct Refusal {
     pub candidates: Vec<Candidate>,
     /// Pour un conflit : la révision courante, et le MMD à jour des blocs en cause.
     pub conflict: Option<(String, String)>,
+    /// Ce qu'il faut faire, propre à ce refus (la raison d'un `operation_failed`), écrit par le
+    /// serveur : à la place du conseil de son code, dont l'exemple reste.
+    pub hint: Option<String>,
 }
 
 /// Octets d'un identifiant, d'une révision, d'un alias ou d'une date écrits par le serveur.
@@ -580,6 +586,12 @@ pub fn results(results: &SearchResults) -> ToolOutput {
     if let Some(more) = &results.more {
         head.cut_line(&format!("Suite : search avec after={}.", id(more)));
     }
+    if results.indexing {
+        head.cut_line(
+            "L'index n'est pas à jour pour toutes les pages : une page écrite à l'instant peut \
+             manquer ; réessaie dans quelques secondes si tu ne trouves pas ce que tu cherches.",
+        );
+    }
     if shown < results.hits.len() {
         head.cut_line(&format!(
             "Réponse coupée : {shown} pages montrées ; affine la recherche."
@@ -691,7 +703,7 @@ pub fn workspace(workspace: &Workspace) -> ToolOutput {
         word(&token.scope)
     );
     if let Some(expires) = &token.expires_at {
-        let _ = write!(line, ", échu le {}", id(expires));
+        let _ = write!(line, ", échéance le {}", id(expires));
     }
     line.push_str(if token.can_trash {
         ", corbeille permise"
@@ -755,8 +767,8 @@ fn refusal_drawn(
         head.cut_line(&format!("Révision courante de la page : {}.", id(revision)));
     }
     let hint = hint(&refusal.code);
-    if let Some(hint) = hint {
-        head.cut_line(&format!("Que faire : {}", hint.what));
+    if let Some(what) = refusal.hint.as_deref().or(hint.map(|h| h.what)) {
+        head.cut_line(&format!("Que faire : {}", one_line(what, MESSAGE_BYTES)));
     }
     let example = example.or_else(|| {
         hint.and_then(|h| h.example)
@@ -781,10 +793,11 @@ fn refusal_drawn(
             )
         });
     }
-    let mmd = refusal.conflict.as_ref().map(|(_, mmd)| {
-        let (mmd, _) = cut_lines(mmd, MAX_CONTENT_BYTES);
-        mmd
-    });
+    let mmd = refusal
+        .conflict
+        .as_ref()
+        .map(|(_, mmd)| cut_lines(mmd, MAX_CONTENT_BYTES).0)
+        .filter(|mmd| !mmd.is_empty());
     if mmd.is_some() {
         meta.text.push_str("blocs à jour :\n");
     }

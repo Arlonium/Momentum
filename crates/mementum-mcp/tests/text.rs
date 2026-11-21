@@ -90,6 +90,7 @@ proptest! {
                     block: Some("bk7qa".into()),
                 }],
                 more: None,
+                indexing: false,
             }),
             text::refusal(&Refusal {
                 code: "operation_failed".into(),
@@ -186,6 +187,7 @@ fn all_outputs(long: &str, item: &str, count: usize) -> Vec<ToolOutput> {
                 count
             ],
             more: Some(long.into()),
+            indexing: true,
         }),
         text::results(&SearchResults {
             space_id: long.into(),
@@ -197,6 +199,7 @@ fn all_outputs(long: &str, item: &str, count: usize) -> Vec<ToolOutput> {
                 block: Some(long.into()),
             }],
             more: None,
+            indexing: true,
         }),
         text::created(&vec![
             Created {
@@ -261,6 +264,7 @@ fn all_outputs(long: &str, item: &str, count: usize) -> Vec<ToolOutput> {
                 count
             ],
             conflict: Some((long.into(), long.into())),
+            hint: Some(long.into()),
         }),
     ]
 }
@@ -502,4 +506,50 @@ fn a_success_has_no_code_and_a_refusal_has_its_code() {
         assert!(output.is_error());
         assert_eq!(output.code(), Some("Bonjour"));
     }
+}
+
+/// Le conseil propre à un refus (la raison d'un `operation_failed`, Task M2) remplace celui de
+/// son code, dont l'exemple reste ; un conflit sans blocs à jour n'ouvre pas de borne vide.
+#[test]
+fn a_refusal_says_its_own_hint_and_keeps_the_example_of_its_code() {
+    let output = text::refusal(&Refusal {
+        code: "operation_failed".into(),
+        message: "« x » ne se trouve dans le texte d'aucun bloc.".into(),
+        operation: Some((0, "ambiguous_match".into())),
+        hint: Some("Vise le bloc par son ancre.".into()),
+        ..Refusal::default()
+    });
+    assert!(
+        output
+            .text()
+            .contains("Que faire : Vise le bloc par son ancre."),
+        "{}",
+        output.text()
+    );
+    assert_eq!(output.text().matches("Que faire").count(), 1);
+    assert!(output.text().contains("Exemple : update_page {"));
+    let conflict = text::refusal(&Refusal {
+        code: "revision_conflict".into(),
+        message: "La page a changé.".into(),
+        conflict: Some(("r_00000000000000aa".into(), String::new())),
+        ..Refusal::default()
+    });
+    assert!(nonce(&conflict).is_none(), "{}", conflict.text());
+    assert!(conflict.text().contains("r_00000000000000aa"));
+}
+
+/// Une recherche faite pendant que l'index rattrape une écriture le dit (Task M2) : une page
+/// peut manquer ; sinon rien.
+#[test]
+fn a_search_while_indexing_says_a_page_may_be_missing() {
+    let results = |indexing| {
+        text::results(&SearchResults {
+            space_id: "s".into(),
+            hits: Vec::new(),
+            more: None,
+            indexing,
+        })
+    };
+    assert!(results(true).text().contains("L'index n'est pas à jour"));
+    assert!(!results(false).text().contains("index"));
 }
