@@ -1,5 +1,5 @@
 {
-  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. « pad_to » allonge le corps d'espaces jusqu'à ce nombre d'octets (un corps de plus de 2 Mio, Task M2). « outcome » est l'issue que serve rend d'un tools/call pour le journal d'activité (l'outil nommé et le code du refus, null pour une réussite) ; sans « outcome », un tools/call doit en rendre une, et toute autre requête aucune. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0, ou la spécification seule (resources/read, Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, et une sortie de plus de 25 000 jetons ne l'ont été par aucun client : M2 et X1 les éprouvent).",
+  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. « pad_to » allonge le corps d'espaces jusqu'à ce nombre d'octets (un corps de plus de 2 Mio, Task M2). « outcome » est l'issue que serve rend d'un tools/call pour le journal d'activité (l'outil nommé et le code du refus, null pour une réussite) ; sans « outcome », un tools/call doit en rendre une, et toute autre requête aucune. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0 (2.1.329) ou par X1 (2.1.330 : resources/read, dans les deux révisions), ou la spécification seule (Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, et une sortie de plus de 25 000 jetons ne l'ont été par aucun client).",
   "statuses": "Statut HTTP d'une erreur JSON-RPC (Rulings R1406, R1407) : 400 pour ce qui empêche de lire la requête ou d'en savoir l'ère (-32700 JSON illisible ; -32600 lot, corps qui n'est pas un objet, jsonrpc, method ou id mal formés, requête sans id, params qui ne sont pas un objet, réponse envoyée au serveur ; -32020 en-tête absent, répété, aux caractères non permis ou qui ne dit pas le corps, requête qui n'est d'aucune des deux révisions ; -32022 version nommée mais non servie, au _meta, ou par l'en-tête seul quand il a la forme AAAA-MM-JJ ; -32602 champ exigé du _meta qui manque ou n'a pas sa forme) ; 404 pour une méthode inconnue en 2026-07-28 (-32601) ; 200 pour une erreur des params d'une méthode servie (-32602 outil inconnu, arguments qui ne sont pas un objet, tools/call sans nom, ressource inconnue en 2026-07-28, curseur de liste, initialize sans protocolVersion ; -32002 ressource inconnue en 2025-11-25) et pour toute méthode inconnue en 2025-11-25 (-32601). Des arguments refusés ne sont pas une erreur JSON-RPC : un résultat isError, 200. -32021 (MissingRequiredClientCapability) existe dans la 2026-07-28 et n'a pas d'usage ici : aucun outil n'exige une capacité du client.",
   "cases": [
     {
@@ -74,13 +74,13 @@
       "expect": { "result": { "resultType": "complete", "resources": [{ "uri": "mementum://spec/mmd", "name": "<any>", "mimeType": "text/markdown" }], "ttlMs": 300000, "cacheScope": "private" } }
     },
     {
-      "name": "2026 : resources/read",
+      "name": "2026 : Claude Code 2.1.330, resources/read (relevé par X1)",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
-      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/read", "Mcp-Name": "mementum://spec/mmd" },
-      "body": { "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": "mementum://spec/mmd", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
+      "proven_by": "Claude Code 2.1.330 (X1, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.330 (sdk-cli)", "mcp-method": "resources/read", "mcp-name": "mementum://spec/mmd", "mcp-protocol-version": "2026-07-28" },
+      "body": { "method": "resources/read", "params": { "uri": "mementum://spec/mmd", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientInfo": { "name": "claude-code", "title": "Claude Code", "version": "2.1.330", "description": "Anthropic's agentic coding tool", "websiteUrl": "https://claude.com/claude-code" }, "io.modelcontextprotocol/clientCapabilities": { "roots": { "listChanged": true }, "elicitation": { "form": {}, "url": {} }, "extensions": { "io.modelcontextprotocol/tasks": {} } } } }, "jsonrpc": "2.0", "id": 2 },
       "status": 200,
-      "expect": { "result": { "resultType": "complete", "contents": [{ "uri": "mementum://spec/mmd", "mimeType": "text/markdown", "text": "<any>" }], "ttlMs": 300000, "cacheScope": "private" } }
+      "expect": { "id": 2, "result": { "resultType": "complete", "contents": [{ "uri": "mementum://spec/mmd", "mimeType": "text/markdown", "text": "<any>" }], "ttlMs": 300000, "cacheScope": "private" } }
     },
     {
       "name": "2026 : resources/read, Mcp-Name en =?base64?…?=",
@@ -685,13 +685,13 @@
       "expect": { "id": 6, "error": { "code": -32601 } }
     },
     {
-      "name": "2025 : resources/read",
+      "name": "2025 : Claude Code 2.1.330, resources/read (relevé par X1)",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
-      "headers": { "MCP-Protocol-Version": "2025-11-25" },
-      "body": { "jsonrpc": "2.0", "id": 7, "method": "resources/read", "params": { "uri": "mementum://spec/mmd" } },
+      "proven_by": "Claude Code 2.1.330 (X1, requête relevée telle quelle)",
+      "headers": { "accept": "application/json, text/event-stream", "content-type": "application/json", "user-agent": "claude-code/2.1.330 (sdk-cli)", "mcp-protocol-version": "2025-11-25" },
+      "body": { "method": "resources/read", "params": { "uri": "mementum://spec/mmd" }, "jsonrpc": "2.0", "id": 3 },
       "status": 200,
-      "expect": { "id": 7, "result": { "contents": [{ "uri": "mementum://spec/mmd", "mimeType": "text/markdown", "text": "<any>" }] } },
+      "expect": { "id": 3, "result": { "contents": [{ "uri": "mementum://spec/mmd", "mimeType": "text/markdown", "text": "<any>" }] } },
       "absent": ["/result/resultType", "/result/ttlMs"]
     },
     {
