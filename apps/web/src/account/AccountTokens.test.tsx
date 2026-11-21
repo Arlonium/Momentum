@@ -152,6 +152,7 @@ test("the_token_is_shown_once_and_gone_when_the_window_closes", async () => {
   expect(everything()).not.toContain(TOKEN);
   await click(buttonNamed(host, "Créer un jeton")!);
   expect(everything()).not.toContain(TOKEN);
+  expect(field("Nom du jeton").value).toBe("");
   expect(field("Mot de passe actuel").value).toBe("");
   expect(dialog()!.querySelector('[aria-label="Jeton d\'API"]')).toBeNull();
 });
@@ -159,11 +160,21 @@ test("the_token_is_shown_once_and_gone_when_the_window_closes", async () => {
 test("escape_on_a_shown_token_asks_before_closing", async () => {
   await rendered([]);
   vi.mocked(createToken).mockResolvedValue({ token: TOKEN, info: token("t1") });
-  // Avant la création, Échap ferme la fenêtre comme toute autre.
+  // Avant la création, Échap ferme la fenêtre comme toute autre, sans rien détruire : rouverte, elle
+  // retrouve ce qui a été choisi, jamais le mot de passe.
   await click(buttonNamed(host, "Créer un jeton")!);
+  await type(field("Nom du jeton"), "Claude Code");
+  await click(dialog()!.querySelector('input[type="radio"][value="edit"]')!);
+  await type(field("Mot de passe actuel"), "mot-de-passe");
   await act(async () => {
     dialog()!.dispatchEvent(new Event("cancel", { cancelable: true }));
   });
+  expect(dialog()).toBeNull();
+  await click(buttonNamed(host, "Créer un jeton")!);
+  expect(field("Nom du jeton").value).toBe("Claude Code");
+  expect(dialog()!.querySelector<HTMLInputElement>('input[type="radio"][value="edit"]')!.checked).toBe(true);
+  expect(field("Mot de passe actuel").value).toBe("");
+  await click(buttonNamed(dialog()!, "Annuler")!);
   expect(dialog()).toBeNull();
 
   await create();

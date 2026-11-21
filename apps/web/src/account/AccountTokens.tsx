@@ -21,7 +21,7 @@ import { FormError, messageOf, useDocumentTitle } from "../session/forms";
 import { useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
 import { Confirm } from "../ui/Confirm";
-import { CreateToken } from "./CreateToken";
+import { CreateToken, type TokenDraft } from "./CreateToken";
 import { useTokens } from "./useTokens";
 
 const day = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long", year: "numeric" });
@@ -116,6 +116,8 @@ export default function AccountTokens({ space }: { space: SpaceInfo | null }) {
   const afterLogin = useAfterLogin(me);
   const { tokens, error, reread } = useTokens(afterLogin);
   const [creating, setCreating] = useState(false);
+  /** Ce que la fenêtre a laissé en partant sans créer de jeton (Échap ne détruit rien). */
+  const [draft, setDraft] = useState<TokenDraft | null>(null);
   /** Compte les fermetures de la fenêtre, pour rendre le focus après chacune. */
   const [closed, setClosed] = useState(0);
   const openerRef = useRef<HTMLButtonElement>(null);
@@ -158,6 +160,8 @@ export default function AccountTokens({ space }: { space: SpaceInfo | null }) {
             spaces={me.spaces}
             current={space}
             email={me.user.email}
+            draft={draft}
+            onDraft={setDraft}
             onChanged={() => void reread()}
             onClose={() => {
               setCreating(false);

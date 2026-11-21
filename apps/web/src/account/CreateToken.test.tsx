@@ -72,6 +72,8 @@ async function opened(current: SpaceInfo | null = pro) {
         spaces={[pro, perso]}
         current={current}
         email="alice@exemple.fr"
+        draft={null}
+        onDraft={() => {}}
         onChanged={onChanged}
         onClose={onClose}
       />,

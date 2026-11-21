@@ -21,6 +21,10 @@
 //
 // Une réponse perdue (`answerLost`) : le jeton a peut-être été créé, sans que personne en ait le texte
 // ; la fenêtre le dit, et la liste est relue (`onChanged`), qui le montre s'il existe (R757, R1372).
+//
+// Échap ne détruit rien : fermée sans créer, la fenêtre laisse à l'écran ce qui a été choisi
+// (`onDraft`), qu'elle retrouve en se rouvrant ; jamais le mot de passe, qui ne survit pas à la
+// fenêtre. Un jeton créé repart d'un formulaire vide.
 import type { CreateToken as CreateTokenBody, SpaceInfo, TokenLevel, TokenScope } from "@mementum/protocol";
 import { useEffect, useId, useRef, useState, type FormEvent, type RefObject } from "react";
 import { answerLost, ApiError, createToken, isSessionLost, lostAnswer } from "../api";
@@ -50,6 +54,19 @@ const MAX_PAGES = 50;
 /** Combien de pages la recherche propose à la fois. */
 const OFFERED = 8;
 
+/** Ce que la fenêtre retrouve en se rouvrant, sauf le mot de passe. */
+export type TokenDraft = {
+  name: string;
+  level: TokenLevel;
+  scope: TokenScope;
+  spaceId: string;
+  chosen: FoundPage[];
+  /** L'espace des pages choisies : un autre espace ouvert depuis, elles ne sont pas reprises. */
+  pagesOf: string | null;
+  canTrash: boolean;
+  expiry: number | null;
+};
+
 type Props = {
   /** Les espaces du compte, pour une portée « espace ». */
   spaces: readonly SpaceInfo[];
@@ -57,6 +74,10 @@ type Props = {
   current: SpaceInfo | null;
   /** Le compte, pour les gestionnaires de mots de passe. */
   email: string;
+  /** Ce que la fenêtre a gardé à sa dernière fermeture sans création ; `null` : rien. */
+  draft: TokenDraft | null;
+  /** La fenêtre part sans avoir créé de jeton (`draft`), ou en a créé un (`null`). */
+  onDraft: (draft: TokenDraft | null) => void;
   /** La liste des jetons a pu changer (créé, ou peut-être créé) : elle est relue. */
   onChanged: () => void;
   /** Le parent retire la fenêtre. */
@@ -68,7 +89,7 @@ function offer(space: SpaceInfo | null, query: string): FoundPage[] {
   return space !== null && publishedSpace() === space.id ? findPages(query, OFFERED) : [];
 }
 
-export function CreateToken({ spaces, current, email, onChanged, onClose }: Props) {
+export function CreateToken({ spaces, current, email, draft, onDraft, onChanged, onClose }: Props) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
   const levelName = useId();
@@ -82,15 +103,17 @@ export function CreateToken({ spaces, current, email, onChanged, onClose }: Prop
   const searchRef = useRef<HTMLInputElement>(null);
   const copyRef = useRef<HTMLDivElement>(null);
 
-  const [name, setName] = useState("");
-  const [level, setLevel] = useState<TokenLevel>("read");
-  const [scope, setScope] = useState<TokenScope>(current !== null ? "space" : "all");
-  const [spaceId, setSpaceId] = useState(current?.id ?? spaces[0]?.id ?? "");
+  const [name, setName] = useState(draft?.name ?? "");
+  const [level, setLevel] = useState<TokenLevel>(draft?.level ?? "read");
+  const [scope, setScope] = useState<TokenScope>(draft?.scope ?? (current !== null ? "space" : "all"));
+  const [spaceId, setSpaceId] = useState(draft?.spaceId ?? current?.id ?? spaces[0]?.id ?? "");
   const [query, setQuery] = useState("");
   const [offered, setOffered] = useState<FoundPage[]>(() => offer(current, ""));
-  const [chosen, setChosen] = useState<FoundPage[]>([]);
-  const [canTrash, setCanTrash] = useState(false);
-  const [expiry, setExpiry] = useState<number | null>(DEFAULT_EXPIRY);
+  const [chosen, setChosen] = useState<FoundPage[]>(() =>
+    draft !== null && draft.pagesOf === (current?.id ?? null) ? draft.chosen : [],
+  );
+  const [canTrash, setCanTrash] = useState(draft?.canTrash ?? false);
+  const [expiry, setExpiry] = useState<number | null>(draft === null ? DEFAULT_EXPIRY : draft.expiry);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -109,6 +132,16 @@ export function CreateToken({ spaces, current, email, onChanged, onClose }: Prop
   useEffect(() => {
     if (created !== null) copyRef.current?.querySelector<HTMLButtonElement>("[data-copy-token]")?.focus();
   }, [created]);
+
+  /** La fenêtre part : ce qui a été choisi reste à l'écran, si aucun jeton n'a été créé. */
+  const leave = () => {
+    onDraft(
+      created !== null
+        ? null
+        : { name, level, scope, spaceId, chosen, pagesOf: current?.id ?? null, canTrash, expiry },
+    );
+    onClose();
+  };
 
   const search = (next: string) => {
     setQuery(next);
@@ -198,13 +231,13 @@ export function CreateToken({ spaces, current, email, onChanged, onClose }: Prop
           if (event.target !== event.currentTarget) return;
           event.preventDefault();
           if (created !== null) setConfirming(true);
-          else onClose();
+          else leave();
         }}
         // Chrome la ferme quand même au second Échap sans geste entre les deux : le jeton montré, elle
         // se rouvre et demande.
         onClose={(event) => {
           if (event.target !== event.currentTarget) return;
-          if (created === null) return onClose();
+          if (created === null) return leave();
           event.currentTarget.showModal();
           setConfirming(true);
         }}
@@ -375,7 +408,7 @@ export function CreateToken({ spaces, current, email, onChanged, onClose }: Prop
               />
               <FormError message={error} />
               <div className="mm-dialog-actions">
-                <button type="button" className="mm-button" onClick={onClose}>
+                <button type="button" className="mm-button" onClick={leave}>
                   Annuler
                 </button>
                 {/* Grisé par `aria-disabled` : il garde le focus pendant la demande. */}
@@ -405,7 +438,7 @@ export function CreateToken({ spaces, current, email, onChanged, onClose }: Prop
               <TokenCreated token={created.token} origin={location.origin} />
             </div>
             <div className="mm-dialog-actions">
-              <button type="button" className="mm-button mm-button-primary" onClick={onClose}>
+              <button type="button" className="mm-button mm-button-primary" onClick={leave}>
                 Fermer
               </button>
             </div>
@@ -417,7 +450,7 @@ export function CreateToken({ spaces, current, email, onChanged, onClose }: Prop
           title={"Fermer la fenêtre du jeton\u00a0?"}
           confirmLabel="Fermer"
           cancelLabel="Rester"
-          onConfirm={onClose}
+          onConfirm={leave}
           onCancel={() => setConfirming(false)}
         >
           Le jeton ne sera plus jamais affiché. Si tu ne l'as pas copié, il faudra en créer un autre.
@@ -450,7 +483,7 @@ function PagePicker({ searchRef, query, offered, chosen, onSearch, onToggle }: P
       <input
         ref={searchRef}
         className="mm-input"
-        type="search"
+        type="text"
         aria-label="Chercher une page"
         placeholder="Chercher une page"
         autoComplete="off"

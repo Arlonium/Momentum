@@ -2219,6 +2219,7 @@ button.tree-toggle:hover {
 /* L'espace d'une portée « espace », et les pages d'une portée « pages », sous leur choix. */
 .mm-token-space {
   align-self: flex-start;
+  max-width: calc(100% - 22px);
   margin-left: 22px;
 }
 
