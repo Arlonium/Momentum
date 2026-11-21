@@ -24,21 +24,25 @@
 // Les premières mesures se font avec un petit arbre (les pages de mesure). Les dernières,
 // avec 1 000 pages de plus dans l'arbre (Ruling R43) : l'ouverture ne doit pas suivre le
 // nombre de pages de la barre latérale.
-import { expect, test, type APIRequestContext, type Browser, type Page } from "@playwright/test";
+import { expect, request, test, type APIRequestContext, type Browser, type Page } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+  apiAs,
   closeContexts,
   createPage,
   firstSpace,
   getTree,
+  NO_SESSION,
   newUser,
+  PASSWORD,
   percentile,
   putMmd,
   unique,
   waitFindable,
   waitSynced,
 } from "./helpers";
+import { API_PORT } from "./servers";
 
 /**
  * L'acteur d'une page s'arrête après 30 s sans connexion ni demande (`idle_close` de
@@ -886,5 +890,130 @@ test.describe("recherche", () => {
       )} ms, p95 ${Math.round(p95)} ms, le pire ${Math.round(sorted[sorted.length - 1])} ms (budget : ${SHOWN_MS} ms)`,
     );
     expect(p95).toBeLessThan(SHOWN_MS);
+  });
+});
+
+// Lot 5, Task X2 (décision L14, Ruling R1643) : l'appel d'un agent, vu dans le navigateur d'une
+// personne qui a la page ouverte. Le chronomètre part juste avant que l'agent envoie son appel
+// (`POST /api/v1/pages/{id}/operations`, un `str_replace` d'un paragraphe, avec un jeton, au
+// serveur directement, comme un agent), et s'arrête à la fin du rendu de la première image où le
+// texte écrit est dans l'éditeur ; les deux heures sont celles de l'horloge du système
+// (`Date.now()`, dans Node et dans la page). Le budget proposé est celui de la frappe.
+test.describe("agents", () => {
+  const ROUNDS = 20;
+  /** Budget proposé (lot 5) : « l'appel d'un agent vu par une personne », comme la frappe. */
+  const SEEN_MS = 150;
+  let page: Target | null = null;
+  let token = "";
+
+  test.beforeAll(async ({ playwright }) => {
+    test.setTimeout(180_000);
+    const request = await playwright.request.newContext({ baseURL: test.info().project.use.baseURL });
+    try {
+      page = await bigPage(request, 1_000);
+    } finally {
+      await request.dispose();
+    }
+    const api = await apiAs();
+    const created = await api.post("/api/v1/tokens", {
+      data: { name: `agent ${unique()}`, level: "edit", scope: "all", password: PASSWORD },
+    });
+    expect(created.status(), await created.text()).toBe(201);
+    token = ((await created.json()) as { token: string }).token;
+    await closeContexts();
+  });
+
+
+  /**
+   * `rounds` appels d'un agent (un `str_replace` du paragraphe `500 + rang` de la page `target`),
+   * chacun chronométré de son départ à la fin du rendu de l'image où son texte paraît dans
+   * l'éditeur de l'onglet `p`, qui a la page ouverte.
+   */
+  async function agentCallsSeen(p: Page, target: Target, rounds: number): Promise<number[]> {
+    const agent = await request.newContext({
+      baseURL: `http://127.0.0.1:${API_PORT}`,
+      storageState: NO_SESSION,
+      extraHTTPHeaders: { Authorization: `Bearer ${token}` },
+    });
+    const tag = target.first.split(",")[0].replace("Page ", "");
+    const delays: number[] = [];
+    try {
+      for (let round = 0; round < rounds; round++) {
+        const n = 500 + round;
+        const marker = `revu par l'agent ${round}`;
+        // Dans la page : l'heure de la fin de l'image où le texte écrit paraît.
+        await p.evaluate((marker) => {
+          const w = window as unknown as { seen: Promise<number> };
+          w.seen = new Promise((settle) => {
+            const editor = document.querySelector(".mm-editor")!;
+            const look = (mutations: MutationRecord[]) => {
+              const found = mutations.some((m) => (m.target.textContent ?? "").includes(marker));
+              if (!found) return;
+              observer.disconnect();
+              requestAnimationFrame(() => {
+                const channel = new MessageChannel();
+                channel.port1.onmessage = () => settle(Date.now());
+                channel.port2.postMessage(null);
+              });
+            };
+            const observer = new MutationObserver(look);
+            observer.observe(editor, { childList: true, subtree: true, characterData: true });
+          });
+        }, marker);
+        const sent = Date.now();
+        const reply = await agent.post(`/api/v1/pages/${target.id}/operations`, {
+          data: {
+            operations: [
+              { op: "str_replace", old: `Page ${tag}, paragraphe ${n} :`, new: `Page ${tag}, paragraphe ${n} ${marker} :` },
+            ],
+          },
+        });
+        expect(reply.status(), await reply.text()).toBe(200);
+        const seen = await p.evaluate(() => (window as unknown as { seen: Promise<number> }).seen);
+        delays.push(seen - sent);
+      }
+    } finally {
+      await agent.dispose();
+    }
+    return delays;
+  }
+
+  /** p50, p95 et le pire d'une série, arrondis. */
+  function summary(delays: number[]): string {
+    const worst = Math.max(...delays);
+    return `p50 ${Math.round(percentile(delays, 0.5))} ms, p95 ${Math.round(percentile(delays, 0.95))} ms, le pire ${Math.round(worst)} ms`;
+  }
+
+  test(`agent_call_seen_in_the_browser_under_${SEEN_MS}ms`, async ({ browser }) => {
+    const target = page!;
+    const p = await budgetTab(browser);
+    await p.goto(`/p/${target.id}`);
+    await waitSynced(p);
+    await expect(p.locator(".mm-editor").getByText(target.first)).toBeVisible();
+    const delays = await agentCallsSeen(p, target, ROUNDS);
+    console.log(
+      `MESURE appel d'un agent vu dans le navigateur, page de 1 000 blocs (${ROUNDS} appels, processeur ralenti ${CPU_SLOWDOWN} fois) : ${summary(delays)} (budget : ${SEEN_MS} ms)`,
+    );
+    expect(percentile(delays, 0.95)).toBeLessThan(SEEN_MS);
+  });
+
+  // Sans budget : la même mesure sur la page de 10 000 blocs. L'écriture d'agent y coûte 60 à 80 ms
+  // à l'acteur (S4), mais l'onglet qui la reçoit est figé environ 0,7 s : y-prosemirror remplace
+  // tout le document à chaque changement distant, et deux greffons de BlockNote (`uniqueID`, et
+  // celui qui retient le type d'avant de chaque bloc) relisent alors chaque bloc par une résolution
+  // de position linéaire. La frappe d'une personne y a le même coût (Ruling R1656, défaut d'avant
+  // le lot 5). Dernier test du fichier : il ouvre la grande page, que les ouvertures mesurées plus
+  // haut veulent jamais vue.
+  test("measure_agent_call_seen_on_a_10000_block_page", async ({ browser }) => {
+    test.setTimeout(120_000);
+    const target = large!;
+    const p = await budgetTab(browser);
+    await p.goto(`/p/${target.id}`);
+    await waitSynced(p);
+    await expect(p.locator(".mm-editor").getByText(target.first)).toBeVisible();
+    const delays = await agentCallsSeen(p, target, 10);
+    console.log(
+      `MESURE appel d'un agent vu dans le navigateur, page de 10 000 blocs (10 appels, processeur ralenti ${CPU_SLOWDOWN} fois) : ${summary(delays)} (sans budget)`,
+    );
   });
 });
