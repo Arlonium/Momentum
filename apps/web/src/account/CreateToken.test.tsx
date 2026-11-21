@@ -182,6 +182,52 @@ test("the_screen_warns_of_a_trapped_page", async () => {
   }
 });
 
+test("a_read_token_cannot_allow_the_trash", async () => {
+  // I4 : sous « Lecture », la corbeille ne sert à rien (mettre à la corbeille et en sortir demandent
+  // de modifier) : la case est grisée et décochée, et rien ne part.
+  await opened();
+  const trash = () =>
+    [...dialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].find(
+      (box) => document.getElementById(box.getAttribute("aria-labelledby") ?? "")?.textContent === "Permettre la corbeille",
+    )!;
+  const [read, edit] = radios("level");
+  expect(read.checked).toBe(true);
+  expect(trash()).toMatchObject({ disabled: true, checked: false });
+  await click(edit);
+  expect(trash().disabled).toBe(false);
+  await click(trash());
+  expect(trash().checked).toBe(true);
+  // Revenue à « Lecture », elle se décoche ; reprise « Modification », elle reste décochée.
+  await click(read);
+  expect(trash()).toMatchObject({ disabled: true, checked: false });
+  await click(edit);
+  expect(trash()).toMatchObject({ disabled: false, checked: false });
+  await click(read);
+  vi.mocked(createToken).mockResolvedValue({ token: TOKEN, info: info() });
+  await fillAndSubmit();
+  expect(vi.mocked(createToken).mock.calls[0][0]).toMatchObject({ level: "read", canTrash: false });
+  await act(async () => root.unmount());
+  root = createRoot(host);
+
+  // Un brouillon de « Lecture » qui gardait la corbeille (d'avant la règle) ne l'envoie pas.
+  const draft: TokenDraft = {
+    name: "Agent",
+    level: "read",
+    scope: "space",
+    spaceId: "pro",
+    chosen: [],
+    pagesOf: null,
+    canTrash: true,
+    expiry: 90,
+  };
+  await opened(pro, draft);
+  expect(trash()).toMatchObject({ disabled: true, checked: false });
+  vi.mocked(createToken).mockClear();
+  await type(field("Mot de passe actuel"), "mot-de-passe");
+  await click(buttonNamed("Créer le jeton")!);
+  expect(vi.mocked(createToken).mock.calls[0][0]).toMatchObject({ level: "read", canTrash: false });
+});
+
 test("the_scope_picker_only_offers_pages_of_the_tree", async () => {
   // L'arbre affiché : celui de « Pro », sans la page à la corbeille.
   publishPages("pro", [

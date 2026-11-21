@@ -74,6 +74,15 @@ test("a_token_is_created_copied_used_and_revoked", async ({ browser }) => {
   ]);
   await expect(form.getByRole("radio", { name: "Un espace" })).toBeChecked();
   await expect(form.getByRole("radio", { name: "Lecture", exact: true })).toBeChecked();
+  // Sous « Lecture », la corbeille ne se permet pas (I4) : la case grisée et décochée.
+  const trash = form.getByRole("checkbox", { name: "Permettre la corbeille" });
+  await expect(trash).toBeDisabled();
+  await expect(trash).not.toBeChecked();
+  await form.getByRole("radio", { name: "Modification", exact: true }).check();
+  await trash.check();
+  await form.getByRole("radio", { name: "Lecture", exact: true }).check();
+  await expect(trash).toBeDisabled();
+  await expect(trash).not.toBeChecked();
   await form.getByLabel("Mot de passe actuel").fill(PASSWORD);
   await form.getByRole("button", { name: "Créer le jeton" }).click();
 

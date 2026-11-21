@@ -4,8 +4,9 @@
 // Ce qui se choisit : un nom ; un niveau, « Lecture » ou « Modification », et rien au-dessus (R1218) ;
 // une portée, proposée de la plus étroite à la plus large : des pages d'un espace avec leurs
 // sous-pages, un espace, ou tous les espaces du compte (R1219, R1664), l'espace affiché coché d'abord
-// (R1450) ; la corbeille, permise ou non ; une échéance (90 jours par défaut, décision L1) ; et le mot
-// de passe actuel, que la création redemande (décision L2). Le serveur fait foi : ses refus s'affichent
+// (R1450) ; la corbeille, permise ou non, avec « Modification » seulement (sous « Lecture », la case
+// est grisée et décochée, I4, R1665) ; une échéance (90 jours par défaut, décision L1) ; et le mot de
+// passe actuel, que la création redemande (décision L2). Le serveur fait foi : ses refus s'affichent
 // tels qu'il les dit, et un mot de passe faux (`401 invalid_credentials`) n'est pas une session perdue.
 //
 // Avant ces choix, l'écran dit le risque d'une page piégée (LA-c, R1664) : le texte d'une page peut
@@ -163,7 +164,9 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
   const [kept, setKept] = useState<FoundPage[]>(() =>
     (start?.chosen ?? []).filter((p) => !offered.some((o) => o.id === p.id)),
   );
-  const [canTrash, setCanTrash] = useState(start?.canTrash ?? false);
+  // La corbeille ne vaut qu'avec « Modification » (mettre à la corbeille et en sortir demandent de
+  // modifier, I4) : sous « Lecture », la case est grisée et décochée, et le serveur la refuse.
+  const [canTrash, setCanTrash] = useState(start !== null && start.level === "edit" && start.canTrash);
   const [expiry, setExpiry] = useState<number | null>(start === null ? DEFAULT_EXPIRY : start.expiry);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -221,6 +224,11 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
     if (busy) return;
     if (created !== null) setConfirming(true);
     else leave();
+  };
+
+  const chooseLevel = (next: TokenLevel) => {
+    setLevel(next);
+    if (next === "read") setCanTrash(false);
   };
 
   const search = (next: string) => {
@@ -358,7 +366,7 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
                     name={`${levelName}-level`}
                     value={item.id}
                     checked={level === item.id}
-                    onChange={() => setLevel(item.id)}
+                    onChange={() => chooseLevel(item.id)}
                     label={item.label}
                     hint={item.hint}
                   />
@@ -444,9 +452,10 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
               <Choice
                 type="checkbox"
                 checked={canTrash}
+                disabled={level === "read"}
                 onChange={(checked) => setCanTrash(checked)}
                 label="Permettre la corbeille"
-                hint="Mettre une page à la corbeille et l'en sortir."
+                hint="Mettre une page à la corbeille et l'en sortir, avec «&nbsp;Modification&nbsp;» seulement."
               />
               <div className="mm-field">
                 <label htmlFor={expiryId}>Échéance</label>

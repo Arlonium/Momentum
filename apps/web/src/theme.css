@@ -2323,8 +2323,16 @@ button.tree-toggle:hover {
   accent-color: var(--mm-accent);
 }
 
-.mm-token-choice input:disabled + .mm-token-choice-text {
+.mm-token-choice input:disabled + .mm-token-choice-text,
+.mm-token-check input:disabled + .mm-token-choice-text,
+.mm-token-choice input:disabled + .mm-token-choice-text .mm-token-choice-label,
+.mm-token-check input:disabled + .mm-token-choice-text .mm-token-choice-label {
   color: var(--mm-text-secondary);
+}
+
+.mm-token-choice:has(input:disabled),
+.mm-token-check:has(input:disabled) {
+  cursor: default;
 }
 
 /* Le risque d'une page piégée (LA-c), avant le niveau et la portée. */
