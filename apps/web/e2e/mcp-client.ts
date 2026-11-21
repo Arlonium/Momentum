@@ -39,8 +39,10 @@ export class ToolResult {
     if (open < 0) throw new Error(`aucun contenu borné : ${this.text}`);
     const start = open + "\n<<<contenu ".length;
     const nonceEnd = this.text.indexOf("\n", start);
-    const nonce = this.text.slice(start, nonceEnd);
+    const nonce = nonceEnd < 0 ? "" : this.text.slice(start, nonceEnd);
+    if (!/^[0-9a-f]+$/.test(nonce)) throw new Error(`ligne d'ouverture du contenu sans nombre : ${this.text}`);
     const end = this.text.lastIndexOf(`\n>>>${nonce}`);
+    if (end < nonceEnd) throw new Error(`contenu borné sans sa ligne de fermeture : ${this.text}`);
     return this.text.slice(nonceEnd + 1, end);
   }
 
@@ -144,7 +146,15 @@ export class Mcp {
       body: JSON.stringify(message),
     });
     const raw = await res.text();
-    return { status: res.status, headers: res.headers, body: raw === "" ? null : JSON.parse(raw) };
+    let body: unknown = null;
+    if (raw !== "") {
+      try {
+        body = JSON.parse(raw);
+      } catch {
+        throw new Error(`${method} : une réponse ${res.status} qui n'est pas du JSON : ${raw.slice(0, 300)}`);
+      }
+    }
+    return { status: res.status, headers: res.headers, body };
   }
 
   /** Envoie un message et rend son `result` : la réponse doit être un `200` sans erreur JSON-RPC. */

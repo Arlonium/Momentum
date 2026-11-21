@@ -7,8 +7,8 @@
 // Ce que ces tests ne font pas : brancher le vrai Claude Code (`claude mcp add` écrit dans la
 // configuration de l'utilisateur, R1258 ; c'est la Step 3 de la Task X1, avec Alex), ni mesurer
 // (Task X2).
-import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
-import type { CreateToken, TokenCreated } from "@mementum/protocol";
+import { expect, test, type APIRequestContext, type Locator, type Page, type Request } from "@playwright/test";
+import type { CreateToken, TokenCreated, Tree } from "@mementum/protocol";
 import {
   apiAs,
   closeContexts,
@@ -17,6 +17,7 @@ import {
   firstSpace,
   getMe,
   getMmd,
+  isWrite,
   newUser,
   openPage,
   ownerAndMember,
@@ -129,31 +130,79 @@ async function serverHolds(api: APIRequestContext, pageId: string, mmd: string):
   await expect.poll(() => getMmd(api, pageId), { timeout: 15_000 }).toBe(mmd);
 }
 
+/** La retenue des trames que le serveur envoie à un onglet (`serverFrames`). */
+type ServerFrames = {
+  /**
+   * Commence la retenue juste après une trame reçue du serveur : tout de suite si la dernière date de
+   * moins de 5 s, sinon à la suivante (une page calme n'en reçoit qu'une toutes les 20 s).
+   */
+  hold: () => Promise<void>;
+  /** Rend à l'onglet, dans l'ordre, ce que la retenue gardait ; elle a duré moins de 10 s. */
+  release: () => void;
+  /** Les trames d'écriture que l'onglet a envoyées au serveur depuis le début de la retenue. */
+  sentWhileHeld: () => number;
+};
+
+/** Le budget d'une retenue : y-websocket ferme une connexion qui n'a rien reçu depuis 30 s. */
+const HOLD_AFTER_FRAME_MS = 5_000;
+const HOLD_AT_MOST_MS = 10_000;
+
 /**
  * Retient ce que le serveur envoie à l'onglet sur ses connexions de synchro, à appeler avant `goto` :
  * entre `hold()` et `release()`, ce que l'onglet tape part au serveur, mais rien de ce que le serveur
  * diffuse ne lui arrive. Une écriture de l'agent et une frappe se croisent ainsi à coup sûr : la
- * personne tape sur une page où l'agent a déjà écrit, sans le savoir. Quelques secondes au plus :
- * y-websocket ferme une connexion qui n'a rien reçu depuis 30 s.
+ * personne tape sur une page où l'agent a déjà écrit, sans le savoir (R1482, R1631). y-websocket
+ * compte ses 30 s depuis la dernière trame reçue : la retenue commence moins de 5 s après une trame,
+ * et dure moins de 10 s.
  */
-async function serverFrames(p: Page): Promise<{ hold: () => void; release: () => void }> {
+async function serverFrames(p: Page): Promise<ServerFrames> {
   let held: (() => void)[] | null = null;
+  let heldSince = 0;
+  let lastFrame = 0;
+  let sent = 0;
+  const waiting: (() => void)[] = [];
   await p.routeWebSocket(/\/sync\//, (ws) => {
     const server = ws.connectToServer();
     server.onMessage((message) => {
-      if (held) held.push(() => ws.send(message));
-      else ws.send(message);
+      if (held) {
+        held.push(() => ws.send(message));
+        return;
+      }
+      ws.send(message);
+      lastFrame = Date.now();
+      for (const wake of waiting.splice(0)) wake();
+    });
+    ws.onMessage((message) => {
+      const bytes = typeof message === "string" ? Buffer.from(message) : message;
+      if (held && isWrite([...bytes])) sent += 1;
+      server.send(message);
     });
   });
   return {
-    hold: () => {
+    hold: async () => {
+      if (Date.now() - lastFrame > HOLD_AFTER_FRAME_MS) {
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error("aucune trame du serveur depuis 25 s")), 25_000);
+          waiting.push(() => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+      }
       held = [];
+      heldSince = Date.now();
+      sent = 0;
     },
     release: () => {
+      expect(Date.now() - heldSince, "une retenue des trames du serveur de plus de 10 s").toBeLessThan(
+        HOLD_AT_MOST_MS,
+      );
       const queued = held ?? [];
       held = null;
       for (const send of queued) send();
+      if (queued.length > 0) lastFrame = Date.now();
     },
+    sentWhileHeld: () => sent,
   };
 }
 
@@ -190,6 +239,33 @@ test("an_agent_pours_a_page_into_the_space_and_it_appears_in_the_sidebar", async
   const own = await firstSpace(api);
   const pro = await createSpace(api, `Pro ${unique()}`);
   const p = await newUser(browser, alex);
+  // Le canal de l'espace et les lectures de l'arbre, dans l'ordre où l'onglet les voit (un rang, pas
+  // une heure : deux événements de la même milliseconde gardent leur ordre).
+  let rank = 0;
+  const lsnFrames: { at: number; lsn: number }[] = [];
+  const treeSent = new Map<Request, number>();
+  const treeReads: { sentAt: number; lsn: number; ids: string[] }[] = [];
+  const isTreeRead = (request: Request) =>
+    request.method() === "GET" && /\/api\/v1\/spaces\/[^/]+\/tree$/.test(new URL(request.url()).pathname);
+  p.on("websocket", (ws) => {
+    if (!ws.url().includes("/events/")) return;
+    ws.on("framereceived", ({ payload }) => {
+      const match = /^\{"lsn":(\d+)\}$/.exec(typeof payload === "string" ? payload : payload.toString("utf8"));
+      if (match) lsnFrames.push({ at: ++rank, lsn: Number(match[1]) });
+    });
+  });
+  p.on("request", (request) => {
+    if (isTreeRead(request)) treeSent.set(request, ++rank);
+  });
+  p.on("response", async (response) => {
+    if (!isTreeRead(response.request()) || response.status() !== 200) return;
+    const tree = (await response.json()) as Tree;
+    treeReads.push({
+      sentAt: treeSent.get(response.request()) ?? -1,
+      lsn: tree.lsn,
+      ids: tree.nodes.map((node) => node.id),
+    });
+  });
   await p.goto(`/s/${pro.id}`);
   await expect(spaceSwitcher(p, pro.name)).toBeVisible();
 
@@ -209,6 +285,8 @@ test("an_agent_pours_a_page_into_the_space_and_it_appears_in_the_sidebar", async
   expect(me.content()).toContain(`${pro.name} (${pro.id})`);
   expect(me.content()).not.toContain(own.id);
   const title = `Compte rendu ${unique()}`;
+  const knownLsn = Math.max(...treeReads.map((read) => read.lsn));
+  const calledAt = ++rank;
   const created = (
     await agent.call("create_pages", {
       space: pro.name,
@@ -217,11 +295,18 @@ test("an_agent_pours_a_page_into_the_space_and_it_appears_in_the_sidebar", async
   ).ok();
   const [pageId] = uuids(created.content());
 
-  // Sans recharger : la page arrive par le canal de l'espace, dans « Privé » (la section d'une page
-  // qu'un agent crée sans rien dire, R1218).
+  // Sans recharger, dans « Privé » (la section d'une page qu'un agent crée sans rien dire, R1218).
   await expect(sectionOf(p, "Privé").locator(`[data-page-id="${pageId}"]`)).toBeVisible();
   await expect(treeRow(p, pageId)).toContainText(title);
   expect(await p.evaluate(() => (window as unknown as { __notReloaded?: boolean }).__notReloaded)).toBe(true);
+  // Par le canal de l'espace : la lecture de l'arbre qui apporte la page suit une trame `{"lsn":N}`
+  // reçue après l'appel de l'agent, d'une version plus haute que celle de l'arbre affiché (R1632).
+  await expect.poll(() => treeReads.some((read) => read.ids.includes(pageId))).toBe(true);
+  const bringing = treeReads.find((read) => read.ids.includes(pageId))!;
+  const announced = lsnFrames.find((frame) => frame.at > calledAt && frame.lsn > knownLsn);
+  expect(announced, JSON.stringify({ lsnFrames, knownLsn, calledAt, bringing })).toBeDefined();
+  expect(announced!.at).toBeLessThan(bringing.sentAt);
+  expect(bringing.lsn).toBeGreaterThanOrEqual(announced!.lsn);
 
   // Alex l'ouvre : le compte rendu de l'agent.
   await treeRow(p, pageId).getByRole("link").click();
@@ -238,7 +323,8 @@ test("an_agent_edits_while_a_human_types_and_nothing_is_lost", async ({ browser 
   // Le T5 de la phase 0, de bout en bout : 200 frappes dans le premier bloc, pendant que l'agent fait
   // 20 appels `str_replace` et `insert` sur d'autres blocs, chacun sur la révision que l'appel d'avant
   // lui a rendue (`rebase`, R1231). Le texte de la personne entier et dans l'ordre, les 20 éditions
-  // présentes, aucun conflit, la même page chez le serveur et dans l'onglet.
+  // présentes, aucun conflit, la même page chez le serveur et dans l'onglet. Trois de ces écritures
+  // croisent la frappe à coup sûr : l'onglet ne les reçoit qu'une fois cinq frappes parties (R1630).
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);
   const space = await firstSpace(api);
@@ -258,46 +344,49 @@ test("an_agent_edits_while_a_human_types_and_nothing_is_lost", async ({ browser 
   const anchors = aliases(read.content());
   let revision = read.revision();
 
-  const p = await openPage(browser, pageId, alice);
+  const p = await newUser(browser, alice);
+  const frames = await serverFrames(p);
+  await p.goto(`/p/${pageId}`);
+  await waitSynced(p);
   await cursorAtEndOf(p, "Notes de réunion.");
   // 200 frappes : une espace, puis des lettres par mots de vingt-six.
   const typed = ` ${"abcdefghijklmnopqrstuvwxyz ".repeat(8).slice(0, 199)}`;
   expect(typed).toHaveLength(200);
 
   const conflicts: string[] = [];
-  // L'heure de chaque écriture de l'agent, pour savoir qu'elles ont croisé la frappe.
-  const written: number[] = [];
+  // Les écritures croisées à coup sûr (leur rang parmi les vingt), et les frappes parties pendant
+  // chacune.
+  const crossing = new Set([2, 9, 16]);
+  const crossings: number[] = [];
   const agentWork = (async () => {
+    let n = 0;
     for (const [i, point] of points.entries()) {
       const done = point.replace(/\.$/, ", fait.");
       for (const operation of [
         { op: "str_replace", old: point, new: done },
         { op: "insert", after: anchors.get(point), markdown: `Ajout ${i + 1}.\n` },
       ]) {
+        const crossed = crossing.has(n++);
+        if (crossed) await frames.hold();
         const result = await agent.call("update_page", {
           page: pageId,
           base_revision: revision,
           operations: [operation],
         });
-        written.push(Date.now());
         if (result.isError) conflicts.push(result.text);
         else revision = result.revision();
+        if (crossed) {
+          await expect.poll(() => frames.sentWhileHeld(), { timeout: 8_000 }).toBeGreaterThanOrEqual(5);
+          crossings.push(frames.sentWhileHeld());
+          frames.release();
+        }
         await new Promise((r) => setTimeout(r, 120));
       }
     }
   })();
-  const typing = (async () => {
-    const start = Date.now();
-    await p.keyboard.type(typed, { delay: 15 });
-    return [start, Date.now()] as const;
-  })();
-  const [[typingFrom, typingTo]] = await Promise.all([typing, agentWork]);
+  await Promise.all([p.keyboard.type(typed, { delay: 15 }), agentWork]);
   expect(conflicts).toEqual([]);
-  // Une écriture sur quatre au moins a eu lieu pendant la frappe (sans quoi le test ne prouverait
-  // rien) ; d'ordinaire, toutes.
-  const crossed = written.filter((at) => at > typingFrom && at < typingTo).length;
-  console.log(`X1 : ${crossed} écritures de l'agent sur 20 pendant les ${typingTo - typingFrom} ms de frappe`);
-  expect(crossed).toBeGreaterThanOrEqual(5);
+  expect(crossings).toHaveLength(3);
 
   const wanted = [
     `Notes de réunion.${typed}`,
@@ -314,8 +403,10 @@ test("an_agent_and_a_human_in_the_same_block", async ({ browser }) => {
   // Les deux dans un même bloc, leurs écritures croisées (l'onglet tape sans avoir reçu celle de
   // l'agent). `str_replace` ne récrit que ce qu'il remplace : les deux restent. `replace_block` : une
   // frappe arrivée avant lui le fait refuser (`revision_conflict`, avec le bloc à jour, R1231) ; une
-  // frappe qui le croise reste au bord du texte écrit tant que le bloc garde son type (R1283), et
-  // est perdue quand il en change — la limite LA-a, dite ici telle qu'elle est (R1480).
+  // frappe qui le croise reste au bord du texte écrit quand le MMD neuf porte un bloc de premier
+  // niveau du type du bloc remplacé, qui en hérite l'identifiant et l'élément de contenu (R1232,
+  // R1283), et est perdue sinon — la limite LA-a, dite ici telle qu'elle est (R1629, qui récrit
+  // R1480). Ce test ne prouve qu'une frappe en fin de bloc, après un suffixe commun.
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);
   const space = await firstSpace(api);
@@ -332,7 +423,7 @@ test("an_agent_and_a_human_in_the_same_block", async ({ browser }) => {
 
   await test.step("str_replace : les deux restent", async () => {
     await cursorAtEndOf(p, "Sortir la v1.");
-    frames.hold();
+    await frames.hold();
     (await agent.call("update_page", { page: page.id, operations: [{ op: "str_replace", old: "la v1", new: "la v2" }] })).ok();
     await p.keyboard.type(" Avant décembre.");
     // Ils se sont croisés : le serveur a les deux, l'onglet ne sait encore rien de l'agent.
@@ -360,12 +451,13 @@ test("an_agent_and_a_human_in_the_same_block", async ({ browser }) => {
     expect(await getMmd(api, page.id)).toBe("Sortir la v2. Avant décembre.\n\nBloc à remplacer. Tapé avant.\n");
   });
 
-  await test.step("replace_block du même type : une frappe qui le croise reste, au bord du texte écrit", async () => {
-    // Le contenu d'un bloc qui garde son type s'écrit par préfixe et suffixe (R1283) : la frappe,
-    // ancrée au point final que l'écriture garde, reste après le texte de l'agent.
+  await test.step("replace_block par un bloc de son type : une frappe qui le croise reste, au bord du texte écrit", async () => {
+    // Le premier bloc de premier niveau du type du bloc remplacé hérite son identifiant et son élément
+    // de contenu (R1232), écrit par préfixe et suffixe (R1283) : la frappe, ancrée au point final
+    // que l'écriture garde, reste après le texte de l'agent.
     const reread = (await agent.call("fetch", { id: page.id, anchors: true })).ok();
     const anchor = aliases(reread.content()).get("Bloc à remplacer. Tapé avant.")!;
-    frames.hold();
+    await frames.hold();
     (
       await agent.call("update_page", {
         page: page.id,
@@ -383,11 +475,12 @@ test("an_agent_and_a_human_in_the_same_block", async ({ browser }) => {
       .toEqual(["Sortir la v2. Avant décembre.", "Bloc récrit par l'agent. Tapé pendant."]);
   });
 
-  await test.step("replace_block qui change le type du bloc : une frappe qui le croise est perdue (LA-a)", async () => {
+  await test.step("replace_block sans bloc de son type : une frappe qui le croise est perdue (LA-a)", async () => {
+    // Un titre seul remplace le paragraphe : aucun bloc n'hérite de son élément de contenu.
     const reread = (await agent.call("fetch", { id: page.id, anchors: true })).ok();
     const anchor = aliases(reread.content()).get("Bloc récrit par l'agent. Tapé pendant.")!;
     await cursorAtEndOf(p, "Tapé pendant.");
-    frames.hold();
+    await frames.hold();
     (
       await agent.call("update_page", {
         page: page.id,
@@ -426,7 +519,11 @@ test("a_token_scoped_to_a_page_finds_nothing_else", async ({ browser }) => {
   const other = await createPage(api, { spaceId: space.id, title: `Autre ${tag}` });
   const searched = word();
   for (const id of [folder.id, project.id, sub.id, other.id]) await putMmd(api, id, `Le mot ${searched} est ici.\n`);
-  for (const id of [folder.id, sub.id, other.id]) await waitFindable(api, space.id, searched, id);
+  for (const id of [folder.id, project.id, sub.id, other.id]) await waitFindable(api, space.id, searched, id);
+  /** Ni le titre ni l'identifiant d'une page hors de portée. */
+  const nothingHidden = (text: string, what: string) => {
+    for (const hidden of [folder.title, other.title, folder.id, other.id]) expect(text, what).not.toContain(hidden);
+  };
 
   const p = await newUser(browser, alice);
   await p.goto(`/s/${space.id}`);
@@ -445,7 +542,7 @@ test("a_token_scoped_to_a_page_finds_nothing_else", async ({ browser }) => {
   const found = (await agent.call("search", { query: searched })).ok();
   expect(uuids(found.content()).filter((id) => id !== space.id).sort()).toEqual([project.id, sub.id].sort());
   expect(found.content()).toContain(`chemin : ${project.title}`);
-  for (const hidden of [folder.title, other.title]) expect(found.text).not.toContain(hidden);
+  nothingHidden(found.text, "search");
 
   // `fetch` d'une page hors de portée : la réponse d'une page qui n'existe pas, octet pour octet.
   const unknown = (await agent.call("fetch", { id: UNKNOWN_ID })).refused("not_found");
@@ -456,7 +553,7 @@ test("a_token_scoped_to_a_page_finds_nothing_else", async ({ browser }) => {
   // La sous-page se lit, son chemin sans la page parente de la page choisie.
   const subRead = (await agent.call("fetch", { id: sub.id })).ok();
   expect(subRead.content()).toContain(`chemin : ${project.title}\n`);
-  expect(subRead.text).not.toContain(folder.title);
+  nothingHidden(subRead.text, "fetch de la sous-page");
 
   // Le plan de l'espace et `workspace_info` : la page choisie et sa sous-page.
   for (const [tool, args] of [
@@ -465,7 +562,7 @@ test("a_token_scoped_to_a_page_finds_nothing_else", async ({ browser }) => {
   ] as const) {
     const seen = (await agent.call(tool, args)).ok();
     expect(seen.content(), tool).toContain(project.title);
-    for (const hidden of [folder.title, other.title]) expect(seen.text, tool).not.toContain(hidden);
+    nothingHidden(seen.text, tool);
   }
 });
 
@@ -488,6 +585,7 @@ test("a_revoked_token_stops_between_two_calls", async ({ browser }) => {
     });
   const first = await insert("Avant la révocation.\n");
   expect(first.status).toBe(200);
+  expect((first.body as { result?: { isError?: boolean } }).result?.isError, JSON.stringify(first.body)).toBe(false);
   await serverHolds(api, page.id, "Premier paragraphe.\n\nAvant la révocation.\n");
 
   const p = await newUser(browser, alice);
@@ -546,7 +644,7 @@ test("replace_page_is_refused_while_the_tab_can_write", async ({ browser }) => {
   await tab.context().close();
   const reader = await openPage(browser, page.id, bruno);
   await expect(reader.getByRole("status").filter({ hasText: "Tu peux lire cette page" })).toBeVisible();
-  await expect.poll(async () => (await replace()).code(), { timeout: 15_000 }).toBeNull();
+  await expect.poll(async () => (await replace()).isError, { timeout: 15_000 }).toBe(false);
   await expect(editorOf(reader)).toContainText("Le texte de l'agent.");
   expect(await getMmd(aliceApi, page.id)).toBe("Le texte de l'agent.\n");
 });
