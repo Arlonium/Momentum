@@ -46,7 +46,8 @@ pub const MAX_LIMIT: u32 = 48 * 1024;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchInput {
-    /// Les mots cherchés : 200 caractères au plus, 8 mots au plus comptent.
+    /// Les mots cherchés : 200 caractères au plus, 8 mots au plus (une lettre seule avant le
+    /// dernier mot et un mot répété ne comptent pas) ; au-delà, la recherche est refusée.
     #[schemars(length(min = 1, max = MAX_QUERY_CHARS))]
     pub query: String,
     /// L'espace où chercher, par son nom ou son identifiant. Facultatif si le jeton n'ouvre qu'un
@@ -68,7 +69,8 @@ pub struct SearchInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = MAX_TOKEN_CHARS))]
     pub edited_before: Option<String>,
-    /// La suite d'une recherche : le curseur `more` d'une réponse précédente.
+    /// La suite d'une recherche : le nombre que donne la ligne « Suite » d'une réponse précédente
+    /// (`after=N`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = MAX_TOKEN_CHARS))]
     pub after: Option<String>,
@@ -190,9 +192,10 @@ pub struct Properties {
 #[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Operation {
     /// Remplacer un texte par un autre, dans le texte brut d'un bloc (jamais à cheval sur deux
-    /// blocs). `old` doit se trouver une seule fois dans la page, ou dans le bloc `anchor`, sauf
-    /// `replace_all`. `new` est du texte brut, qui prend la mise en forme du premier caractère
-    /// remplacé.
+    /// blocs ; ce qu'est ce texte brut est dit à la section « Ce que `str_replace` cherche » de la
+    /// ressource `mementum://spec/mmd`). `old` doit se trouver une seule fois dans la page, ou dans
+    /// le bloc `anchor`, sauf `replace_all`. `new` est du texte brut, qui prend la mise en forme
+    /// du premier caractère remplacé.
     StrReplace {
         #[schemars(length(min = 1, max = MAX_OLD_CHARS))]
         old: String,
@@ -249,7 +252,8 @@ pub enum Operation {
         position: Option<Position>,
     },
     /// Récrire toute la page (MMD) : seulement pour une page neuve ou petite. Demande
-    /// `base_revision` ; refusé tant que quelqu'un écrit dans la page.
+    /// `base_revision` ; refusé (`page_in_use`) tant qu'une connexion qui peut écrire est ouverte
+    /// sur la page, celle d'un onglet où une personne l'a ouverte par exemple.
     ReplacePage {
         #[schemars(length(max = MAX_MARKDOWN_CHARS))]
         markdown: String,
@@ -293,9 +297,9 @@ pub enum PageAction {
     Rename,
     /// Dupliquer la page et ses sous-pages.
     Duplicate,
-    /// Mettre à la corbeille (si le jeton le permet).
+    /// Mettre à la corbeille (si le jeton a l'option corbeille).
     Trash,
-    /// Sortir de la corbeille.
+    /// Sortir de la corbeille (si le jeton a l'option corbeille).
     Restore,
 }
 
@@ -429,8 +433,8 @@ const SPECS: [Spec; 6] = [
         description: "Cherche des pages par leur texte, dans un espace que ton jeton ouvre. Rend, \
                       pour chaque page trouvée, son titre, son fil d'Ariane, un extrait et l'alias \
                       du bloc trouvé (lis la page ensuite par fetch). 20 pages par réponse ; \
-                      `more` donne la suite (`after`). Filtres : created_by, edited_after, \
-                      edited_before.",
+                      la ligne « Suite » donne le curseur de la suite (`after`). Filtres : \
+                      created_by, edited_after, edited_before.",
         read_only: true,
         destructive: false,
         schema: schema::<SearchInput>,
@@ -459,8 +463,12 @@ const SPECS: [Spec; 6] = [
         name: "create_pages",
         title: "Créer des pages",
         description: "Crée des pages (20 au plus), leur contenu en MMD, sous une page ou à la \
-                      racine d'un espace (section `private` par défaut, ou `space`). Toutes sont \
-                      créées, ou aucune. Les images, vidéos et sons du web ne sont pas admis. Si \
+                      racine d'un espace (section `private` par défaut, ou `space` ; `section` ne \
+                      se donne pas avec `parent`). Toutes sont créées, ou aucune. Les images, \
+                      vidéos et sons du web ne sont pas admis. Refus : un titre de plus de 500 \
+                      caractères (title_too_long), plus de 16 Mio de documents écrits \
+                      (subtree_too_large : découpe en plusieurs appels), la page parente déplacée \
+                      pendant l'appel (page_moved : relis-la, puis recommence). Si \
                       la réponse ne t'arrive pas, cherche les pages (search) avant de réessayer : \
                       elles existent peut-être déjà.",
         read_only: false,
@@ -479,9 +487,13 @@ const SPECS: [Spec; 6] = [
                       `base_revision`, la révision de ta dernière lecture : si les blocs que tu \
                       touches ont changé depuis, l'appel est refusé (revision_conflict), avec les \
                       blocs à jour. Le seul mode servi aujourd'hui est `direct` : ce que tu écris \
-                      est écrit tout de suite, et l'historique de la page le garde. Le défaut de \
-                      `mode` deviendra `suggest` quand les suggestions seront servies : envoie \
-                      `mode: \"direct\"` si tu tiens à écrire tout de suite.",
+                      est écrit tout de suite. Avant qu'un replace_page, un replace_block ou un \
+                      delete_block remplace ce que quelqu'un d'autre a écrit depuis la dernière \
+                      version, l'historique de la page en coupe une qui le garde ; le texte qu'un \
+                      str_replace remplace n'est gardé par aucune version. Le défaut de `mode` \
+                      deviendra `suggest` quand les \
+                      suggestions seront servies : envoie `mode: \"direct\"` si tu tiens à écrire \
+                      tout de suite.",
         read_only: false,
         destructive: true,
         schema: schema::<UpdatePageInput>,
@@ -491,8 +503,9 @@ const SPECS: [Spec; 6] = [
         name: "manage_pages",
         title: "Ranger une page",
         description: "Déplace une page parmi ses pages sœurs (jamais sous une autre page), la \
-                      renomme, la duplique avec ses sous-pages, la met à la corbeille (si ton \
-                      jeton le permet) ou l'en sort. Une page par appel.",
+                      renomme, la duplique avec ses sous-pages, la met à la corbeille ou l'en \
+                      sort (l'un et l'autre si ton jeton a l'option corbeille). Une page par \
+                      appel.",
         read_only: false,
         destructive: true,
         schema: schema::<ManagePagesInput>,

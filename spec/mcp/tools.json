@@ -9,14 +9,14 @@
     {
       "name": "search",
       "title": "Chercher des pages",
-      "description": "Cherche des pages par leur texte, dans un espace que ton jeton ouvre. Rend, pour chaque page trouvée, son titre, son fil d'Ariane, un extrait et l'alias du bloc trouvé (lis la page ensuite par fetch). 20 pages par réponse ; `more` donne la suite (`after`). Filtres : created_by, edited_after, edited_before.",
+      "description": "Cherche des pages par leur texte, dans un espace que ton jeton ouvre. Rend, pour chaque page trouvée, son titre, son fil d'Ariane, un extrait et l'alias du bloc trouvé (lis la page ensuite par fetch). 20 pages par réponse ; la ligne « Suite » donne le curseur de la suite (`after`). Filtres : created_by, edited_after, edited_before.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "query": {
             "type": "string",
-            "description": "Les mots cherchés : 200 caractères au plus, 8 mots au plus comptent.",
+            "description": "Les mots cherchés : 200 caractères au plus, 8 mots au plus (une lettre seule avant le dernier mot et un mot répété ne comptent pas) ; au-delà, la recherche est refusée.",
             "minLength": 1,
             "maxLength": 200
           },
@@ -61,7 +61,7 @@
               "string",
               "null"
             ],
-            "description": "La suite d'une recherche : le curseur `more` d'une réponse précédente.",
+            "description": "La suite d'une recherche : le nombre que donne la ligne « Suite » d'une réponse précédente (`after=N`).",
             "minLength": 1,
             "maxLength": 120
           }
@@ -145,7 +145,7 @@
     {
       "name": "create_pages",
       "title": "Créer des pages",
-      "description": "Crée des pages (20 au plus), leur contenu en MMD, sous une page ou à la racine d'un espace (section `private` par défaut, ou `space`). Toutes sont créées, ou aucune. Les images, vidéos et sons du web ne sont pas admis. Si la réponse ne t'arrive pas, cherche les pages (search) avant de réessayer : elles existent peut-être déjà.",
+      "description": "Crée des pages (20 au plus), leur contenu en MMD, sous une page ou à la racine d'un espace (section `private` par défaut, ou `space` ; `section` ne se donne pas avec `parent`). Toutes sont créées, ou aucune. Les images, vidéos et sons du web ne sont pas admis. Refus : un titre de plus de 500 caractères (title_too_long), plus de 16 Mio de documents écrits (subtree_too_large : découpe en plusieurs appels), la page parente déplacée pendant l'appel (page_moved : relis-la, puis recommence). Si la réponse ne t'arrive pas, cherche les pages (search) avant de réessayer : elles existent peut-être déjà.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -237,7 +237,7 @@
     {
       "name": "update_page",
       "title": "Modifier une page",
-      "description": "Change le contenu d'une page par une liste d'opérations (100 au plus), appliquées toutes ou aucune : str_replace (remplacer un texte, l'opération à préférer), insert, replace_block, delete_block, move_block, replace_page (page neuve ou petite seulement) et set_properties (le titre). Donne `base_revision`, la révision de ta dernière lecture : si les blocs que tu touches ont changé depuis, l'appel est refusé (revision_conflict), avec les blocs à jour. Le seul mode servi aujourd'hui est `direct` : ce que tu écris est écrit tout de suite, et l'historique de la page le garde. Le défaut de `mode` deviendra `suggest` quand les suggestions seront servies : envoie `mode: \"direct\"` si tu tiens à écrire tout de suite.",
+      "description": "Change le contenu d'une page par une liste d'opérations (100 au plus), appliquées toutes ou aucune : str_replace (remplacer un texte, l'opération à préférer), insert, replace_block, delete_block, move_block, replace_page (page neuve ou petite seulement) et set_properties (le titre). Donne `base_revision`, la révision de ta dernière lecture : si les blocs que tu touches ont changé depuis, l'appel est refusé (revision_conflict), avec les blocs à jour. Le seul mode servi aujourd'hui est `direct` : ce que tu écris est écrit tout de suite. Avant qu'un replace_page, un replace_block ou un delete_block remplace ce que quelqu'un d'autre a écrit depuis la dernière version, l'historique de la page en coupe une qui le garde ; le texte qu'un str_replace remplace n'est gardé par aucune version. Le défaut de `mode` deviendra `suggest` quand les suggestions seront servies : envoie `mode: \"direct\"` si tu tiens à écrire tout de suite.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -314,7 +314,7 @@
               "description": "Une opération d'`update_page` (§6.3). Les ancres sont les alias rendus par `fetch` avec `anchors` (`bk7qa`), ou l'identifiant entier d'un bloc.",
               "oneOf": [
                 {
-                  "description": "Remplacer un texte par un autre, dans le texte brut d'un bloc (jamais à cheval sur deux blocs). `old` doit se trouver une seule fois dans la page, ou dans le bloc `anchor`, sauf `replace_all`. `new` est du texte brut, qui prend la mise en forme du premier caractère remplacé.",
+                  "description": "Remplacer un texte par un autre, dans le texte brut d'un bloc (jamais à cheval sur deux blocs ; ce qu'est ce texte brut est dit à la section « Ce que `str_replace` cherche » de la ressource `mementum://spec/mmd`). `old` doit se trouver une seule fois dans la page, ou dans le bloc `anchor`, sauf `replace_all`. `new` est du texte brut, qui prend la mise en forme du premier caractère remplacé.",
                   "type": "object",
                   "properties": {
                     "op": {
@@ -505,7 +505,7 @@
                   ]
                 },
                 {
-                  "description": "Récrire toute la page (MMD) : seulement pour une page neuve ou petite. Demande `base_revision` ; refusé tant que quelqu'un écrit dans la page.",
+                  "description": "Récrire toute la page (MMD) : seulement pour une page neuve ou petite. Demande `base_revision` ; refusé (`page_in_use`) tant qu'une connexion qui peut écrire est ouverte sur la page, celle d'un onglet où une personne l'a ouverte par exemple.",
                   "type": "object",
                   "properties": {
                     "op": {
@@ -583,7 +583,7 @@
     {
       "name": "manage_pages",
       "title": "Ranger une page",
-      "description": "Déplace une page parmi ses pages sœurs (jamais sous une autre page), la renomme, la duplique avec ses sous-pages, la met à la corbeille (si ton jeton le permet) ou l'en sort. Une page par appel.",
+      "description": "Déplace une page parmi ses pages sœurs (jamais sous une autre page), la renomme, la duplique avec ses sous-pages, la met à la corbeille ou l'en sort (l'un et l'autre si ton jeton a l'option corbeille). Une page par appel.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
@@ -608,12 +608,12 @@
               {
                 "type": "string",
                 "const": "trash",
-                "description": "Mettre à la corbeille (si le jeton le permet)."
+                "description": "Mettre à la corbeille (si le jeton a l'option corbeille)."
               },
               {
                 "type": "string",
                 "const": "restore",
-                "description": "Sortir de la corbeille."
+                "description": "Sortir de la corbeille (si le jeton a l'option corbeille)."
               }
             ],
             "description": "Le geste de `manage_pages`."

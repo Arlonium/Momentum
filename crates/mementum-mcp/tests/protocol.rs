@@ -648,6 +648,27 @@ fn no_tool_description_carries_the_mmd_spec() {
     assert!(catalog.contains(spec::MMD_URI));
 }
 
+/// Lot 5, correction groupée (défaut O2 de la relecture finale, Ruling R1519) : la description
+/// d'`update_page`, que lit le modèle, ne promet pas que l'historique garde tout ce qu'il écrit :
+/// seules les trois opérations destructrices coupent une version (R1234), `str_replace` aucune.
+#[test]
+fn update_page_promises_a_version_only_for_the_destructive_operations() {
+    let update = tools::find("update_page", Endpoint::Full).unwrap();
+    assert!(
+        !update
+            .description
+            .contains("l'historique de la page le garde"),
+        "{}",
+        update.description
+    );
+    for said in [
+        "replace_page, un replace_block ou un delete_block",
+        "le texte qu'un str_replace remplace n'est gardé par aucune version",
+    ] {
+        assert!(update.description.contains(said), "{said}");
+    }
+}
+
 #[test]
 fn the_spec_resource_is_the_committed_text() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/mmd/SPEC.md");
