@@ -776,6 +776,106 @@ async fn a_rate_limit_carries_retry_after_seconds() {
     assert_eq!(mmd_of(&team, page).await, "Un\n");
 }
 
+/// Lot 5, correction groupée (défauts I3 et D5, Ruling R1524) : `workspace_info` dit le jeton **de
+/// l'appel** (sur `/mcp/readonly`, ramené à la lecture : « read », corbeille interdite), que les
+/// rôles sont ceux du jeton (Olga, propriétaire, y lit `member`), nomme les pages d'une portée de
+/// pages, et dit le vrai nombre des pages de premier niveau qu'il tait, sans redemander l'espace
+/// qu'on vient de nommer.
+#[tokio::test]
+async fn workspace_info_says_the_token_of_the_call() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let notes = page_with(&team, "Notes", "Un\n").await;
+    let (token, _) = api_token(
+        &t.store,
+        team.olga.id,
+        TokenLevel::Edit,
+        TokenScope::All,
+        true,
+    )
+    .await;
+    let full = Mcp::new(&t, &token, Era::V2026);
+    let info = full.call("workspace_info", json!({})).await;
+    info.ok();
+    for said in [
+        "Jeton de niveau edit",
+        "corbeille permise",
+        "Les rôles dits sont ceux de ce jeton",
+    ] {
+        assert!(info.head().contains(said), "{said} : {}", info.text);
+    }
+    let content = info.content().unwrap();
+    assert!(
+        content.contains(&format!("Équipe ({}) : member", team.space)),
+        "le rôle restreint du propriétaire : {content}"
+    );
+    let read = Mcp::new(&t, &token, Era::V2026).readonly();
+    let info = read.call("workspace_info", json!({})).await;
+    for said in ["Jeton de niveau read", "corbeille interdite"] {
+        assert!(info.head().contains(said), "{said} : {}", info.text);
+    }
+    assert!(!info.head().contains("permise"), "{}", info.text);
+
+    // Une portée de pages : ses pages sont nommées, dans le contenu borné.
+    let (scoped, _) = api_token(
+        &t.store,
+        team.olga.id,
+        TokenLevel::Read,
+        TokenScope::Pages {
+            space: team.space,
+            pages: vec![notes],
+        },
+        false,
+    )
+    .await;
+    let info = Mcp::new(&t, &scoped, Era::V2026)
+        .call("workspace_info", json!({}))
+        .await;
+    let content = info.content().unwrap();
+    assert!(
+        content.contains(&format!("- Notes ({notes})")),
+        "{}",
+        info.text
+    );
+    assert!(!info.head().contains("Notes"), "{}", info.text);
+
+    // Plus de 200 pages de premier niveau : le vrai nombre de celles qui sont tues.
+    for i in 0..205 {
+        team.page(
+            None,
+            &format!("Racine {i}"),
+            &[(Subject::Members, Level::Edit)],
+        )
+        .await;
+    }
+    let tree = t
+        .send(with_bearer(
+            Request::get(format!("/api/v1/spaces/{}/tree", team.space))
+                .body(Body::empty())
+                .unwrap(),
+            &token,
+        ))
+        .await;
+    tree.assert_status(StatusCode::OK);
+    let roots = tree.json()["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["parentId"].is_null() && node["trashedAt"].is_null())
+        .count();
+    assert!(roots > 205, "{roots}");
+    let info = full
+        .call("workspace_info", json!({ "space": "Équipe" }))
+        .await;
+    let content = info.content().unwrap();
+    assert!(
+        content.contains(&format!("(et {} de plus, non montrés)", roots - 200)),
+        "{content}"
+    );
+    assert!(!info.head().contains("nomme un espace"), "{}", info.head());
+    assert!(info.head().contains("fetch de l'espace"), "{}", info.head());
+}
+
 /// `/mcp/readonly` ne liste et n'appelle que `search`, `fetch` et `workspace_info`, même pour un
 /// jeton d'écriture : un outil d'écriture y est un outil inconnu (`-32602`), jamais appelé, et la
 /// base n'a pas changé (Ruling R1417).

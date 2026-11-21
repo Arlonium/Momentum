@@ -51,6 +51,7 @@ impl Host for FakeHost {
                     scope: "space".into(),
                     expires_at: None,
                     can_trash: false,
+                    pages: Vec::new(),
                 },
                 spaces: vec![SpaceLine {
                     id: "0193a1b2-0000-7000-8000-000000000001".into(),

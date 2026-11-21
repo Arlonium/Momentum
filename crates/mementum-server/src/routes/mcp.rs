@@ -64,8 +64,6 @@ use crate::types::{
 
 /// Lignes du plan d'un espace (`fetch` d'un espace), au plus.
 const MAX_PLAN_LINES: usize = 500;
-/// Pages de premier niveau d'un espace nommé (`workspace_info`), au plus.
-const MAX_SPACE_PAGES: usize = 200;
 /// Caractères d'un fragment d'adresse (`#b=<bloc>`), au plus : un identifiant de bloc fait cent
 /// octets au plus, trois cents caractères échappés (la règle du client, `router.ts`).
 const MAX_FRAGMENT_CHARS: usize = 1_024;
@@ -686,10 +684,10 @@ impl Tools<'_> {
                     Err(error) if error.code() == ErrorCode::Forbidden => Vec::new(),
                     Err(error) => return Err(error.into()),
                 };
-                // Une page de plus que la réponse n'en montre : la mise en texte dit la coupe.
+                // Toutes les pages de premier niveau (l'arbre est lu en entier de toute façon) :
+                // la mise en texte en montre 200, et dit combien elle en tait (défaut I3, R1524).
                 let (pages, _) =
-                    agent::info::space_plan(self.state, user, space_id, MAX_SPACE_PAGES + 1, 0)
-                        .await?;
+                    agent::info::space_plan(self.state, user, space_id, usize::MAX, 0).await?;
                 Some(SpaceDetail {
                     space: space_line(space),
                     members: members
@@ -711,15 +709,35 @@ impl Tools<'_> {
             }
         };
         let token = me.token;
+        // Le niveau et la corbeille du jeton **de l'appel** : sur `/mcp/readonly`, ramené à la
+        // lecture (R1443), il ne met rien à la corbeille, quoi que dise sa ligne (défaut I3 de la
+        // relecture finale, Ruling R1524).
+        let (level, can_trash) = match user.token() {
+            Some(grant) => (
+                grant.level.as_str().to_string(),
+                grant.can_trash && grant.level >= mementum_acl::Level::Edit,
+            ),
+            None => (word_of(&token.level), token.can_trash),
+        };
         Ok(text::workspace(&Workspace {
             account: me.user.name,
             account_id: me.user.id,
             token: TokenLine {
                 name: token.name,
-                level: word_of(&token.level),
+                level,
                 scope: word_of(&token.scope),
                 expires_at: token.expires_at.map(rfc3339),
-                can_trash: token.can_trash,
+                can_trash,
+                pages: token
+                    .pages
+                    .into_iter()
+                    .filter_map(|page| {
+                        Some(PageRef {
+                            title: page.title?,
+                            id: page.id,
+                        })
+                    })
+                    .collect(),
             },
             spaces: me.spaces.into_iter().map(space_line).collect(),
             space,

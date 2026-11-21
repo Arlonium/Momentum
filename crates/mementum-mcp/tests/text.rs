@@ -231,6 +231,7 @@ fn all_outputs(long: &str, item: &str, count: usize) -> Vec<ToolOutput> {
                 scope: long.into(),
                 expires_at: Some(long.into()),
                 can_trash: true,
+                pages: vec![item_ref.clone(); count],
             },
             spaces: vec![
                 SpaceLine {

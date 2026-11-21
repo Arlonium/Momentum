@@ -202,6 +202,9 @@ pub struct TokenLine {
     pub scope: String,
     pub expires_at: Option<String>,
     pub can_trash: bool,
+    /// Les pages d'une portée `pages` que le compte voit encore (titre et identifiant : du texte
+    /// des auteurs, dans le contenu borné) ; vide pour les autres portées (Ruling R1524).
+    pub pages: Vec<PageRef>,
 }
 
 /// Une réponse de `workspace_info`.
@@ -265,6 +268,9 @@ const MAX_OUTLINE_LINES: usize = 500;
 const MAX_SPACES: usize = 50;
 const MAX_MEMBERS: usize = 200;
 const MAX_SPACE_PAGES: usize = 200;
+/// Pages de la portée d'un jeton nommées par `workspace_info`, au plus : toutes (`MAX_TOKEN_PAGES` du
+/// store).
+const MAX_SCOPE_PAGES: usize = 50;
 const MAX_CANDIDATES: usize = 5;
 const MAX_QUOTES: usize = 10;
 /// Éléments d'un chemin montrés (les plus proches de la page).
@@ -679,7 +685,15 @@ pub fn workspace(workspace: &Workspace) -> ToolOutput {
         id(&workspace.account_id)
     ));
     lines.line(&format!("jeton : {}", one_line(&token.name, ITEM_BYTES)));
-    lines.line("espaces :");
+    let mut scope_cut = false;
+    if !token.pages.is_empty() {
+        lines.line("pages de la portée du jeton (avec leurs sous-pages) :");
+        let pages = lines.list(&token.pages, MAX_SCOPE_PAGES, |page| {
+            format!("- {} ({})", one_line(&page.title, ITEM_BYTES), id(&page.id))
+        });
+        scope_cut = pages < token.pages.len();
+    }
+    lines.line("espaces (rôle de ce jeton) :");
     let spaces = lines.list(&workspace.spaces, MAX_SPACES, |space| {
         format!(
             "- {} ({}) : {}",
@@ -688,10 +702,11 @@ pub fn workspace(workspace: &Workspace) -> ToolOutput {
             word(&space.role)
         )
     });
-    let mut cut = spaces < workspace.spaces.len();
+    let spaces_cut = spaces < workspace.spaces.len();
+    let mut detail_cut = false;
     if let Some(detail) = &workspace.space {
         lines.line(&format!(
-            "espace {} ({}) : ton rôle, {}",
+            "espace {} ({}) : rôle de ce jeton, {}",
             one_line(&detail.space.name, ITEM_BYTES),
             id(&detail.space.id),
             word(&detail.space.role)
@@ -709,7 +724,7 @@ pub fn workspace(workspace: &Workspace) -> ToolOutput {
         let pages = lines.list(&detail.pages, MAX_SPACE_PAGES, |page| {
             format!("- {} ({})", one_line(&page.title, ITEM_BYTES), id(&page.id))
         });
-        cut |= members < detail.members.len() || pages < detail.pages.len();
+        detail_cut = members < detail.members.len() || pages < detail.pages.len();
     }
     let mut head = Lines::new(MAX_HEAD_BYTES);
     let mut line = format!(
@@ -727,8 +742,23 @@ pub fn workspace(workspace: &Workspace) -> ToolOutput {
     });
     let _ = write!(line, " ; {} espaces ouverts.", workspace.spaces.len());
     head.cut_line(&line);
-    if cut {
+    // Le rôle dit est celui du jeton, restreint (Ruling R1217) : un propriétaire y lit `member`
+    // (défaut D5 de la passe de fin, Ruling R1524).
+    head.cut_line(
+        "Les rôles dits sont ceux de ce jeton : au plus member, quel que soit le rôle de ton \
+         compte (guest pour une portée de pages).",
+    );
+    if spaces_cut {
         head.cut_line("Réponse coupée : nomme un espace (space) pour en voir le détail.");
+    }
+    if scope_cut {
+        head.cut_line("Réponse coupée : les pages de la portée ne sont pas toutes nommées.");
+    }
+    if detail_cut {
+        head.cut_line(
+            "Réponse coupée : search trouve une page par son texte, et fetch de l'espace (son \
+             nom) en donne le plan.",
+        );
     }
     assemble(head, &lines.text, None, &mut draw)
 }
