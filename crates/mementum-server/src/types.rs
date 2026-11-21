@@ -1004,7 +1004,8 @@ pub struct TokenCall {
     #[ts(type = "number")]
     pub at: i64,
     pub surface: TokenCallSurface,
-    /// L'outil MCP, ou la route (« MÉTHODE chemin déclaré »).
+    /// L'outil MCP ; pour un autre message MCP, sa méthode (`server/discover`, `tools/list`,
+    /// `resources/read`…, Ruling R1551) ; sinon la route (« MÉTHODE chemin déclaré »).
     pub tool: String,
     pub space_id: Option<String>,
     pub page_id: Option<String>,

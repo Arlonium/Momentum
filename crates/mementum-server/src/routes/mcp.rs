@@ -220,6 +220,9 @@ fn details(served: &Served, seen: Seen) -> CallDetails {
             });
         }
         None => {
+            // Un autre message par sa méthode (`tools/list`, `resources/read`…), un nom fixe que
+            // l'écran « Activité » dit en mots (Ruling R1551) ; sans méthode lue, la route.
+            details.tool = served.method.map(str::to_string);
             let code = rpc_error(&served.reply);
             details.outcome = Some(if code.is_some() {
                 CallOutcome::Refused
@@ -602,6 +605,13 @@ impl Tools<'_> {
         let created = agent::create::create_pages(self.state, self.caller, space_id, request)
             .await
             .map_err(pages)?;
+        // La ligne d'activité nomme la page créée, dans la colonne de la page de l'appel ; d'un lot
+        // de plusieurs, aucune : la ligne n'en porte qu'une (recette du lot 5, E2, Ruling R1551).
+        if let [only] = created.as_slice()
+            && let Ok(id) = Uuid::parse_str(&only.id)
+        {
+            self.note(|seen| seen.node = Some(id));
+        }
         let public = self.state.public_origin.as_deref();
         let created: Vec<Created> = created
             .into_iter()

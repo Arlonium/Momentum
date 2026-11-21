@@ -1345,7 +1345,9 @@ type Line = (
 
 /// Chaque appel admis laisse une ligne au journal d'activité du jeton (Ruling R1244) : un appel
 /// d'outil y est dit par son outil, sa page, son issue et son code, refus du protocole compris ;
-/// une écriture, avec ses révisions et ses blocs touchés ; une autre méthode, par la route.
+/// une écriture, avec ses révisions et ses blocs touchés ; une autre méthode, par son nom
+/// (`server/discover`, `tools/list`…, que l'écran dit en mots), et non plus par la route (recette
+/// du lot 5, E2, Ruling R1551) ; `create_pages` d'une seule page, par cette page.
 #[tokio::test]
 async fn each_tool_call_leaves_one_activity_line() {
     let t = open_app().await;
@@ -1381,6 +1383,22 @@ async fn each_tool_call_leaves_one_activity_line() {
         .await
         .refused("invalid_arguments");
     mcp.rpc("tools/list", json!({})).await;
+    mcp.rpc("server/discover", json!({})).await;
+    mcp.rpc("resources/read", json!({ "uri": "mementum://spec/mmd" }))
+        .await;
+    let one = mcp
+        .call(
+            "create_pages",
+            json!({ "space": team.space.to_string(), "pages": [{ "title": "Seule" }] }),
+        )
+        .await;
+    let created = ToolResult::uuids(one.ok().content().unwrap())[0];
+    mcp.call(
+        "create_pages",
+        json!({ "space": team.space.to_string(), "pages": [{ "title": "Une" }, { "title": "Deux" }] }),
+    )
+    .await
+    .ok();
     t.calls.flush(&t.store).await;
     let mut lines = t
         .store
@@ -1429,7 +1447,11 @@ async fn each_tool_call_leaves_one_activity_line() {
                 Some("invalid_arguments".to_string()),
                 None
             ),
-            ("POST /mcp".to_string(), Tool, Done, None, None),
+            ("tools/list".to_string(), Tool, Done, None, None),
+            ("server/discover".to_string(), Tool, Done, None, None),
+            ("resources/read".to_string(), Tool, Done, None, None),
+            ("create_pages".to_string(), Tool, Done, None, Some(created)),
+            ("create_pages".to_string(), Tool, Done, None, None),
         ]
     );
     let write = &lines[2].call;

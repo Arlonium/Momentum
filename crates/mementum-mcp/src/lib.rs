@@ -48,6 +48,26 @@ pub trait Host {
 pub struct Served {
     pub reply: Reply,
     pub call: Option<CallOutcome>,
+    /// La méthode d'un message lu qui n'est pas un `tools/call` (`server/discover`, `tools/list`,
+    /// `resources/read`…) : un nom de [`method_name`], jamais un texte du client. `None` pour un
+    /// appel d'outil, une notification inconnue et un message refusé avant d'être lu. L'écran
+    /// « Activité » la dit en mots (recette du lot 5, E2, Ruling R1551).
+    pub method: Option<&'static str>,
+}
+
+/// La méthode d'une requête lue qui n'est pas un appel d'outil, telle que le protocole l'écrit.
+pub fn method_name(request: &Request) -> Option<&'static str> {
+    Some(match request {
+        Request::Discover => "server/discover",
+        Request::Initialize => "initialize",
+        Request::Initialized => "notifications/initialized",
+        Request::Ping => "ping",
+        Request::ToolsList => "tools/list",
+        Request::ResourcesList => "resources/list",
+        Request::ResourceTemplatesList => "resources/templates/list",
+        Request::ResourcesRead { .. } => "resources/read",
+        Request::Notification | Request::ToolsCall { .. } => return None,
+    })
 }
 
 /// Répond à une requête de bout en bout : la lit ([`protocol::read`]), fait l'appel d'outil par
@@ -70,13 +90,19 @@ pub async fn serve<H: Host + Sync>(
         Ok(incoming) => incoming,
         Err(refused) => {
             let Refused { reply, call } = *refused;
-            return Served { reply, call };
+            return Served {
+                reply,
+                call,
+                method: None,
+            };
         }
     };
+    let method = method_name(&incoming.request);
     let Some(id) = incoming.id else {
         return Served {
             reply: Reply::accepted(),
             call: None,
+            method,
         };
     };
     let mut call = None;
@@ -104,11 +130,13 @@ pub async fn serve<H: Host + Sync>(
             return Served {
                 reply: Reply::accepted(),
                 call: None,
+                method,
             };
         }
     };
     Served {
         reply: protocol::write(incoming.era, &id, answer),
         call,
+        method,
     }
 }

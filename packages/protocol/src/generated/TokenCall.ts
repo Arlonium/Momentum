@@ -16,7 +16,8 @@ id: number,
  */
 at: number, surface: TokenCallSurface, 
 /**
- * L'outil MCP, ou la route (« MÉTHODE chemin déclaré »).
+ * L'outil MCP ; pour un autre message MCP, sa méthode (`server/discover`, `tools/list`,
+ * `resources/read`…, Ruling R1551) ; sinon la route (« MÉTHODE chemin déclaré »).
  */
 tool: string, spaceId: string | null, pageId: string | null, 
 /**
