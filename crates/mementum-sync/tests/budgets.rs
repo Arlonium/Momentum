@@ -1051,6 +1051,8 @@ async fn measure_before_agent_version_of_a_10000_block_page() {
     let (author, other) = (f.client().await, f.client().await);
     let mut calls = Vec::new();
     let mut keystrokes = Vec::new();
+    // Un jeton vivant : une écriture par jeton relit sa ligne au journal (R1607).
+    let token = common::new_token(&f.db, common::new_user(&f.db).await).await;
     for round in 0..5 {
         // Une frappe d'une personne : la tranche est écrite par un autre que le jeton.
         keystroke_seen(&author, &other, &id).await;
@@ -1059,7 +1061,7 @@ async fn measure_before_agent_version_of_a_10000_block_page() {
         let edit = agent_edit(
             mementum_store::Writer {
                 account: None,
-                token: Some(uuid::Uuid::now_v7()),
+                token: Some(token),
             },
             &read,
             vec![replace_block_op(&target, &format!("Remplacé {round}\n"))],

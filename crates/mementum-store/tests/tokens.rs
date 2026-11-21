@@ -1336,3 +1336,37 @@ async fn changing_the_password_counts_the_tokens_that_lived() {
         .unwrap();
     assert_eq!(f.store.set_password(alice.id, "toujours").await.unwrap(), 1);
 }
+
+/// Ruling R1607 (R1381 récrit, tour de correction de S7) : une écriture au journal au nom d'un
+/// jeton n'est admise que si le jeton a une ligne vivante ; un jeton inconnu (sans ligne) est
+/// refusé comme un jeton révoqué, rien d'écrit. Témoin : le jeton vivant écrit.
+#[tokio::test]
+async fn the_journal_refuses_a_token_without_a_row() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let node = new_page(&f, "Journal").await;
+    let writer = |token: Uuid| mementum_store::Writer {
+        account: Some(alice.id),
+        token: Some(token),
+    };
+    let unknown = f
+        .store
+        .append_updates_by(
+            node,
+            &[b"une mise a jour".as_slice()],
+            &writer(Uuid::now_v7()),
+        )
+        .await;
+    assert!(
+        matches!(unknown, Err(StoreError::TokenRevoked)),
+        "{unknown:?}"
+    );
+    let entries = || int(&f.db, "SELECT COUNT(*) FROM doc_updates");
+    assert_eq!(entries().await, 0);
+    let live = common::new_token(&f.db, alice.id).await;
+    f.store
+        .append_updates_by(node, &[b"une mise a jour".as_slice()], &writer(live))
+        .await
+        .unwrap();
+    assert_eq!(entries().await, 1);
+}

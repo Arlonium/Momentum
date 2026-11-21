@@ -158,6 +158,26 @@ pub async fn texts(db: &Path, sql: &str) -> Vec<Option<String>> {
     rows
 }
 
+/// Un jeton d'API vivant de `user`, par du SQL direct (lot 5, tour de correction de S7) : une
+/// écriture par jeton relit sa ligne dans la transaction du journal (R1607), si bien qu'un jeton
+/// tiré au hasard, sans ligne, y est refusé.
+pub async fn new_token(db: &Path, user: Uuid) -> Uuid {
+    let id = Uuid::now_v7();
+    let pool = side_pool(db).await;
+    sqlx::query(
+        "INSERT INTO api_tokens (id, user_id, name, hash, hint, level, scope, created_at) \
+         VALUES (?1, ?2, 'agent de test', ?3, 'test', 'edit', 'all', 1)",
+    )
+    .bind(id.to_string())
+    .bind(user.to_string())
+    .bind(id.as_bytes().to_vec())
+    .execute(&pool)
+    .await
+    .unwrap();
+    pool.close().await;
+    id
+}
+
 /// Crée un compte par du SQL direct : l'API des comptes n'est pas celle de ces tests.
 pub async fn new_user(db: &Path) -> Uuid {
     let id = Uuid::now_v7();

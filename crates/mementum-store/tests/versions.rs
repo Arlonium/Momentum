@@ -3,7 +3,9 @@
 
 mod common;
 
-use common::{Fixture, account, break_table, exec_sql, fresh, int, new_user, page, repair, texts};
+use common::{
+    Fixture, account, break_table, exec_sql, fresh, int, new_token, new_user, page, repair, texts,
+};
 use mementum_store::{
     MAX_BEFORE_AGENT, MAX_BEFORE_RESTORE, MAX_VERSIONS, NewNode, StoreError, Unversioned,
     VersionReason, Writer,
@@ -559,7 +561,7 @@ async fn restore_write_and_its_bound_are_all_or_nothing() {
 async fn the_journal_says_which_token_wrote() {
     let (f, id) = fresh_page().await;
     let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, alice).await;
     let by_token = Writer {
         account: Some(alice),
         token: Some(token),
@@ -757,7 +759,7 @@ async fn before_agent_versions_are_purged_first_and_twenty_at_most() {
 async fn unversioned_says_when_part_of_the_slice_escapes_it() {
     let (f, id) = fresh_page().await;
     let alice = new_user(&f.db).await;
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, alice).await;
     let by_token = Writer {
         account: Some(alice),
         token: Some(token),

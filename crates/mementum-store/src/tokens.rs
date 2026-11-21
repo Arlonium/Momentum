@@ -60,9 +60,6 @@ macro_rules! dead {
     };
 }
 
-/// La même règle, pour le journal d'une page (lot 5, Task S7).
-pub(crate) use dead as dead_token;
-
 /// Quand un jeton mort est mort : la plus tôt de sa révocation et de son échéance (`NULL` pour un
 /// jeton sans l'une ni l'autre).
 macro_rules! died_at {

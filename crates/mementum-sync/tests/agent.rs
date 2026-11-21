@@ -333,7 +333,7 @@ async fn an_agent_edit_and_a_keystroke_both_land() {
     edits(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![replace_block(&first, "Uno\n")],
         ),
@@ -367,7 +367,7 @@ async fn a_failing_operation_writes_nothing() {
         .edit_page(
             f.page,
             edit(
-                agent(bob, Uuid::now_v7()),
+                agent(bob, new_token(&f.db, bob).await),
                 Some(&read),
                 vec![str_replace("Un", "Uno"), str_replace("Quatre", "Cinq")],
             ),
@@ -415,7 +415,7 @@ async fn an_agent_edit_is_one_message_for_the_others() {
     edits(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![
                 str_replace("Un", "Uno"),
@@ -441,7 +441,7 @@ async fn the_revision_returned_is_the_one_a_reader_gets_next() {
     let edited = edits(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![insert(Place::End, "Deux\n")],
         ),
@@ -474,7 +474,7 @@ async fn a_version_is_cut_before_an_agent_replaces_what_a_human_wrote() {
     let edited = edits(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![replace_block(&first, "Remplacé\n")],
         ),
@@ -498,7 +498,7 @@ async fn str_replace_insert_and_move_cut_no_version() {
     let tab = connect(&f, alice).await;
     sees(&tab, "Un\nDeux").await;
     types_in(&tab, 0, " humain").await;
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, bob).await;
     let read = f.hub.read_page(f.page).await.unwrap();
     let second = read.blocks[1].id.clone();
     edits(
@@ -535,7 +535,7 @@ async fn an_agent_replacing_what_it_wrote_alone_cuts_no_version() {
         1,
         "la version de fin de l'écriture humaine"
     );
-    let (a, b) = (Uuid::now_v7(), Uuid::now_v7());
+    let (a, b) = (new_token(&f.db, bob).await, new_token(&f.db, bob).await);
     let read = f.hub.read_page(f.page).await.unwrap();
     let edited = edits(
         &f,
@@ -590,7 +590,7 @@ async fn an_agent_writing_every_31_seconds_cuts_at_most_one_version_per_interval
     let _clock = StoppedClock::start();
     let f = Fixture::new(config()).await;
     let bob = new_user(&f.db).await;
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, bob).await;
     let rounds = 25u32;
     for round in 0..rounds {
         let read = f.hub.read_page(f.page).await.unwrap();
@@ -639,7 +639,7 @@ async fn a_slice_written_by_a_human_still_cuts_its_closing() {
     edits(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![insert(Place::End, "Agent\n")],
         ),
@@ -673,7 +673,7 @@ async fn after_a_compaction_the_slice_counts_as_written_by_others() {
     })
     .await;
     let bob = new_user(&f.db).await;
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, bob).await;
     // Une page versionnée d'abord : une page jamais versionnée compte déjà comme écrite par
     // d'autres (R1601).
     f.write_mmd("Humain\n").await;
@@ -748,7 +748,7 @@ async fn a_page_born_with_content_is_versioned_before_a_token_replaces_it() {
         .edit_page(
             page,
             edit(
-                agent(bob, Uuid::now_v7()),
+                agent(bob, new_token(&f.db, bob).await),
                 Some(&read),
                 vec![replace_block(&first, "Remplacé\n")],
             ),
@@ -812,7 +812,7 @@ async fn a_keystroke_during_the_before_agent_version_is_served() {
     let task = edit_held_at_its_version(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![replace_block(&first, "Agent\n")],
         ),
@@ -854,7 +854,7 @@ async fn the_before_agent_version_covers_the_encoded_seq() {
     let task = edit_held_at_its_version(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![replace_block(&first, "Agent\n")],
         ),
@@ -892,7 +892,7 @@ async fn typing_on_in_a_touched_block_between_the_two_commands_refuses_the_write
     let task = edit_held_at_its_version(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![replace_block(&first, "Agent\n")],
         ),
@@ -930,7 +930,7 @@ async fn a_block_changed_while_the_version_is_written_refuses_or_cuts_again() {
     let task = edit_held_at_its_version(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![replace_page("Un agent\n\nDeux\n")],
         ),
@@ -974,7 +974,7 @@ async fn the_second_command_plans_on_the_base_of_the_agent() {
     let task = edit_held_at_its_version(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![replace_page("Un agent\n\nDeux\n\nTrois\n")],
         ),
@@ -992,7 +992,7 @@ async fn a_non_destructive_edit_is_one_command() {
     let f = Fixture::new(SyncConfig::default()).await;
     let (_tab, _) = page_written_by_a_human(&f, "Un\n").await;
     let bob = new_user(&f.db).await;
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, bob).await;
     let read = f.hub.read_page(f.page).await.unwrap();
     let calls = f.hub.calls();
     edits(
@@ -1035,7 +1035,7 @@ async fn before_agent_versions_push_out_at_most_twenty_ordinary_ones() {
             .await
             .unwrap();
     }
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, bob).await;
     for round in 0..25 {
         f.hub
             .write_blocks(
@@ -1082,7 +1082,7 @@ async fn a_token_edit_is_attributed_in_the_journal_and_in_the_version() {
     let (tab, alice) = page_written_by_a_human(&f, "Un\n").await;
     drop(tab);
     let bob = new_user(&f.db).await;
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, bob).await;
     let read = f.hub.read_page(f.page).await.unwrap();
     edits(
         &f,
@@ -1205,7 +1205,7 @@ async fn an_agent_edit_that_changes_nothing_writes_nothing() {
     let edited = edits(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![str_replace("Un", "Un")],
         ),
@@ -1225,7 +1225,7 @@ async fn a_destructive_edit_needs_a_revision_and_a_known_base() {
     f.write_mmd("Un\n\nDeux\n").await;
     let read = f.hub.read_page(f.page).await.unwrap();
     let first = read.blocks[0].id.clone();
-    let token = Uuid::now_v7();
+    let token = new_token(&f.db, bob).await;
     let refused = f
         .hub
         .edit_page(
@@ -1290,7 +1290,7 @@ async fn an_edit_beyond_the_budget_is_refused() {
         .edit_page(
             f.page,
             edit(
-                agent(bob, Uuid::now_v7()),
+                agent(bob, new_token(&f.db, bob).await),
                 Some(&read),
                 vec![insert(Place::End, "Deux\n")],
             ),
@@ -1317,7 +1317,7 @@ async fn a_keystroke_in_an_insert_anchor_between_the_two_commands_cuts_one_versi
     let task = edit_held_at_its_version(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![
                 replace_block(&first, "Agent\n"),
@@ -1343,9 +1343,10 @@ async fn fail_is_judged_on_the_touched_blocks_across_the_two_commands() {
     let f = Fixture::new(SyncConfig::default()).await;
     let (tab, _) = page_written_by_a_human(&f, "Un\n\nDeux\n").await;
     let bob = new_user(&f.db).await;
+    let token = new_token(&f.db, bob).await;
     let failing = |read: &PageRead, mmd: &str| {
         let mut edit = edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, token),
             Some(read),
             vec![replace_block(&read.blocks[0].id, mmd)],
         );
@@ -1388,7 +1389,7 @@ async fn a_destructive_edit_that_changes_nothing_cuts_no_version() {
     let edited = edits(
         &f,
         edit(
-            agent(bob, Uuid::now_v7()),
+            agent(bob, new_token(&f.db, bob).await),
             Some(&read),
             vec![replace_block(&first, "Un humain\n")],
         ),

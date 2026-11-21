@@ -2393,6 +2393,37 @@ mod tests {
         });
     }
 
+    /// Un jeton vivant, d'un compte à lui : une écriture par jeton relit sa ligne dans la
+    /// transaction du journal (R1607, tour de correction de S7).
+    async fn live_token(store: &Store) -> Uuid {
+        let user = store
+            .create_user(mementum_store::NewUser {
+                email: format!("{}@exemple.test", Uuid::now_v7()),
+                name: "Agent".to_string(),
+                password_hash: "pas-un-hachage".to_string(),
+            })
+            .await
+            .unwrap();
+        let mut hash = [0u8; 32];
+        hash[..16].copy_from_slice(Uuid::now_v7().as_bytes());
+        hash[16..].copy_from_slice(Uuid::now_v7().as_bytes());
+        store
+            .create_token(mementum_store::NewToken {
+                user_id: user.id,
+                name: "agent de test".to_string(),
+                hash,
+                hint: "test".to_string(),
+                level: mementum_store::TokenLevel::Edit,
+                scope: mementum_store::TokenScope::All,
+                can_trash: false,
+                expires_at: None,
+                now: 1,
+            })
+            .await
+            .unwrap()
+            .id
+    }
+
     /// Une opération destructrice du jeton `token` sur le premier bloc de la page : elle remplace
     /// ce bloc, sur la révision courante.
     fn destructive_edit(actor: &Actor, token: Uuid) -> Edit {
@@ -2441,7 +2472,7 @@ mod tests {
         spoil(&actor.page);
         actor.wrote(changes, &Writer::default());
         let journal = actor.store.load_doc(node).await.unwrap();
-        let token = Uuid::now_v7();
+        let token = live_token(&actor.store).await;
         let edit = destructive_edit(&actor, token);
         let Ok(Step::Version { written, .. }) = actor.edit(&edit, None).await else {
             panic!("aucune version coupée");
@@ -2465,7 +2496,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (mut actor, _commands, _mailbox) =
             actor_with_a_human_keystroke(&dir, mementum_store::StoreOptions::default()).await;
-        let edit = destructive_edit(&actor, Uuid::now_v7());
+        let edit = destructive_edit(&actor, live_token(&actor.store).await);
         let before = PageDoc::state_checks_on_this_thread();
         let Ok(Step::Version { written, .. }) = actor.edit(&edit, None).await else {
             panic!("aucune version coupée");
@@ -2494,7 +2525,7 @@ mod tests {
         };
         let (mut actor, commands, mailbox) = actor_with_a_human_keystroke(&dir, slow).await;
         let node = actor.id.node_id;
-        let edit = destructive_edit(&actor, Uuid::now_v7());
+        let edit = destructive_edit(&actor, live_token(&actor.store).await);
         let Ok(Step::Version {
             written: _pending, ..
         }) = actor.edit(&edit, None).await
@@ -2543,7 +2574,7 @@ mod tests {
                 3,
                 "lecture, plan, écriture et révision écrite"
             );
-            let edit = destructive_edit(&actor, Uuid::now_v7());
+            let edit = destructive_edit(&actor, live_token(&actor.store).await);
             let Ok(Step::Version {
                 written,
                 encoded,
@@ -2581,7 +2612,7 @@ mod tests {
         let changes = actor.watch.changes();
         spoil(&actor.page);
         actor.wrote(changes, &Writer::default());
-        let token = Uuid::now_v7();
+        let token = live_token(&actor.store).await;
         let edit = destructive_edit(&actor, token);
         let Ok(Step::Version { written, .. }) = actor.edit(&edit, None).await else {
             panic!("aucune version coupée");
