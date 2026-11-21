@@ -888,6 +888,75 @@ mod tests {
         bench.finish().await;
     }
 
+    /// Lot 5, correction groupée (mutation S5-23 de la relecture finale, Ruling R1349) : le second
+    /// contrôle d'une duplication relit le jeton de l'appel, une fois les documents bâtis, **avant**
+    /// de demander son tour d'écriture. Le jeton est révoqué pendant que la copie attend de bâtir
+    /// son document ; le tour d'écriture est alors tenu : la copie répond `401 invalid_token` sans
+    /// attendre le tour, et ne l'a jamais demandé. Sans ce contrôle, la transaction de la copie
+    /// la refuserait encore (R1516), mais seulement une fois son tour venu, dans la voie des
+    /// copies : la réponse attendrait derrière le tour tenu.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_token_revoked_while_the_copy_is_built_is_refused_before_its_turn() {
+        let bench = Bench::new().await;
+        let store = bench.state.store.clone();
+        let page = bench.page(None, "Notes", &[members(Level::Full)]).await;
+        let (token, hash) = crate::auth::new_token();
+        let now = crate::now_ms();
+        let row = store
+            .create_token(mementum_store::NewToken {
+                user_id: bench.olga.0,
+                name: "agent".to_string(),
+                hash,
+                hint: token[token.len() - 4..].to_string(),
+                level: mementum_store::TokenLevel::Edit,
+                scope: mementum_store::TokenScope::All,
+                can_trash: false,
+                expires_at: None,
+                now,
+            })
+            .await
+            .unwrap();
+        let before = bench.nodes().await;
+
+        let held = bench.hold_the_builds().await;
+        let request = Request::post(format!("/api/v1/pages/{page}/duplicate"))
+            .header(header::HOST, "localhost")
+            .header(
+                header::AUTHORIZATION,
+                format!("Bearer {}{token}", crate::auth::TOKEN_PREFIX),
+            )
+            .body(Body::empty())
+            .unwrap();
+        let router = bench.router.clone();
+        let reply = tokio::spawn(async move {
+            let response = router.oneshot(request).await.unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            (status, body)
+        });
+        bench.builds_waiting(1).await;
+        assert!(
+            store
+                .revoke_token(bench.olga.0, row.id, crate::now_ms())
+                .await
+                .unwrap()
+        );
+        let writes = store.hold_writes().await;
+        drop(held);
+        let (status, body) = tokio::time::timeout(std::time::Duration::from_secs(10), reply)
+            .await
+            .expect("la copie attend le tour d'écriture")
+            .unwrap();
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(error_of(&body), "invalid_token");
+        assert_eq!(store.queued_writes(), 0, "aucun tour demandé");
+        drop(writes);
+        assert_eq!(bench.nodes().await, before, "aucune page créée");
+        bench.finish().await;
+    }
+
     /// Une sous-page mise à la corbeille, ou sortie du sous-arbre, pendant la construction des
     /// documents n'est pas dans la copie, ni ses propres sous-pages ; une sous-page restée en
     /// place y est, avec le titre qu'elle a au moment d'écrire.
