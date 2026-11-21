@@ -533,6 +533,70 @@ test("opened_with_nothing_focused_the_focus_goes_back_to_the_sidebar_entry", asy
   await show();
   await act(async () => root.render(null));
   expect(document.activeElement).toBe(entry);
+  // Un écran à titre sous la fenêtre ne change rien : rien n'avait le focus, rien n'est parti ; le
+  // titre ne le prend que d'un opener parti (relecture, R1591).
+  const screen = document.createElement("div");
+  document.body.append(screen);
+  const screenRoot = createRoot(screen);
+  await act(async () => screenRoot.render(<Message title="Aucune page ouverte" />));
+  entry.blur();
+  expect(document.activeElement).toBe(document.body);
+  await show();
+  await act(async () => root.render(null));
+  expect(document.activeElement).toBe(entry);
+  await act(async () => screenRoot.unmount());
+});
+
+test("a_screen_that_comes_after_the_window_closed_takes_the_focus_left_on_body", async () => {
+  // Recette E5, dans l'ordre inverse de celui qu'on voit d'ordinaire : la fenêtre se ferme avant que
+  // l'écran qui remplace la page soit monté. `giveBack` ne trouve rien (l'opener et l'entrée sont
+  // partis) ; le premier titre d'écran monté dans les deux secondes prend le focus resté sur `body`
+  // (R1592).
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  opener.focus();
+  await show();
+  opener.remove();
+  await act(async () => root.render(null));
+  expect(document.activeElement).toBe(document.body);
+  const screen = document.createElement("div");
+  document.body.append(screen);
+  const screenRoot = createRoot(screen);
+  // Un écran de passage ne la prend pas ; le suivant, oui.
+  await act(async () => screenRoot.render(<Message title="Chargement…" transient />));
+  expect(document.activeElement).toBe(document.body);
+  await act(async () => screenRoot.render(<Message title="Tu n'as plus accès à cette page" />));
+  expect(document.activeElement).toBe(screen.querySelector("h1"));
+  // Prise une fois : un autre écran plus tard ne la reprend pas.
+  (document.activeElement as HTMLElement).blur();
+  await act(async () => screenRoot.render(<Message key="autre" title="Page introuvable" />));
+  expect(document.activeElement).toBe(document.body);
+  // Au-delà de deux secondes, un écran monté ne prend plus rien.
+  await act(async () => screenRoot.render(null));
+  document.body.append(opener);
+  opener.focus();
+  await show();
+  opener.remove();
+  await act(async () => root.render(null));
+  act(() => {
+    vi.advanceTimersByTime(2_001);
+  });
+  await act(async () => screenRoot.render(<Message title="Tu n'as plus accès à cette page" />));
+  expect(document.activeElement).toBe(document.body);
+  // Le focus pris ailleurs entre-temps (un geste) n'est pas repris.
+  await act(async () => screenRoot.render(null));
+  document.body.append(opener);
+  opener.focus();
+  await show();
+  opener.remove();
+  await act(async () => root.render(null));
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  elsewhere.focus();
+  await act(async () => screenRoot.render(<Message title="Tu n'as plus accès à cette page" />));
+  expect(document.activeElement).toBe(elsewhere);
+  await act(async () => screenRoot.unmount());
 });
 
 test("escape_in_the_window_closes_nothing_under_it", async () => {

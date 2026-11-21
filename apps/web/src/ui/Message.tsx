@@ -3,16 +3,11 @@
 // besoin un bouton (`Retry`, ou un autre, dans un `mm-message-actions`).
 //
 // Son titre est l'endroit où va le focus quand cet écran a pris la place de la page sous une
-// fenêtre qui se ferme, et que ce qui avait le focus est parti avec la page (`LANDING`, lu par
+// fenêtre qui se ferme, et que ce qui avait le focus est parti avec la page (`ui/landing.ts`, lu par
 // `giveBack`, recette du lot 4, E5) : focalisable par le script seulement. Pas celui d'un écran
 // de passage (« Chargement… », `transient`), qui partirait avec le focus.
-import type { ReactNode } from "react";
-
-/**
- * L'attribut du titre d'un écran qui remplace la page : là où le focus va quand il n'a plus où
- * revenir (`search/focusBack.ts`).
- */
-export const LANDING = "data-focus-landing";
+import { useRef, type ReactNode } from "react";
+import { LANDING, useLanding } from "./landing";
 
 type Props = {
   title: string;
@@ -24,10 +19,14 @@ type Props = {
 };
 
 export function Message({ title, banner, transient = false, children }: Props) {
+  const heading = useRef<HTMLHeadingElement>(null);
+  useLanding(heading, !transient);
   return (
     <section className="mm-message">
       {banner}
-      <h1 {...(transient ? {} : { [LANDING]: "", tabIndex: -1 })}>{title}</h1>
+      <h1 ref={heading} {...(transient ? {} : { [LANDING]: "", tabIndex: -1 })}>
+        {title}
+      </h1>
       {children && <p>{children}</p>}
     </section>
   );

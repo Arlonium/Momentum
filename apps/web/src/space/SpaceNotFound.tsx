@@ -5,7 +5,8 @@
 import type { SpaceInfo } from "@mementum/protocol";
 import { navigate, spacePath } from "../router";
 import { useDocumentTitle } from "../session/forms";
-import { LANDING } from "../ui/Message";
+import { useRef } from "react";
+import { LANDING, useLanding } from "../ui/landing";
 
 type Props = {
   /** Le premier espace du compte ; `null` : il n'en a aucun. */
@@ -14,10 +15,12 @@ type Props = {
 
 export function SpaceNotFound({ first }: Props) {
   useDocumentTitle("Espace introuvable");
+  const heading = useRef<HTMLHeadingElement>(null);
+  useLanding(heading, true);
   return (
     <section className="mm-message">
       {/* Là où va le focus quand il n'a plus où revenir, comme le titre d'un `Message`. */}
-      <h1 {...{ [LANDING]: "" }} tabIndex={-1}>
+      <h1 ref={heading} {...{ [LANDING]: "" }} tabIndex={-1}>
         Espace introuvable
       </h1>
       <p>
