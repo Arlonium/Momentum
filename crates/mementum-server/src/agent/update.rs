@@ -427,7 +427,8 @@ fn read_operations(
     let mut title = None;
     let mut blocks_written = 0usize;
     let read = |i: usize, markdown: &str, out_blocks: &mut usize| {
-        let mut blocks = ops::read_markdown(i, markdown).map_err(operation_failed)?;
+        let mut blocks =
+            ops::read_markdown(i, &super::agent_mmd(markdown)).map_err(operation_failed)?;
         registered_props_only(&blocks).map_err(|e| e.with("index", i))?;
         unknown_not_foreign(&mut blocks);
         *out_blocks += count(&blocks);

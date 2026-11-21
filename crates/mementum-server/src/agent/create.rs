@@ -209,7 +209,7 @@ fn built_doc(markdown: &str, forbid_media: bool) -> Result<Vec<u8>, ApiError> {
     let blocks = if markdown.trim().is_empty() {
         Vec::new()
     } else {
-        read_mmd(markdown.as_bytes())?
+        read_mmd(super::agent_mmd(markdown).as_bytes())?
     };
     if forbid_media && let Some(url) = external_media(&blocks) {
         return Err(ApiError::external_media(format!(

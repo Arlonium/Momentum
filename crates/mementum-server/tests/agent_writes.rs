@@ -143,6 +143,62 @@ async fn operations_apply_all_or_nothing() {
     assert_eq!(done["warnings"], json!([]));
 }
 
+/// Lot 5, correction groupée (défaut D2 de la passe de fin, Ruling R1521) : un MMD d'agent sans fin
+/// de ligne finale est lu comme s'il en avait une, dans une opération (`insert`, `replace_block`,
+/// `replace_page`) comme dans un lot de pages ; le vrai Claude Code l'oubliait à chaque fois.
+#[tokio::test]
+async fn an_agent_mmd_without_a_final_newline_is_read() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Sans fin", "Un\n\nDeux\n").await;
+    let (token, _) = token_of(&t, team.olga.id, TokenLevel::Edit).await;
+    operations(
+        &t,
+        &token,
+        page,
+        json!({ "operations": [{ "op": "insert", "position": "end", "markdown": "Trois" }] }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+    assert_eq!(mmd_of(&team, page).await, "Un\n\nDeux\n\nTrois\n");
+    let base = revision(&t, &token, page).await;
+    let deux = alias_of(&aliases(&t, &token, page).await, "Deux");
+    operations(
+        &t,
+        &token,
+        page,
+        json!({ "baseRevision": base, "operations": [
+            { "op": "replace_block", "anchor": deux, "markdown": "Deux, récrit" },
+        ] }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+    assert_eq!(mmd_of(&team, page).await, "Un\n\nDeux, récrit\n\nTrois\n");
+    let base = revision(&t, &token, page).await;
+    operations(
+        &t,
+        &token,
+        page,
+        json!({ "baseRevision": base, "operations": [
+            { "op": "replace_page", "markdown": "# Titre\n\nTout neuf" },
+        ] }),
+    )
+    .await
+    .assert_status(StatusCode::OK);
+    assert_eq!(mmd_of(&team, page).await, "# Titre\n\nTout neuf\n");
+    let created = json_by(
+        &t,
+        &token,
+        Method::POST,
+        &format!("/api/v1/spaces/{}/pages/batch", team.space),
+        json!({ "pages": [{ "title": "Lot", "markdown": "Texte du lot" }] }),
+    )
+    .await;
+    created.assert_status(StatusCode::CREATED);
+    let id = created.json()[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(team.olga.get_mmd(&id).await.text(), "Texte du lot\n");
+}
+
 /// Un `rebase` passe quand les blocs qu'il touche n'ont pas changé depuis la révision lue : Olga a
 /// changé un autre bloc, et les deux écritures restent (Ruling R1231).
 #[tokio::test]

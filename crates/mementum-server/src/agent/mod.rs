@@ -22,3 +22,17 @@ pub(crate) mod manage;
 pub mod revisions;
 pub(crate) mod search;
 pub(crate) mod update;
+
+/// Le MMD d'un agent, une fin de ligne ajoutée s'il n'en finit pas par une (correction groupée,
+/// défaut D2 de la passe de fin, Ruling R1521) : le format veut que chaque ligne finisse par
+/// `\n`, et le vrai Claude Code l'oubliait à chaque `insert` ou `replace_block`, d'où un appel
+/// perdu et un refus au journal d'activité. Pour les entrées des agents seulement (outils MCP et
+/// routes des agents : opérations, lot de pages) ; `PUT /mmd`, la route d'une session, garde la
+/// règle du format. Un MMD vide reste vide.
+pub(crate) fn agent_mmd(markdown: &str) -> std::borrow::Cow<'_, str> {
+    if markdown.is_empty() || markdown.ends_with('\n') {
+        std::borrow::Cow::Borrowed(markdown)
+    } else {
+        std::borrow::Cow::Owned(format!("{markdown}\n"))
+    }
+}
