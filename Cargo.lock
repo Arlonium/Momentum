@@ -1400,6 +1400,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "libc",
  "mementum-md",
  "mementum-search",
  "mementum-server",

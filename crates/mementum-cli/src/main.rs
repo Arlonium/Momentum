@@ -27,7 +27,13 @@
 //! réglable par `RUST_LOG` (par exemple `RUST_LOG=mementum_sync=debug`). La
 //! sortie standard de `serve` ne porte que la ligne `mementum écoute sur
 //! http://…`.
+//!
+//! Sous Linux (glibc), le binaire fixe au démarrage le seuil de `mmap` de la
+//! glibc à 128 Kio, sauf si l'environnement le règle (module `glibc`, Ruling
+//! R1556).
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+mod glibc;
 mod reindex;
 
 use std::io::{BufRead, IsTerminal};
@@ -128,11 +134,26 @@ enum UserCommand {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
+fn main() -> ExitCode {
+    // Avant tout fil, ceux du moteur de tokio compris, et toute grande allocation (Ruling R1556).
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let mmap_threshold = glibc::set_mmap_threshold();
     let cli = Cli::parse();
     init_tracing();
-    match run(cli).await {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    glibc::log(mmap_threshold);
+    // Le moteur que bâtissait `#[tokio::main]`, bâti ici pour venir après le réglage.
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(e) => {
+            eprintln!("mementum : impossible de lancer le moteur de tokio : {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    match runtime.block_on(run(cli)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("mementum : {}", report(&e));
