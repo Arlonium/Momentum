@@ -558,15 +558,16 @@ async fn a_full_page_queue_refuses_at_once() {
     let grants = [user(&team.olga, Level::Full), user(&team.tom, Level::Edit)];
     let page = team.page(None, "File pleine", &grants).await;
     witness(&t, page, team.tom.id).await;
-    // Des écritures longues, envoyées d'un coup : la file se remplit, puis déborde.
-    let long = many_paragraphs("Long", 4_000);
+    // Des écritures longues, envoyées d'un coup : la file se remplit, puis déborde. Chacune porte
+    // son propre texte : écrite par différence (Task S4 du lot 5), une écriture qui redit la page
+    // n'écrit rien au journal.
     let requests: Vec<Request<Body>> = (0..BURST)
-        .map(|_| {
+        .map(|i| {
             request(
                 &team.tom,
                 Request::put(format!("/api/v1/pages/{page}/mmd"))
                     .header(header::CONTENT_TYPE, "text/markdown; charset=utf-8"),
-                Body::from(long.clone()),
+                Body::from(many_paragraphs(&format!("Long {i}"), 4_000)),
             )
         })
         .collect();

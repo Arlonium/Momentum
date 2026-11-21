@@ -643,8 +643,9 @@ async fn relayed_update_is_what_the_server_read_not_what_it_received() {
 async fn update_that_changes_nothing_is_neither_written_nor_relayed() {
     let f = Fixture::new(SyncConfig::default()).await;
     f.write_mmd("Bonjour\n").await;
-    // Elle remplace la première : la page a des suppressions.
-    f.write_mmd("Bonjour tout le monde\n").await;
+    // Elle retire le texte de la première (écrite par différence depuis la Task S4 du lot 5,
+    // elle ne partage avec lui ni début ni fin) : la page a des suppressions.
+    f.write_mmd("Salut tout le monde\n").await;
     let id = f.ids().await.remove(0);
     let tab = Client::connect_synced(&f.url_for(of(new_user(&f.db).await))).await;
     let mut observer = Raw::connect(&f, of(new_user(&f.db).await)).await;
@@ -680,7 +681,7 @@ async fn update_that_changes_nothing_is_neither_written_nor_relayed() {
     );
 
     // Une suppression seule : écrite et relayée.
-    let deletion = tab.page().unwrap().replace_text(&id, 0, 8, "").unwrap();
+    let deletion = tab.page().unwrap().replace_text(&id, 0, 6, "").unwrap();
     tab.send_update(&deletion);
     assert!(still_served(&tab).await);
     assert_eq!(

@@ -296,6 +296,18 @@ fn paragraphs(n: usize, word: &str) -> String {
         + "\n"
 }
 
+/// `n` paragraphes qui ne partagent ni début ni fin avec ceux de [`paragraphs`] : écrits par
+/// différence par-dessus eux (Task S4 du lot 5, `PageDoc::write_diff`), ils retirent tout le texte
+/// de chaque bloc, une grosse suppression. Écrire `paragraphs(n, "Après")` par-dessus
+/// `paragraphs(n, "Avant")` ne retire plus que quatre caractères par bloc.
+fn other_paragraphs(n: usize) -> String {
+    (1..=n)
+        .map(|i| format!("Numéro {i}"))
+        .collect::<Vec<_>>()
+        .join("\n\n")
+        + "\n"
+}
+
 /// La page est compactée (journal vide), et relue depuis SQLite, c'est le même
 /// document que le document vivant et que celui de `client`, à la même révision.
 async fn assert_compacted_and_identical(f: &Fixture, client: &Client) {
@@ -320,13 +332,14 @@ async fn assert_compacted_and_identical(f: &Fixture, client: &Client) {
 /// à la même révision.
 #[tokio::test]
 async fn big_deletion_is_compacted_at_once() {
-    // (a) Réécriture complète par le serveur.
+    // (a) Une écriture du serveur qui retire tout le texte de chaque bloc (elle se fait par
+    // différence depuis la Task S4 du lot 5).
     let f = Fixture::new(SyncConfig::default()).await;
     f.write_mmd(&paragraphs(200, "Avant")).await;
     let reader = f.client().await;
     // Écrire une page neuve ne supprime que son paragraphe vide : pas de compaction.
     assert_eq!(f.store.load_doc(f.page).await.unwrap().updates.len(), 1);
-    f.write_mmd(&paragraphs(200, "Après")).await;
+    f.write_mmd(&other_paragraphs(200)).await;
     assert_compacted_and_identical(&f, &reader).await;
 
     // (b) Un client remplace tout le contenu, en une mise à jour.
@@ -401,7 +414,7 @@ async fn journal_with_big_deletion_is_compacted_on_load() {
     })
     .await;
     f.write_mmd(&paragraphs(200, "Avant")).await;
-    f.write_mmd(&paragraphs(200, "Après")).await;
+    f.write_mmd(&other_paragraphs(200)).await;
     assert_eq!(f.store.load_doc(f.page).await.unwrap().updates.len(), 2);
     let expected = f.hub.read_blocks(f.page).await.unwrap();
 

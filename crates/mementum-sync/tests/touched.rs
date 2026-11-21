@@ -181,8 +181,9 @@ async fn a_refused_update_names_nothing() {
 async fn an_update_that_changes_nothing_names_nothing() {
     let f = Fixture::new(quiet()).await;
     f.write_mmd("Bonjour\n").await;
-    // Elle remplace la première : la page a des suppressions, que l'étape 2 porte.
-    f.write_mmd("Bonjour tout le monde\n").await;
+    // Elle retire le texte de la première (écrite par différence depuis la Task S4 du lot 5,
+    // elle ne partage avec lui ni début ni fin) : la page a des suppressions, que l'étape 2 porte.
+    f.write_mmd("Salut tout le monde\n").await;
     let id = f.ids().await[0].clone();
     let tab = f.client().await;
     assert_eq!(taken(&f.hub), [f.page]);
