@@ -38,6 +38,11 @@ export type Search = {
   pending: boolean;
   /** D'autres pages suivent, et peuvent être demandées (`loadMore`). */
   more: boolean;
+  /**
+   * Le serveur a d'autres pages, mais la centième est montrée : plus rien n'est demandé (R911), et
+   * rien ne doit dire que tout est là.
+   */
+  capped: boolean;
   /** La suite est en route. */
   loadingMore: boolean;
   /** L'index n'est pas à jour pour une page que le compte voit : des pages peuvent manquer. */
@@ -60,6 +65,7 @@ const fresh = (spaceId: string, query: string): State => ({
   hits: [],
   pending: query !== "",
   more: false,
+  capped: false,
   loadingMore: false,
   indexing: false,
   error: null,
@@ -106,10 +112,12 @@ export function useSearch(
         asking = false;
         answers += 1;
         more = answer.more && answers * ANSWER_PAGES < MAX_FOUND_PAGES;
+        const capped = answer.more && !more;
         setState((s) => ({
           ...s,
           hits: after === 0 ? answer.results : [...s.hits, ...answer.results],
           more,
+          capped,
           indexing: answer.indexing,
           pending: false,
           loadingMore: false,
@@ -153,6 +161,6 @@ export function useSearch(
   const loadMore = useCallback(() => further.current?.(), []);
   // L'état d'une autre recherche (le rendu de la frappe précède l'effet) n'est jamais montré.
   const shown = state.spaceId === spaceId && state.query === wanted ? state : fresh(spaceId, wanted);
-  const { hits, pending, more, loadingMore, indexing, error } = shown;
-  return { hits, pending, more, loadingMore, indexing, error, loadMore };
+  const { hits, pending, more, capped, loadingMore, indexing, error } = shown;
+  return { hits, pending, more, capped, loadingMore, indexing, error, loadMore };
 }

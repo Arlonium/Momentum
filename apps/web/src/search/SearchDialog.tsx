@@ -51,7 +51,7 @@ import { markedParts } from "./marks";
 import { treeRows, withHits, type Row } from "./rows";
 import { giveBack, takeBefore, type Before, type Caret } from "./focusBack";
 import { isSearchKey, MAX_QUERY_LENGTH, MOD } from "./shortcut";
-import { useSearch } from "./useSearch";
+import { MAX_FOUND_PAGES, useSearch } from "./useSearch";
 
 /** Les pages de l'arbre montrées pour ce qui est tapé, au plus. */
 export const MAX_TREE_ROWS = 8;
@@ -397,8 +397,15 @@ export function SearchDialog({ space, nodes, query, onQuery, onClose, before, ca
               Afficher plus de résultats
             </button>
           ) : (
-            // Inerte, de la hauteur du bouton : rien de cliquable ne vient sous le pointeur.
-            <p className="mm-search-done">Tous les résultats sont affichés.</p>
+            // Inerte, de la hauteur du bouton : rien de cliquable ne vient sous le pointeur. Elle ne
+            // dit « tous » que si le serveur n'a plus rien et que l'index est à jour (R1587).
+            <p className="mm-search-done">
+              {search.capped
+                ? `Les ${MAX_FOUND_PAGES} premières pages sont affichées : précise ta recherche.`
+                : search.indexing
+                  ? "Tous les résultats trouvés pour l'instant sont affichés."
+                  : "Tous les résultats sont affichés."}
+            </p>
           )}
         </div>
       )}

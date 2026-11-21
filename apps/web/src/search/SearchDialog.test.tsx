@@ -795,6 +795,41 @@ test("more_results_are_asked_by_a_button_that_never_leaves_the_focus_on_body", a
   expect(dialog().querySelector(".mm-search-foot")).toBeNull();
 });
 
+/** Le texte du pied de la fenêtre, ou `null` sans pied. */
+const footText = () => dialog().querySelector(".mm-search-foot")?.textContent ?? null;
+
+test("at_the_cap_the_foot_says_to_refine_and_never_that_everything_is_shown", async () => {
+  // Cinq réponses de vingt pages, le serveur disant toujours qu'il en a d'autres : à la centième page,
+  // la fenêtre ne demande plus rien (R911), et le pied ne dit pas que tout est là.
+  await show();
+  await type("zèbre");
+  await debounced();
+  const page = (n: number) => Array.from({ length: 20 }, (_, i) => hit(`p${n * 20 + i}`));
+  await answer(found(page(0), { more: true }));
+  for (let n = 1; n < 5; n += 1) {
+    await act(async () => more()!.click());
+    expect(asked.at(-1)!.body).toEqual({ q: "zèbre", after: n * 20 });
+    await answer(found(page(n), { more: true }));
+  }
+  expect(shown()).toHaveLength(100);
+  expect(more()).toBeUndefined();
+  expect(footText()).toBe("Les 100 premières pages sont affichées : précise ta recherche.");
+  expect(dialog().querySelectorAll(".mm-search-foot button, .mm-search-foot a")).toHaveLength(0);
+});
+
+test("with_the_index_behind_the_foot_says_everything_found_for_now", async () => {
+  // L'index en retard : la dernière réponse ne garantit pas que tout est là (la phrase de
+  // l'indexation le dit sous la liste) ; le pied ne le contredit pas.
+  await show();
+  await type("zèbre");
+  await debounced();
+  await answer(found([hit("x")], { more: true, indexing: true }));
+  await act(async () => more()!.click());
+  await answer(found([hit("y")], { indexing: true }));
+  expect(footText()).toBe("Tous les résultats trouvés pour l'instant sont affichés.");
+  expect(said()).toBe("L'indexation est en cours : des pages peuvent manquer.");
+});
+
 test("ctrl_k_in_the_window_is_taken_and_changes_nothing", async () => {
   await show({ start: "cha" });
   const again = await press("k", { ctrlKey: true });
