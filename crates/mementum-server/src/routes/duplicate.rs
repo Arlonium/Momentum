@@ -1730,4 +1730,65 @@ mod tests {
         assert_eq!(bench.nodes().await, before, "rien d'écrit");
         bench.finish().await;
     }
+
+    /// Lot 5, correction groupée (mutation S7-09 de la relecture finale, le test prévu par R1398) :
+    /// un lot de pages (`POST …/pages/batch`, sur le débit des duplications, R1243) abandonné
+    /// pendant la construction d'un document garde sa place, et compte ce document, tant que le
+    /// calcul n'a pas fini (la règle de R630, comme
+    /// `an_abandoned_duplication_keeps_its_place_until_its_build_ends`). La requête est abandonnée
+    /// pendant la construction ; la demande suivante du compte est refusée (`429`) ; le calcul fini,
+    /// le budget (dix octets par minute) a compté le document : la suivante est refusée pour la
+    /// minute. Rien n'est écrit.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_batch_abandoned_keeps_its_place_until_its_build_ends() {
+        use crate::duplications::Duplications;
+        let bench = Bench::with(|state| {
+            let minute = std::time::Duration::from_secs(60);
+            state.duplications = Arc::new(Duplications::new(10, minute));
+        })
+        .await;
+        let markdown = (0..4_000)
+            .map(|i| format!("Bloc {i} : du texte **en gras**, pour durer.\n"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let body = json!({ "pages": [{ "title": "Grosse", "markdown": markdown }] }).to_string();
+        let uri = format!("/api/v1/spaces/{}/pages/batch", bench.space);
+        let before = bench.nodes().await;
+        let reads = bench.state.mmd_reads.clone();
+
+        let abandoned = {
+            let request = Request::post(&uri)
+                .header(header::HOST, "localhost")
+                .header(header::COOKIE, &bench.mona.1)
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(body.clone()))
+                .unwrap();
+            let router = bench.router.clone();
+            tokio::spawn(async move { router.oneshot(request).await })
+        };
+        wait_until("le document se bâtit", || reads.counts().0 == 1).await;
+        // Le client part pendant la construction.
+        abandoned.abort();
+        let _ = abandoned.await;
+        let refused = async |what: &str| {
+            let post = Request::post(&uri).header(header::CONTENT_TYPE, "application/json");
+            let (status, _, answer) = bench
+                .send(&bench.mona.1, post, body.clone().into_bytes())
+                .await;
+            assert_eq!(status, StatusCode::TOO_MANY_REQUESTS, "{what}");
+            assert_eq!(error_of(&answer), "duplication_busy", "{what}");
+            let answer: Value = serde_json::from_slice(&answer).unwrap();
+            answer["message"].as_str().unwrap().to_string()
+        };
+        let message = refused("pendant le calcul abandonné").await;
+        assert!(message.contains("déjà en cours"), "sa place : {message}");
+        wait_until("le calcul abandonné va au bout", || reads.counts().0 == 0).await;
+        let message = refused("le calcul fini").await;
+        assert!(
+            message.contains("dans la dernière minute"),
+            "le document bâti est compté au budget : {message}"
+        );
+        assert_eq!(bench.nodes().await, before, "rien d'écrit");
+        bench.finish().await;
+    }
 }
