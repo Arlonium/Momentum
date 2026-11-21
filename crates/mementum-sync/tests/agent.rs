@@ -490,6 +490,81 @@ async fn a_version_is_cut_before_an_agent_replaces_what_a_human_wrote() {
     assert_eq!(live_text(&f).await, "Remplacé");
 }
 
+/// Lot 5, correction groupée (mutation S4-11 de la relecture finale, R1234) : par
+/// `Hub::edit_page`, le chemin des routes, une opération destructrice dont la version
+/// `before_agent` est refusée par la base n'écrit rien : `VersionRefused` (`409
+/// version_refused`), aucune version, et la page telle qu'avant, texte, révision et journal. Un
+/// déclencheur refuse l'écriture de la version ; sans lui, le témoin écrit.
+#[tokio::test]
+async fn a_refused_before_agent_version_writes_nothing_through_the_hub() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    f.write_mmd("Un\n").await;
+    let tab = connect(&f, alice).await;
+    sees(&tab, "Un").await;
+    types_in(&tab, 0, " humain").await;
+    let token = new_token(&f.db, bob).await;
+    exec_sql(
+        &f.db,
+        "CREATE TRIGGER refus BEFORE INSERT ON doc_versions WHEN NEW.reason = 'before_agent' \
+         BEGIN SELECT RAISE(ABORT, 'version refusée'); END",
+    )
+    .await;
+    let journal = async || {
+        let url = format!("sqlite:{}", f.db.display());
+        let mut side = <sqlx::SqliteConnection as sqlx::Connection>::connect(&url)
+            .await
+            .unwrap();
+        let rows: i64 = sqlx::query("SELECT COUNT(*) FROM doc_updates WHERE node_id = ?")
+            .bind(f.page.to_string())
+            .fetch_one(&mut side)
+            .await
+            .unwrap()
+            .get(0);
+        sqlx::Connection::close(side).await.unwrap();
+        rows
+    };
+    let read = f.hub.read_page(f.page).await.unwrap();
+    let first = read.blocks[0].id.clone();
+    let rows = journal().await;
+    let refused = f
+        .hub
+        .edit_page(
+            f.page,
+            edit(
+                agent(bob, token),
+                Some(&read),
+                vec![replace_block(&first, "Remplacé\n")],
+            ),
+        )
+        .await;
+    assert!(
+        matches!(refused, Err(EditRefusal::VersionRefused)),
+        "{refused:?}"
+    );
+    assert!(versions(&f).await.is_empty());
+    assert_eq!(live_text(&f).await, "Un humain");
+    assert_eq!(
+        f.hub.read_page(f.page).await.unwrap().revision,
+        read.revision
+    );
+    assert_eq!(journal().await, rows, "rien d'écrit au journal");
+
+    // Le témoin : le déclencheur retiré, la même écriture passe, avec sa version.
+    exec_sql(&f.db, "DROP TRIGGER refus").await;
+    edits(
+        &f,
+        edit(
+            agent(bob, token),
+            Some(&read),
+            vec![replace_block(&first, "Remplacé\n")],
+        ),
+    )
+    .await;
+    assert_eq!(versions(&f).await.len(), 1);
+    assert_eq!(live_text(&f).await, "Remplacé");
+}
+
 /// R1234, règle 1 : `str_replace`, `insert` et `move_block` ne coupent pas de version.
 #[tokio::test]
 async fn str_replace_insert_and_move_cut_no_version() {
