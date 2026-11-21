@@ -1,7 +1,10 @@
 // La fenêtre « Historique » d'une page (R135), ouverte par le menu « … » de la barre du haut
 // (`PageMenu`), chargée à la demande. À gauche, la liste : « Version actuelle », puis chaque
 // version, la plus récente d'abord, dans l'ordre du serveur (sa date, « il y a… », les comptes
-// qui l'ont modifiée, « avant une restauration » pour ce qu'une restauration a remplacé). À
+// qui l'ont modifiée, chacun suivi de « (par un agent) » s'il l'a fait par un jeton d'API, « avant
+// une restauration » pour ce qu'une restauration a remplacé, « avant une modification par un
+// agent » pour ce qu'un agent a remplacé, lot 5). Le jeton lui-même n'est jamais nommé : son nom
+// n'est montré qu'à son propriétaire, dans l'activité du jeton (Task C2). À
 // droite, l'aperçu de celle qu'on choisit, en lecture seule, dans le même éditeur que la page
 // (`VersionPreview`, qui n'écrit jamais). En bas, « Restaurer cette version ».
 //
@@ -88,6 +91,9 @@ export const RESTORE_OTHERS =
 
 /** Avatars d'auteurs montrés avant le « +N ». */
 const MAX_AVATARS = 3;
+
+/** Ce qui suit le nom d'un auteur qui a modifié la page par un jeton d'API (lot 5). */
+const BY_AGENT = " (par un agent)";
 
 const NOBODY: RosterUser[] = [];
 
@@ -459,6 +465,9 @@ type ItemProps = {
 /** Une version dans la liste : sa date, son âge, sa raison s'il y a lieu, ses auteurs. */
 function VersionItem({ version, now, chosen, onChoose }: ItemProps) {
   const { authors } = version;
+  /** Ceux des auteurs qui ont écrit par un jeton d'API : « par un agent ». */
+  const agents = new Set(version.agentAuthors);
+  const byAgent = (id: string) => (agents.has(id) ? BY_AGENT : "");
   const shown = authors.slice(0, MAX_AVATARS);
   const hidden = authors.length - shown.length;
   return (
@@ -476,11 +485,14 @@ function VersionItem({ version, now, chosen, onChoose }: ItemProps) {
         {version.reason === "before_restore" && (
           <span className="mm-tag mm-history-tag">avant une restauration</span>
         )}
+        {version.reason === "before_agent" && (
+          <span className="mm-tag mm-history-tag">avant une modification par un agent</span>
+        )}
       </span>
       {authors.length > 0 && (
         <span
           className="mm-history-authors"
-          title={authors.map((author) => isolate(author.name)).join(", ")}
+          title={authors.map((author) => `${isolate(author.name)}${byAgent(author.id)}`).join(", ")}
         >
           <span className="mm-history-avatars" aria-hidden="true">
             {shown.map((author) => {
@@ -504,6 +516,7 @@ function VersionItem({ version, now, chosen, onChoose }: ItemProps) {
                 <span className="mm-history-author mm-isolate" dir="auto">
                   {author.name}
                 </span>
+                {byAgent(author.id)}
               </Fragment>
             ))}
           </span>

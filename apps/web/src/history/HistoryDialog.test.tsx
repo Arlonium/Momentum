@@ -209,6 +209,50 @@ test("versions_are_listed_most_recent_first_with_their_authors", async () => {
   expect(preview()?.dataset.version).toBe("v1");
 });
 
+test("a_before_agent_version_says_what_it_keeps", async () => {
+  // Lot 5 : ce qu'une écriture d'agent a remplacé, comme ce qu'une restauration a remplacé.
+  const replaced: Version = {
+    id: "v3",
+    createdAt: NOW - MINUTE,
+    reason: "before_agent",
+    authors: [author("bruno", "Bruno")],
+    agentAuthors: [],
+  };
+  await opened({ versions: [replaced, v2, v1] });
+  const [, agent, restore, ordinary] = items();
+  const tags = (item: Element) => [...item.querySelectorAll(".mm-history-tag")].map((tag) => tag.textContent);
+  expect(tags(agent)).toEqual(["avant une modification par un agent"]);
+  expect(tags(restore)).toEqual(["avant une restauration"]);
+  expect(tags(ordinary)).toEqual([]);
+});
+
+test("a_version_written_by_token_says_so", async () => {
+  // Alice a écrit par un jeton d'API, Bruno à la main : seule Alice est « par un agent ». Un
+  // identifiant d'agent qui n'est pas un auteur de la version ne fait rien paraître.
+  const written: Version = {
+    id: "v3",
+    createdAt: NOW - MINUTE,
+    reason: "periodic",
+    authors: [author("alice", "Alice"), author("bruno", "Bruno")],
+    agentAuthors: ["alice", "zoe"],
+  };
+  await opened({ versions: [written, v1] });
+  const [, byAgent, byHand] = items();
+  const names = byAgent.querySelector(".mm-history-names")!;
+  expect(names.textContent).toBe("Alice (par un agent), Bruno");
+  // Le nom reste isolé ; la mention n'en fait pas partie.
+  expect([...names.querySelectorAll(".mm-history-author")].map((n) => n.textContent)).toEqual([
+    "Alice",
+    "Bruno",
+  ]);
+  const isolated = (name: string) => `${String.fromCharCode(0x2068)}${name}${String.fromCharCode(0x2069)}`;
+  expect(byAgent.querySelector(".mm-history-authors")!.getAttribute("title")).toBe(
+    `${isolated("Alice")} (par un agent), ${isolated("Bruno")}`,
+  );
+  expect(byAgent.textContent).not.toContain("Zo");
+  expect(byHand.textContent).not.toContain("par un agent");
+});
+
 test("a_page_without_versions_says_so", async () => {
   await opened({ versions: [] });
   expect(items()).toHaveLength(1);
