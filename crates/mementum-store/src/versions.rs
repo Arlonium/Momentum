@@ -126,6 +126,18 @@ pub struct Unversioned {
     pub unknown_writers: bool,
 }
 
+impl Unversioned {
+    /// Quelqu'un d'autre que le jeton `token` a-t-il écrit la tranche, ou peut-il l'avoir écrite ?
+    /// Une écriture sans jeton (`others`), une part que la compaction a purgée
+    /// (`unknown_writers`, « au doute, couper »), ou **un autre jeton** (Ruling R1234, règle 1 :
+    /// « d'une connexion de synchro, d'une session, d'un autre jeton » ; R1278). La version
+    /// `before_agent` d'une opération destructrice de `token` se coupe donc par
+    /// `!kept && written_by_others(token)`.
+    pub fn written_by_others(&self, token: Uuid) -> bool {
+        self.others || self.unknown_writers || self.tokens.iter().any(|t| *t != token)
+    }
+}
+
 /// Des identifiants triés et sans doublon, en JSON (`["…","…"]`) : des UUID relus, sans rien à
 /// échapper.
 fn sorted_ids(ids: &[Uuid]) -> String {
@@ -463,5 +475,50 @@ impl Store {
             others,
             unknown_writers: compacted.is_some(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R1278 (relecture de S1) : une tranche est écrite par d'autres que le jeton dès qu'une
+    /// écriture n'est pas de lui : sans jeton, dans une part compactée, ou **par un autre jeton**.
+    /// Le jeton A écrit seul, puis le jeton B remplace la page : ce que A a écrit doit être gardé
+    /// par une version avant que B le remplace.
+    #[test]
+    fn written_by_others_names_every_writer_that_is_not_this_token() {
+        let (a, b) = (Uuid::from_u128(1), Uuid::from_u128(2));
+        let slice = |tokens: Vec<Uuid>, others, unknown_writers| Unversioned {
+            tokens,
+            others,
+            unknown_writers,
+            ..Unversioned::default()
+        };
+        assert!(!slice(vec![], false, false).written_by_others(a), "rien");
+        assert!(
+            !slice(vec![a], false, false).written_by_others(a),
+            "lui seul"
+        );
+        assert!(
+            slice(vec![b], false, false).written_by_others(a),
+            "un autre jeton"
+        );
+        assert!(
+            slice(vec![a, b], false, false).written_by_others(a),
+            "lui et un autre"
+        );
+        assert!(
+            slice(vec![a], true, false).written_by_others(a),
+            "sans jeton"
+        );
+        assert!(
+            slice(vec![a], false, true).written_by_others(a),
+            "une part compactée"
+        );
+        assert!(
+            slice(vec![], true, true).written_by_others(a),
+            "rien de connu"
+        );
     }
 }
