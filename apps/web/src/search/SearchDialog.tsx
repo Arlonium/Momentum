@@ -172,6 +172,17 @@ export function SearchDialog({ space, nodes, query, onQuery, onClose, before, ca
     document.getElementById(optionId(index))?.scrollIntoView?.({ block: "nearest" });
   });
 
+  // La suite a été offerte pour cette recherche : quand la dernière réponse retire « Afficher plus de
+  // résultats », une phrase prend sa place, dans le même pied, à la même hauteur. Sans elle, le pied
+  // partait, la liste descendait d'autant, et une ligne venait sous le pointeur resté sur le bouton :
+  // un second clic l'aurait ouverte (recette B9, R296). Une autre recherche repart sans pied.
+  const [offer, setOffer] = useState({ query: wanted, offered: false });
+  let offered = offer.query === wanted && offer.offered;
+  if (offer.query !== wanted || (search.more && !offer.offered)) {
+    offered = search.more;
+    setOffer({ query: wanted, offered });
+  }
+
   // « Afficher plus de résultats » part avec la dernière réponse : s'il avait le focus, le champ le
   // reprend (React n'appelle pas `onBlur` pour un élément qu'il retire, R339).
   const moreFocused = useRef(false);
@@ -356,27 +367,32 @@ export function SearchDialog({ space, nodes, query, onQuery, onClose, before, ca
           </p>
         )}
       </div>
-      {search.more && (
+      {(search.more || offered) && (
         // Hors de la zone qui défile : les lignes de la suite s'ajoutent dans la liste, au-dessus, sans
         // que le bouton descende sous le pointeur (R1094).
         <div className="mm-search-foot">
-          <button
-            type="button"
-            className="mm-button mm-button-small mm-search-more"
-            // Grisé sans être retiré pendant la demande : il garde le focus.
-            aria-disabled={search.loadingMore || undefined}
-            onFocus={() => {
-              moreFocused.current = true;
-            }}
-            onBlur={() => {
-              moreFocused.current = false;
-            }}
-            onClick={() => {
-              if (!search.loadingMore) search.loadMore();
-            }}
-          >
-            Afficher plus de résultats
-          </button>
+          {search.more ? (
+            <button
+              type="button"
+              className="mm-button mm-button-small mm-search-more"
+              // Grisé sans être retiré pendant la demande : il garde le focus.
+              aria-disabled={search.loadingMore || undefined}
+              onFocus={() => {
+                moreFocused.current = true;
+              }}
+              onBlur={() => {
+                moreFocused.current = false;
+              }}
+              onClick={() => {
+                if (!search.loadingMore) search.loadMore();
+              }}
+            >
+              Afficher plus de résultats
+            </button>
+          ) : (
+            // Inerte, de la hauteur du bouton : rien de cliquable ne vient sous le pointeur.
+            <p className="mm-search-done">Tous les résultats sont affichés.</p>
+          )}
         </div>
       )}
       <p className="mm-search-keys" aria-hidden="true">

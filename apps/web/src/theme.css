@@ -4007,6 +4007,18 @@ button.mm-reaction:hover {
   cursor: default;
 }
 
+/* À la place du bouton, quand tous les résultats sont là : sa hauteur exactement (`.mm-button-small`,
+   bordure comprise), pour que rien ne bouge sous le pointeur (recette B9). */
+.mm-search .mm-search-done {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: 28px;
+  margin: 0;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
 .mm-search .mm-search-status {
   margin: 0;
   padding: 8px 10px;

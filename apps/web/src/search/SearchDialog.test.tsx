@@ -747,11 +747,21 @@ test("more_results_are_asked_by_a_button_that_never_leaves_the_focus_on_body", a
   expect(more()!.getAttribute("aria-disabled")).toBe("true");
   expect(document.activeElement).toBe(more());
   expect(asked.at(-1)!.body).toEqual({ q: "zèbres", after: 20 });
-  // La dernière réponse le retire : le focus revient au champ.
+  // La dernière réponse le retire : le focus revient au champ. À sa place, dans le même pied, une
+  // phrase qu'aucun clic ne prend : rien de cliquable ne vient sous le pointeur (recette B9).
   await answer(found([hit("y")]));
   expect(more()).toBeUndefined();
   expect(document.activeElement).toBe(field());
   expect(shown()).toEqual(["x", "y"]);
+  const foot = dialog().querySelector(".mm-search-foot")!;
+  expect(foot.textContent).toBe("Tous les résultats sont affichés.");
+  expect(foot.querySelectorAll("button, a, [tabindex]")).toHaveLength(0);
+  // Une autre recherche : le pied part avec ses résultats ; sans suite, il ne vient pas.
+  await type("zèbre");
+  expect(dialog().querySelector(".mm-search-foot")).toBeNull();
+  await debounced();
+  await answer(found([hit("x")]));
+  expect(dialog().querySelector(".mm-search-foot")).toBeNull();
 });
 
 test("ctrl_k_in_the_window_is_taken_and_changes_nothing", async () => {

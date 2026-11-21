@@ -296,11 +296,29 @@ test("more_results_arrive_without_moving_their_button_under_the_pointer", async 
   // Les lignes déjà montrées n'ont pas bougé non plus.
   expect(await lines.first().boundingBox()).toEqual(first);
 
-  // La dernière réponse retire le bouton : le champ reprend le focus, jamais `body`.
+  // La dernière réponse retire le bouton : le champ reprend le focus, jamais `body`. À sa place, à la
+  // même hauteur, une phrase qu'aucun clic ne prend : sous le pointeur resté là, aucune ligne n'est
+  // venue, et un second clic n'ouvrirait rien (recette B9).
   await more.click();
   await expect(lines).toHaveCount(45);
   await expect(more).toHaveCount(0);
   await expect(field(p)).toBeFocused();
+  const underNow = await p.evaluate(
+    ([x, y]) => {
+      const element = document.elementFromPoint(x, y);
+      return {
+        inFoot: element?.closest(".mm-search-foot") != null,
+        clickable: element?.closest("a, button, [data-search-page]") != null,
+      };
+    },
+    [before.x + before.width / 2, before.y + before.height / 2],
+  );
+  expect(underNow).toEqual({ inFoot: true, clickable: false });
+  const done = win(p).locator(".mm-search-done");
+  await expect(done).toHaveText("Tous les résultats sont affichés.");
+  const box = (await done.boundingBox())!;
+  expect([box.y, box.height]).toEqual([before.y, before.height]);
+  expect(await lines.first().boundingBox()).toEqual(first);
 });
 
 test("a_line_shown_does_not_move_when_results_arrive", async ({ browser }) => {
