@@ -554,10 +554,12 @@ pub(crate) async fn token_gate(
     {
         state.calls.busy(token.id, now);
         let seconds = wait.as_millis().div_ceil(1000).max(1) as u64;
-        if is_mcp(path) {
-            // Lot 5, Task M2 (Ruling R1240) : sur `/mcp`, un appel d'outil refusé par le débit est
-            // un refus de l'outil qui dit son délai (`retry_after_seconds`), que le modèle lit ; la
-            // route le met en forme sans rien faire de l'appel. Toujours sans ligne (R1244).
+        if is_mcp(path) && busy_body_is_small(request.headers()) {
+            // Lot 5, Task M2 (Rulings R1240, R1434) : sur `/mcp`, un appel d'outil refusé par le
+            // débit est un refus de l'outil qui dit son délai (`retry_after_seconds`), que le modèle
+            // lit ; la route le met en forme sans rien faire de l'appel. Un corps annoncé au-delà de
+            // [`BUSY_BODY_BYTES`], ou sans longueur annoncée, reçoit le `429` sans être lu. Toujours
+            // sans ligne (R1244).
             request.extensions_mut().insert(TokenBusy(seconds));
             return next.run(request).await;
         }
@@ -870,6 +872,20 @@ pub(crate) struct LiveCaller {
     pub(crate) proof: Proof,
 }
 
+impl LiveCaller {
+    /// Le même appel, son jeton ramené au niveau de lecture : la seconde garde de `/mcp/readonly`
+    /// (lot 5, Task M2, Ruling R1433 récrit par R1443), qui tient seule même si le protocole
+    /// laissait passer un outil d'écriture. Sans effet pour une session (que `/mcp` refuse).
+    pub(crate) fn reading_only(mut self) -> LiveCaller {
+        if let Via::Token(grant) = &self.user.via {
+            let mut grant = TokenGrant::clone(grant);
+            grant.level = mementum_acl::Level::Read;
+            self.user.via = Via::Token(Arc::new(grant));
+        }
+        self
+    }
+}
+
 impl FromRequestParts<AppState> for LiveCaller {
     type Rejection = ApiError;
 
@@ -891,6 +907,21 @@ impl FromRequestParts<AppState> for LiveCaller {
 /// Le chemin déclaré est-il celui du serveur MCP (`/mcp`, `/mcp/readonly`, lot 5, Task M2) ?
 fn is_mcp(path: &str) -> bool {
     path == "/mcp" || path == "/mcp/readonly"
+}
+
+/// Octets de corps, au plus, qu'un appel refusé par le débit fait lire à `/mcp` pour recevoir le
+/// refus `token_busy` en JSON-RPC (Ruling R1434) : un appel d'outil ordinaire tient dessous.
+pub const BUSY_BODY_BYTES: u64 = 64 << 10;
+
+/// Le corps d'un appel refusé par le débit sur `/mcp` est-il annoncé, et sous
+/// [`BUSY_BODY_BYTES`] ? Sans `Content-Length` (un corps par morceaux), non : il ne sera pas lu.
+fn busy_body_is_small(headers: &HeaderMap) -> bool {
+    !headers.contains_key(header::TRANSFER_ENCODING)
+        && headers
+            .get(header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .is_some_and(|length| length <= BUSY_BODY_BYTES)
 }
 
 /// Un jeton que son débit refuse sur `/mcp` (Ruling R1240) : les secondes à attendre, que la route
@@ -1261,6 +1292,46 @@ mod tests {
     use argon2::password_hash::phc::PasswordHash;
 
     use super::*;
+
+    /// La seconde garde de `/mcp/readonly` (R1443), seule : le jeton y est ramené au niveau de
+    /// lecture, sa portée et son option corbeille gardées ; une session n'y change pas.
+    #[test]
+    fn reading_only_lowers_a_token_to_read() {
+        let user = AuthUser {
+            id: Uuid::now_v7(),
+            email: String::new(),
+            name: "Mona".into(),
+            instance_admin: false,
+            via: Via::Session,
+        };
+        let token = Uuid::now_v7();
+        let grant = TokenGrant {
+            token_id: token,
+            level: mementum_acl::Level::Edit,
+            scope: Scope::All,
+            can_trash: true,
+        };
+        let caller = LiveCaller {
+            user: AuthUser {
+                via: Via::Token(Arc::new(grant.clone())),
+                ..user.clone()
+            },
+            proof: Proof::Token(token),
+        };
+        let read = caller.reading_only();
+        let lowered = read.user.token().unwrap();
+        assert_eq!(lowered.level, mementum_acl::Level::Read);
+        assert_eq!(
+            (lowered.token_id, &lowered.scope, lowered.can_trash),
+            (token, &Scope::All, true)
+        );
+        assert_ne!(lowered.shape(read.user.id), grant.shape(read.user.id));
+        let session = LiveCaller {
+            user: user.clone(),
+            proof: Proof::Token(token),
+        };
+        assert_eq!(session.reading_only().user, user);
+    }
 
     /// Les valeurs fixées par le plan du lot 2.
     #[test]

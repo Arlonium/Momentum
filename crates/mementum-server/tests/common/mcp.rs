@@ -10,10 +10,15 @@
 //! Le jeton va dans `Authorization: Bearer`, comme un client le pose (jamais un vrai jeton : il est
 //! tiré par le test, [`super::api_token`]).
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::convert::Infallible;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::task::{Context, Poll};
 
-use axum::body::Body;
+use axum::body::{Body, Bytes};
 use axum::http::{Request, StatusCode, header};
+use http_body::Frame;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
@@ -119,9 +124,14 @@ impl<'a> Mcp<'a> {
                 }
             }
         }
-        let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        let body = serde_json::to_vec(
+            &json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }),
+        )
+        .unwrap();
+        // Comme un client sur le réseau : la longueur annoncée (la porte en juge le débit).
         let request = builder
-            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .header(header::CONTENT_LENGTH, body.len())
+            .body(Body::from(body))
             .unwrap();
         match &self.token {
             Some(token) => with_bearer(request, token),
@@ -273,5 +283,36 @@ impl ToolResult {
             .filter(|word| word.len() == 36)
             .filter_map(|word| Uuid::try_parse(word).ok())
             .collect()
+    }
+}
+
+/// Un corps qui dit s'il a été lu : la preuve qu'un refus part sans lire le corps (R505).
+pub struct Watched {
+    read: Arc<AtomicBool>,
+    data: Option<Bytes>,
+}
+
+impl Watched {
+    /// Le corps `data`, et ce qui dira s'il a été lu.
+    pub fn body(data: Vec<u8>) -> (Body, Arc<AtomicBool>) {
+        let read = Arc::new(AtomicBool::new(false));
+        let body = Body::new(Watched {
+            read: Arc::clone(&read),
+            data: Some(Bytes::from(data)),
+        });
+        (body, read)
+    }
+}
+
+impl http_body::Body for Watched {
+    type Data = Bytes;
+    type Error = Infallible;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+        self.read.store(true, Ordering::SeqCst);
+        Poll::Ready(self.data.take().map(|data| Ok(Frame::data(data))))
     }
 }

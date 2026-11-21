@@ -173,8 +173,8 @@ pub(crate) async fn space_plan(
     Ok((out, more))
 }
 
-/// L'espace que nomme `name` (son identifiant, ou son nom, sans casse ni espaces de bord) parmi
-/// ceux que l'appel ouvre ([`opened_spaces`]) : `None` pour un nom inconnu **ou hors de la
+/// L'espace que nomme `name` (son identifiant d'abord, sinon son nom, sans casse ni espaces de
+/// bord) parmi ceux que l'appel ouvre ([`opened_spaces`]) : `None` pour un nom inconnu **ou hors de la
 /// portée** (la même réponse : un outil ne dit pas qu'un espace existe hors d'elle) ; `Err(ids)`
 /// pour plusieurs espaces de ce nom (l'outil dit `ambiguous_space`, avec leurs identifiants).
 pub(crate) async fn resolve_space(
@@ -182,11 +182,19 @@ pub(crate) async fn resolve_space(
     user: &AuthUser,
     name: &str,
 ) -> Result<Result<Option<SpaceInfo>, Vec<String>>, ApiError> {
+    let opened = opened_spaces(state, user).await?;
+    // Un texte qui se lit comme l'identifiant d'un espace ouvert le désigne, quoi que portent les
+    // noms des autres ; on ne cherche par nom que sinon (tour de correction de M2, R1436).
+    if let Ok(id) = Uuid::try_parse(name.trim()) {
+        let id = id.to_string();
+        if let Some(space) = opened.iter().find(|space| space.id == id) {
+            return Ok(Ok(Some(space.clone())));
+        }
+    }
     let wanted = name.trim().to_lowercase();
-    let mut found: Vec<SpaceInfo> = opened_spaces(state, user)
-        .await?
+    let mut found: Vec<SpaceInfo> = opened
         .into_iter()
-        .filter(|space| space.id == wanted || space.name.trim().to_lowercase() == wanted)
+        .filter(|space| space.name.trim().to_lowercase() == wanted)
         .collect();
     Ok(match found.len() {
         0 => Ok(None),

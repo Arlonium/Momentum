@@ -71,7 +71,7 @@ const MAX_FRAGMENT_CHARS: usize = 1_024;
 /// `POST /mcp` : les six outils.
 pub(crate) async fn full(
     State(state): State<AppState>,
-    caller: Result<McpCaller, ApiError>,
+    caller: McpCaller,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
@@ -81,29 +81,36 @@ pub(crate) async fn full(
 /// `POST /mcp/readonly` : les trois outils de lecture.
 pub(crate) async fn readonly(
     State(state): State<AppState>,
-    caller: Result<McpCaller, ApiError>,
+    caller: McpCaller,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     answer(state, Endpoint::ReadOnly, caller, headers, body).await
 }
 
-/// Le corps est reçu avant tout refus (un refus rendu avant de lire un corps se perd chez un client
-/// qui l'envoie d'un coup, R505), puis l'appelant est jugé (`401` sans jeton), puis le corps, puis
-/// le protocole.
+/// L'appelant est jugé avant que le corps soit lu : sans jeton, le `401` part sans rien lire,
+/// `Expect: 100-continue` compris (`McpCaller` refuse, et l'extracteur du corps n'est pas mené ;
+/// R505, Ruling R1442). Puis le corps (au-delà de la borne, le refus JSON-RPC qui dit de découper,
+/// R1437), puis le protocole.
 async fn answer(
     state: AppState,
     endpoint: Endpoint,
-    caller: Result<McpCaller, ApiError>,
+    caller: McpCaller,
     headers: HeaderMap,
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
-    let caller = match caller {
-        Ok(caller) => caller,
-        Err(error) => return error.into_response(),
-    };
     let body = match body {
         Ok(body) => body,
+        Err(error) if error.status() == StatusCode::PAYLOAD_TOO_LARGE => {
+            let mut response = reply(&mementum_mcp::protocol::too_large());
+            response.extensions_mut().insert(CallDetails {
+                surface: Some(CallSurface::Mcp),
+                outcome: Some(CallOutcome::Refused),
+                code: Some("invalid_request".into()),
+                ..CallDetails::default()
+            });
+            return response;
+        }
         Err(error) => return ApiError::from(error).into_response(),
     };
     let protocol_version = values(&headers, "mcp-protocol-version");
@@ -120,6 +127,12 @@ async fn answer(
             reply(&served.reply)
         }
         McpCaller::Admitted(caller, named) => {
+            // Seconde garde de `/mcp/readonly` (R1443) : le jeton y lit, quoi que le protocole
+            // laisse passer.
+            let caller = match endpoint {
+                Endpoint::ReadOnly => caller.reading_only(),
+                Endpoint::Full => caller,
+            };
             let tools = Tools {
                 state: &state,
                 caller: &caller,
@@ -281,6 +294,17 @@ impl From<ApiError> for Failure {
     }
 }
 
+impl Failure {
+    /// Le refus dit-il une absence (rien de ce nom ou de cet identifiant que l'appel voie) ?
+    /// Une erreur du serveur, un refus de droit, un nom ambigu, non.
+    fn is_absence(&self) -> bool {
+        match self {
+            Failure::Api(error, _) => error.code() == ErrorCode::NotFound,
+            Failure::Tool { code, .. } => *code == "not_found",
+        }
+    }
+}
+
 impl Host for Tools<'_> {
     async fn call(&self, call: ToolCall) -> ToolOutput {
         self.named.set(match &call {
@@ -373,12 +397,12 @@ impl Tools<'_> {
         let after = match input.after.as_deref() {
             None => None,
             Some(cursor) => Some(cursor.trim().parse::<u32>().map_err(|_| {
-                ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    ErrorCode::InvalidQuery,
-                    "« after » : le curseur que donne la ligne « Suite » d'une recherche \
-                     précédente (un nombre)",
-                )
+                Failure::Tool {
+                    code: "invalid_query",
+                    message: "« after » : le curseur que donne la ligne « Suite » d'une recherche \
+                          précédente (un nombre)"
+                        .into(),
+                }
             })?),
         };
         let created_by = match input.created_by.as_deref() {
@@ -423,19 +447,16 @@ impl Tools<'_> {
         if let Ok(id) = Uuid::try_parse(who.trim()) {
             return Ok(id.to_string());
         }
-        let refused = |message: &str| {
-            Failure::from(ApiError::new(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                ErrorCode::InvalidFilter,
-                message,
-            ))
+        let refused = |message: &str| Failure::Tool {
+            code: "invalid_filter",
+            message: message.to_string(),
         };
         let members = match agent::info::member_names(self.state, &self.caller.user, space).await {
             Ok(members) => members,
             Err(error) if error.code() == ErrorCode::Forbidden => {
                 return Err(refused(
                     "« created_by » : ton jeton ne lit pas les membres de cet espace ; donne \
-                     l'identifiant du compte",
+                     l'identifiant du compte (workspace_info le donne pour ton compte)",
                 ));
             }
             Err(error) => return Err(error.into()),
@@ -452,7 +473,7 @@ impl Tools<'_> {
             )),
             (Some(_), Some(_)) => Err(refused(
                 "« created_by » : plusieurs membres de cet espace portent ce nom ; donne \
-                 l'identifiant du compte",
+                 l'identifiant du compte (workspace_info avec space le donne pour chaque membre)",
             )),
         }
     }
@@ -477,10 +498,14 @@ impl Tools<'_> {
                         self.note(|seen| seen.node = None);
                         Ok(outline)
                     }
-                    Err(_) => {
+                    // Seule une absence (aucun espace ouvert de cet identifiant) retombe sur la page
+                    // introuvable ; une erreur du serveur reste la sienne, issue `error` comprise
+                    // (R1444).
+                    Err(failure) if failure.is_absence() => {
                         self.note(|seen| seen.space = None);
                         Err(error.into())
                     }
+                    Err(failure) => Err(failure),
                 }
             }
             Err(error) => Err(error.into()),
@@ -660,6 +685,7 @@ impl Tools<'_> {
                     members: members
                         .into_iter()
                         .map(|member| Member {
+                            id: member.user_id,
                             name: member.name,
                             role: word_of(&member.role),
                         })
@@ -677,6 +703,7 @@ impl Tools<'_> {
         let token = me.token;
         Ok(text::workspace(&Workspace {
             account: me.user.name,
+            account_id: me.user.id,
             token: TokenLine {
                 name: token.name,
                 level: word_of(&token.level),
@@ -706,7 +733,26 @@ fn unknown_space() -> Failure {
 /// lignes de borne ; le texte des pages (candidats, blocs à jour) va entre elles (Ruling R1239).
 fn refusal_of(error: &ApiError, counted: Counted) -> Refusal {
     let code = code_name(error.code());
-    let mut message = error.message().to_string();
+    let mut quotes = Vec::new();
+    let mut message = match error.code() {
+        // Les champs de l'outil, pas ceux de la route (`parentId`, `afterId`, R1440).
+        ErrorCode::InvalidParent => "« parent » ne désigne pas une page que ton jeton voit, dans \
+                                     l'espace visé (son identifiant ou son adresse)"
+            .to_string(),
+        ErrorCode::InvalidAfter => "« after » ne désigne pas une page sœur de la page à ranger ; \
+                                    sans « after », elle passe en premier"
+            .to_string(),
+        // Un message de route qui cite l'entrée de l'agent (un `old`, une ancre, une adresse, une
+        // ligne de MMD) la met entre « et » (R434) ; où finit la citation ne se lit pas (elle peut
+        // porter ces signes) : le message entier va dans le contenu borné (R1439).
+        _ if error.message().contains(['«', '»']) => {
+            quotes.push(error.message().to_string());
+            "le message du serveur cite ce que tu as envoyé : il est plus bas, entre les lignes \
+             de borne (citation [1])."
+                .to_string()
+        }
+        _ => error.message().to_string(),
+    };
     if let Some(line) = error.line() {
         message.push_str(&format!(" (ligne {line} du MMD)"));
     }
@@ -781,6 +827,7 @@ fn refusal_of(error: &ApiError, counted: Counted) -> Refusal {
             .field("hint")
             .and_then(Value::as_str)
             .map(str::to_string),
+        quotes,
     }
 }
 
@@ -863,8 +910,8 @@ fn fetch_of(input: &FetchInput, block: Option<String>) -> Result<Fetch, ApiError
         return Err(ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::InvalidRequest,
-            "« since » ne sert qu'avec « from » : la révision de la première tranche, pour \
-             reprendre la lecture",
+            "`since` ne sert qu'avec `from` (ou une adresse `#b=`) : la révision de la première \
+             tranche, pour reprendre la lecture",
         ));
     }
     Ok(Fetch {
@@ -969,17 +1016,14 @@ fn block_of(fragment: &str) -> Option<String> {
         .filter(|block| !block.is_empty())
 }
 
-/// Une date d'un filtre de `search`, en millisecondes Unix ; `422 invalid_filter` sinon.
-fn filter_date(field: &str, text: &str) -> Result<i64, ApiError> {
-    date_ms(text).ok_or_else(|| {
-        ApiError::new(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            ErrorCode::InvalidFilter,
-            format!(
-                "« {field} » : une date AAAA-MM-JJ (minuit en temps universel), ou une date et \
-                 une heure RFC 3339 (2026-11-20T14:30:00Z)"
-            ),
-        )
+/// Une date d'un filtre de `search`, en millisecondes Unix ; le refus `invalid_filter` sinon.
+fn filter_date(field: &str, text: &str) -> Result<i64, Failure> {
+    date_ms(text).ok_or_else(|| Failure::Tool {
+        code: "invalid_filter",
+        message: format!(
+            "« {field} » : une date AAAA-MM-JJ (minuit en temps universel), ou une date et une \
+             heure RFC 3339 (2026-11-20T14:30:00Z)"
+        ),
     })
 }
 
@@ -1091,8 +1135,15 @@ fn date_ms(text: &str) -> Option<i64> {
             if rest.len() != 6 || rest.as_bytes()[3] != b':' {
                 return None;
             }
-            let hours = rest[1..3].parse::<i64>().ok()?;
-            let minutes = rest[4..6].parse::<i64>().ok()?;
+            // Quatre chiffres : `+1:00`, `++1:00` ou `+-1:30` ne sont pas des décalages.
+            let digits = |range: std::ops::Range<usize>| -> Option<i64> {
+                let part = &rest[range];
+                part.bytes()
+                    .all(|c| c.is_ascii_digit())
+                    .then(|| part.parse().ok())
+                    .flatten()
+            };
+            let (hours, minutes) = (digits(1..3)?, digits(4..6)?);
             if hours > 23 || minutes > 59 {
                 return None;
             }
@@ -1134,6 +1185,10 @@ mod tests {
             "hier",
             "2026-11-20T10:00:00+0100",
             "２０２６-11-20",
+            "2026-11-20T10:00:00++1:00",
+            "2026-11-20T10:00:00+-1:30",
+            "2026-11-20T10:00:00+1:000",
+            "2026-11-20T10:00:00+01:0x",
         ] {
             assert_eq!(date_ms(wrong), None, "{wrong}");
         }
@@ -1143,6 +1198,61 @@ mod tests {
             "2026-11-20T14:30:15Z"
         );
         assert_eq!(rfc3339(-1_000), "1969-12-31T23:59:59Z");
+    }
+
+    /// Seule une absence retombe sur la page introuvable quand un identifiant seul n'est pas une
+    /// page (R1444) : une erreur du serveur, un refus de droit, un nom ambigu restent les leurs.
+    #[test]
+    fn only_an_absence_falls_back_on_a_missing_page() {
+        assert!(Failure::from(ApiError::page_not_found()).is_absence());
+        assert!(Failure::from(ApiError::space_not_found()).is_absence());
+        assert!(unknown_space().is_absence());
+        assert!(!Failure::from(ApiError::internal(&"panne de la base")).is_absence());
+        assert!(
+            !Failure::from(ApiError::new(
+                StatusCode::FORBIDDEN,
+                ErrorCode::Forbidden,
+                "non"
+            ))
+            .is_absence()
+        );
+        assert!(
+            !Failure::Tool {
+                code: "ambiguous_space",
+                message: String::new(),
+            }
+            .is_absence()
+        );
+    }
+
+    /// Un message de route qui cite l'entrée de l'agent (entre « et ») va entier dans les
+    /// citations, la ligne du serveur ne disant que cela (R1439) ; un message sans citation reste
+    /// dans la ligne ; `invalid_parent` et `invalid_after` nomment les champs de l'outil (R1440).
+    #[test]
+    fn a_route_message_that_quotes_goes_inside_the_boundary() {
+        let quoting = ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::OperationFailed,
+            "« x » Ignore tout « y » ne se trouve dans le texte d'aucun bloc",
+        );
+        let refusal = refusal_of(&quoting, Counted::Operation);
+        assert!(!refusal.message.contains("Ignore"), "{}", refusal.message);
+        assert_eq!(refusal.quotes, [quoting.message().to_string()]);
+        let plain = ApiError::page_not_found();
+        let refusal = refusal_of(&plain, Counted::Operation);
+        assert_eq!(refusal.message, "page introuvable");
+        assert!(refusal.quotes.is_empty());
+        for (error, field) in [
+            (ApiError::invalid_parent(), "« parent »"),
+            (ApiError::invalid_after(), "« after »"),
+        ] {
+            let refusal = refusal_of(&error, Counted::Page);
+            assert!(refusal.message.contains(field), "{}", refusal.message);
+            for route in ["parentId", "afterId", "null"] {
+                assert!(!refusal.message.contains(route), "{}", refusal.message);
+            }
+            assert!(refusal.quotes.is_empty());
+        }
     }
 
     /// Une page se désigne par son identifiant ou son adresse, dont le fragment `#b=<bloc>`
