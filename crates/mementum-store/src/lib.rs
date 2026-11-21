@@ -308,6 +308,10 @@ pub struct Store {
     /// (`Store::backlink_excerpts_asked`).
     #[cfg(feature = "test-hooks")]
     excerpts_asked: Arc<std::sync::atomic::AtomicUsize>,
+    /// Les espaces dont la révision ou un rôle a été lu, pour les tests
+    /// (`Store::space_reads_asked`).
+    #[cfg(feature = "test-hooks")]
+    space_reads: Arc<std::sync::Mutex<Vec<Uuid>>>,
     /// Les nœuds dont un titre a été demandé, pour les tests (`Store::titles_asked`).
     #[cfg(feature = "test-hooks")]
     titles_asked: Arc<std::sync::Mutex<Vec<Uuid>>>,
@@ -386,6 +390,8 @@ impl Store {
             index_waits: Arc::default(),
             #[cfg(feature = "test-hooks")]
             excerpts_asked: Arc::default(),
+            #[cfg(feature = "test-hooks")]
+            space_reads: Arc::default(),
             #[cfg(feature = "test-hooks")]
             titles_asked: Arc::default(),
             #[cfg(feature = "test-hooks")]

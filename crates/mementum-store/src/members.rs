@@ -403,6 +403,8 @@ impl Store {
     /// Le rôle du compte dans l'espace ; `None` s'il n'en a pas (ou si l'un des deux n'existe
     /// pas).
     pub async fn role_in(&self, space_id: Uuid, user_id: Uuid) -> Result<Option<Role>, StoreError> {
+        #[cfg(feature = "test-hooks")]
+        self.note_space_read(space_id);
         sqlx::query("SELECT role FROM members WHERE space_id = ? AND user_id = ?")
             .bind(space_id.to_string())
             .bind(user_id.to_string())

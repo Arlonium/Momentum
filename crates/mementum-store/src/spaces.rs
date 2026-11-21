@@ -309,11 +309,36 @@ impl Store {
 
     /// La révision de l'espace ; `None` s'il n'existe pas.
     pub async fn space_rev(&self, id: Uuid) -> Result<Option<i64>, StoreError> {
+        #[cfg(feature = "test-hooks")]
+        self.note_space_read(id);
         Ok(sqlx::query("SELECT rev FROM spaces WHERE id = ?")
             .bind(id.to_string())
             .fetch_optional(&self.pool)
             .await?
             .map(|r| r.get(0)))
+    }
+
+    /// Note que la révision de l'espace `id`, ou un rôle dans cet espace, a été lu (fonction
+    /// `test-hooks`).
+    #[cfg(feature = "test-hooks")]
+    pub(crate) fn note_space_read(&self, id: Uuid) {
+        self.space_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(id);
+    }
+
+    /// Les espaces dont la révision ([`Store::space_rev`]) ou un rôle ([`Store::role_in`]) a été
+    /// lu par ce store depuis son ouverture, dans l'ordre, une fois par lecture. Pour les tests
+    /// seulement (fonction `test-hooks`, lot 5, correction groupée, mutation S5-11) : rien d'un
+    /// espace hors de la portée d'un jeton n'est lu, pas même son rôle (la règle de R99), ce que
+    /// la réponse ne dit pas (elle est la même), seul le coût.
+    #[cfg(feature = "test-hooks")]
+    pub fn space_reads_asked(&self) -> Vec<Uuid> {
+        self.space_reads
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     /// La version de l'espace (règle de `lsn`) ; `None` s'il n'existe pas.

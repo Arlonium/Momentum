@@ -1518,7 +1518,8 @@ pub(crate) mod tests {
     }
 
     /// Un espace hors de la portée d'un jeton vaut un espace sans rôle, et rien de lui n'est lu :
-    /// ni ses données (aucune lecture des données d'accès), ni ses pages (la règle de R99, lot 5).
+    /// ni ses données (aucune lecture des données d'accès), ni ses pages, ni sa révision, ni le
+    /// rôle du compte (la règle de R99, lot 5).
     #[tokio::test]
     async fn a_space_out_of_scope_is_not_read() {
         let dir = tempfile::tempdir().unwrap();
@@ -1541,6 +1542,7 @@ pub(crate) mod tests {
         let page = page_with(&state, other.id, olga.id, members).await;
         let token = by_token(&olga, Level::Edit, crate::auth::Scope::Space(mine.id));
         let loads = state.inputs.loads();
+        let space_reads = state.store.space_reads_asked().len();
         assert!(
             state
                 .find_space_access(&token, other.id)
@@ -1561,9 +1563,16 @@ pub(crate) mod tests {
             loads,
             "l'espace hors de la portée n'est pas lu"
         );
+        // Ni sa révision ni le rôle d'Olga (la règle de R99, mutation S5-11 de la relecture
+        // finale) : la réponse serait la même, seul son coût dirait que l'espace existe.
+        assert!(
+            !state.store.space_reads_asked()[space_reads..].contains(&other.id),
+            "ni la révision ni le rôle de l'espace hors de la portée ne sont lus"
+        );
         // Témoin : la session d'Olga le lit, et voit la page.
         assert!(state.seen_node(&olga, page).await.unwrap().is_some());
         assert_eq!(state.inputs.loads(), loads + 1);
+        assert!(state.store.space_reads_asked()[space_reads..].contains(&other.id));
     }
 
     /// Les deux barrières d'un jeton tiennent chacune seule : sans la porte (la route ouverte),
