@@ -22,11 +22,22 @@
 //! Et (Task S2 du lot 5, R1227) : une page que le serveur récrit par différence
 //! (`PageDoc::write_diff`, `Op::DiffWrite`), entre les frappes des clients, se relit comme la page
 //! vivante.
+//!
+//! Et (passe de fin du lot 5, point 2 du plan) : l'écriture par différence élargie (plusieurs
+//! retouches d'un coup, des sous-blocs, un type ou une prop changés, un lien, un tableau, un saut de
+//! ligne), et les opérations des agents (`Op::AgentOps` : une liste d'opérations de la Task S3
+//! tirée au hasard, `ops::plan` puis `PageDoc::apply`, comme l'acteur, parfois en `rebase` sur une
+//! lecture d'avant) : le plan appliqué est le plan vérifié, et la page relue de son journal est la
+//! page vivante. Le nombre de cas se règle par `PROPTEST_CASES` (128 par défaut).
 
+use mementum_crdt::anchors::{BlockHashes, HashKey, hashes};
+use mementum_crdt::ops::{self, Base, PlanContext};
 use mementum_crdt::{FRAGMENT, PageDoc};
-use mementum_md::{Block, Content, Inline, Styles};
+use mementum_md::{Block, Content, Inline, PropValue, Styles};
 use proptest::prelude::*;
 
+#[path = "common/agent_ops.rs"]
+mod agent_ops;
 #[path = "common/live.rs"]
 mod live;
 use yrs::branch::{Branch, BranchID};
@@ -723,18 +734,29 @@ enum Op {
         stored: bool,
     },
     /// Le serveur récrit la page par différence (Task S2, R1227) : les blocs qu'il en lit,
-    /// retouchés (`edit`, voir `retouch`) ; la mise à jour va au journal, comme l'écrirait
-    /// l'acteur.
-    DiffWrite {
-        edit: usize,
-        at: usize,
-        text: String,
-    },
+    /// retouchés (chaque `(edit, at, text)`, voir `retouch`) ; la mise à jour va au journal, comme
+    /// l'écrirait l'acteur.
+    DiffWrite { edits: Vec<(usize, usize, String)> },
+    /// Un agent écrit dans la page (Task S3, passe de fin du lot 5) : une liste d'opérations tirée
+    /// de `seed` sur les blocs qu'il a lus, planifiée sur la page (`ops::plan`) puis écrite
+    /// (`PageDoc::apply`), comme l'acteur. Si `stale`, l'agent a lu la page à sa précédente
+    /// écriture, et l'appel se fait en `rebase` sur cette lecture (`Base::Changed`) quand la page
+    /// a changé depuis. `token` : une écriture par jeton (aucun média du web, R1235).
+    AgentOps { seed: u64, stale: bool, token: bool },
+}
+
+/// Ce qu'un agent a lu de la page : ses blocs, leurs empreintes, la révision.
+struct AgentRead {
+    blocks: Vec<Block>,
+    hashes: BlockHashes,
+    revision: String,
 }
 
 /// Retouche les blocs d'une page : un texte inséré, le gras d'une plage basculé, un paragraphe
 /// ajouté, un bloc retiré, un bloc remonté en tête, une mention en tête d'un contenu (qui le fait
-/// récrire en entier).
+/// récrire en entier) ; et, depuis la passe de fin du lot 5 : un sous-bloc ajouté, les sous-blocs
+/// d'un bloc retirés, un paragraphe changé en titre, une prop posée, un texte mis sous un lien, un
+/// tableau ajouté, un saut de ligne en tête d'un contenu.
 fn retouch(blocks: &mut Vec<Block>, edit: usize, at: usize, text: &str) {
     fn first_text(blocks: &mut [Block]) -> Option<&mut Vec<Inline>> {
         blocks.iter_mut().find_map(|b| match &mut b.content {
@@ -743,7 +765,7 @@ fn retouch(blocks: &mut Vec<Block>, edit: usize, at: usize, text: &str) {
         })
     }
     let n = blocks.len();
-    match edit % 6 {
+    match edit % 13 {
         0 => {
             if let Some(content) = first_text(blocks) {
                 match content.iter_mut().find_map(|i| match i {
@@ -798,6 +820,72 @@ fn retouch(blocks: &mut Vec<Block>, edit: usize, at: usize, text: &str) {
                         kind: "page".into(),
                         id: "pg_x".into(),
                         label: text.to_string(),
+                    },
+                );
+            }
+        }
+        6 if n > 0 => {
+            let child = Block {
+                id: String::new(),
+                kind: "paragraph".into(),
+                props: Default::default(),
+                content: Content::Inline(vec![Inline::Text {
+                    text: text.to_string(),
+                    styles: Styles::default(),
+                }]),
+                children: vec![],
+            };
+            blocks[at % n].children.push(child);
+        }
+        7 => {
+            if let Some(b) = blocks.iter_mut().find(|b| !b.children.is_empty()) {
+                b.children.clear();
+            }
+        }
+        8 => {
+            if let Some(b) = blocks.iter_mut().find(|b| b.kind == "paragraph") {
+                b.kind = "heading".into();
+                b.props
+                    .insert("level".into(), PropValue::Int(1 + (at % 3) as i64));
+            }
+        }
+        9 if n > 0 => {
+            let b = &mut blocks[at % n];
+            if b.kind == "paragraph" || b.kind == "heading" {
+                b.props
+                    .insert("textAlignment".into(), PropValue::Str("center".into()));
+            }
+        }
+        10 => {
+            if let Some(content) = first_text(blocks)
+                && let Some(i) = content
+                    .iter()
+                    .position(|i| matches!(i, Inline::Text { .. }))
+            {
+                let inner = content.remove(i);
+                content.insert(
+                    i,
+                    Inline::Link {
+                        href: format!("https://exemple.fr/{text}"),
+                        children: vec![inner],
+                    },
+                );
+            }
+        }
+        11 => {
+            let table = mementum_md::parse("| A | B |\n| --- | --- |\n| 1 | 2 |\n")
+                .expect("un tableau")
+                .remove(0);
+            blocks.insert(at % (n + 1), table);
+        }
+        12 => {
+            if let Some(content) = first_text(blocks) {
+                content.insert(0, Inline::HardBreak);
+                content.insert(
+                    0,
+                    Inline::Text {
+                        text: text.to_string(),
+                        styles: Styles::default(),
                     },
                 );
             }
@@ -1085,12 +1173,21 @@ fn op() -> impl Strategy<Value = Op> {
                 stored
             }
         ),
-        (0..6usize, any::<usize>(), "[a-zé]{1,4}").prop_map(|(edit, at, text)| Op::DiffWrite {
-            edit,
-            at,
-            text
-        }),
+        prop::collection::vec((0..13usize, any::<usize>(), "[a-zé]{1,4}"), 1..4)
+            .prop_map(|edits| Op::DiffWrite { edits }),
+        (any::<u64>(), any::<bool>(), any::<bool>())
+            .prop_map(|(seed, stale, token)| { Op::AgentOps { seed, stale, token } }),
     ]
+}
+
+/// Le nombre de cas du test de propriétés : `PROPTEST_CASES`, 128 par défaut (la configuration
+/// explicite d'un test passe devant la variable de proptest, qui ne vaut que pour la valeur par
+/// défaut).
+fn cases() -> u32 {
+    std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(128)
 }
 
 /// Les éléments faits à la main : une marque hors du schéma, une marque du schéma, une marque trop
@@ -1112,7 +1209,7 @@ fn bounded(at: usize, len: usize) -> u32 {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(128))]
+    #![proptest_config(ProptestConfig::with_cases(cases()))]
 
     /// Ruling R490, R491 : après chaque mise à jour acceptée, la page rechargée de son journal est
     /// la page vivante, quelles que soient les mises à jour faites à la main qui s'y mêlent ; des
@@ -1129,6 +1226,8 @@ fn scenario(ops: &[Op]) {
     let clients = [client(10, &served), client(20, &served)];
     let start = honest(&clients[0], |txn, text| text.insert(txn, 0, "abc"));
     assert!(served.receive(&start));
+    let key = HashKey::new();
+    let mut agent_read: Option<AgentRead> = None;
     for (step, op) in ops.iter().enumerate() {
         for doc in &clients {
             catch_up(doc, &served);
@@ -1337,14 +1436,69 @@ fn scenario(ops: &[Op]) {
                 }
                 vec![0, 0]
             }
-            Op::DiffWrite { edit, at, text } => {
+            Op::DiffWrite { edits } => {
                 let mut blocks = served.page.read_blocks();
-                retouch(&mut blocks, *edit, *at, text);
+                for (edit, at, text) in edits {
+                    retouch(&mut blocks, *edit, *at, text);
+                }
                 match served.page.write_diff(&blocks) {
                     Ok(written) => served.journal.push(written.update),
                     // Comme l'acteur : après une erreur, la page est rechargée de son journal.
                     Err(_) => served.page = served.reloaded(),
                 }
+                vec![0, 0]
+            }
+            Op::AgentOps { seed, stale, token } => {
+                let current = served.page.read_blocks();
+                let revision = served.page.revision();
+                let mut rng = agent_ops::Seeded(*seed);
+                let earlier = agent_read.as_ref().filter(|_| *stale);
+                let view = earlier.map_or(current.as_slice(), |read| read.blocks.as_slice());
+                let operations = agent_ops::random_ops(view, &mut |n| rng.below(n));
+                // Comme l'acteur : `Base::Changed` seulement si la page a changé depuis la lecture.
+                let base = match earlier {
+                    Some(read) if read.revision != revision => Base::Changed(&read.hashes),
+                    _ => Base::Current,
+                };
+                let ctx = PlanContext {
+                    base,
+                    key: &key,
+                    revision: &revision,
+                    forbid_external_media: *token,
+                    commented: None,
+                };
+                let read_now = AgentRead {
+                    hashes: hashes(&current, &key),
+                    blocks: current.clone(),
+                    revision: revision.clone(),
+                };
+                if let Ok(plan) = ops::plan(&current, &operations, &ctx) {
+                    match served.page.apply(&plan) {
+                        Ok(mut written) => {
+                            // Le plan appliqué est le plan vérifié, au nommage près (une page vide
+                            // s'écrit en un paragraphe vide) ; et les blocs que l'écriture rend
+                            // sont la page relue (l'acteur l'affirme en debug, `actor/agent.rs`).
+                            let now = served.page.read_blocks();
+                            if !plan.blocks().is_empty() {
+                                let planned = mementum_md::normalize(plan.blocks().to_vec());
+                                assert!(
+                                    agent_ops::plan_written(&now, &planned),
+                                    "étape {step} ({op:?}) : la page écrite est le plan, \
+                                     opérations {operations:?} ; page {now:?} ; plan {planned:?}"
+                                );
+                            }
+                            if let Some(blocks) = written.blocks.take() {
+                                assert_eq!(blocks, now, "étape {step} ({op:?}) : l'arbre écrit");
+                            }
+                            if written.update != [0, 0] {
+                                served.journal.push(written.update);
+                            }
+                        }
+                        // Comme l'acteur : après une erreur, la page est rechargée de son journal.
+                        Err(_) => served.page = served.reloaded(),
+                    }
+                }
+                agent_read = Some(read_now);
                 vec![0, 0]
             }
             Op::Content { kind, stored } => {
