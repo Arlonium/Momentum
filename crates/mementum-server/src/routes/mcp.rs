@@ -708,26 +708,17 @@ impl Tools<'_> {
                 })
             }
         };
+        // Le niveau et la corbeille sont ceux du jeton de l'appel (`agent::info::me`, R1524).
         let token = me.token;
-        // Le niveau et la corbeille du jeton **de l'appel** : sur `/mcp/readonly`, ramené à la
-        // lecture (R1443), il ne met rien à la corbeille, quoi que dise sa ligne (défaut I3 de la
-        // relecture finale, Ruling R1524).
-        let (level, can_trash) = match user.token() {
-            Some(grant) => (
-                grant.level.as_str().to_string(),
-                grant.can_trash && grant.level >= mementum_acl::Level::Edit,
-            ),
-            None => (word_of(&token.level), token.can_trash),
-        };
         Ok(text::workspace(&Workspace {
             account: me.user.name,
             account_id: me.user.id,
             token: TokenLine {
                 name: token.name,
-                level,
+                level: word_of(&token.level),
                 scope: word_of(&token.scope),
                 expires_at: token.expires_at.map(rfc3339),
-                can_trash,
+                can_trash: token.can_trash,
                 pages: token
                     .pages
                     .into_iter()

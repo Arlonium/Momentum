@@ -26,10 +26,17 @@ pub(crate) async fn me(state: &AppState, user: &AuthUser) -> Result<Option<Agent
         return Ok(None);
     };
     let spaces = opened_spaces(state, user).await?;
-    let token = crate::routes::tokens::token_info(state, user, grant.token_id)
+    let mut token = crate::routes::tokens::token_info(state, user, grant.token_id)
         .await?
         // Le jeton a été lu vivant par la porte : parti depuis, c'est un jeton mort.
         .ok_or_else(ApiError::invalid_token)?;
+    // Le niveau et la corbeille du jeton **de l'appel**, pas de sa ligne : sur `/mcp/readonly`,
+    // ramené à la lecture (R1443), il ne lit que, et ne met rien à la corbeille (défaut I3 de la
+    // relecture finale, Ruling R1524) ; par une autre route, ce sont ceux de la ligne.
+    if grant.level < mementum_acl::Level::Edit {
+        token.level = types::TokenLevel::Read;
+        token.can_trash = false;
+    }
     Ok(Some(AgentMe {
         user: AgentUser {
             id: user.id.to_string(),
