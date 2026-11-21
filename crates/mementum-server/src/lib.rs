@@ -63,6 +63,8 @@
 //! | `POST /api/v1/pages/{id}/files?name=…` | `edit` | `201`, `FileInfo` (son `url`, `/api/v1/pages/{id}/files/{fileId}`, est l'adresse du fichier) : le corps est le fichier brut, lu par trames et écrit dans le dépôt sans être gardé en mémoire, hors de la borne de 2 Mio des autres corps ; `409 trashed` ; `422 invalid_request` pour un paramètre `name` illisible (absent : « fichier ») ; ces refus faits à un compte (`400` et `409` de l'en-tête `X-Mementum-Account`, `403`, `404`, `409`, `422`) lisent et jettent d'abord un corps annoncé sous la borne, ou sans longueur annoncée, sauf sous `Expect: 100-continue`, pour arriver au navigateur (Rulings R505, R545) ; `400 invalid_request` pour un corps interrompu avant sa fin ; `413 file_too_large` sur `Content-Length`, avant de rien lire (comme le `401`, il peut être perdu pour un client qui envoie son corps sans attendre : lire `GET /api/v1/files/limits` avant d'envoyer), puis en cours de lecture ; un corps qui ne reçoit plus rien pendant 30 s : la connexion est fermée sans réponse (Ruling R391, en HTTP/1) ; vidé sur le disque, puis session et droits revérifiés, le corps reçu (Rulings R89, R390, R507) ; le contenu est posé puis attaché sous le verrou du dépôt, et va au bout même si le client coupe ; un contenu posé par l'envoi que l'attache n'a pas pris repart (Ruling R395) |
 //! | `POST /api/v1/pages/{id}/files/copies` | `edit` ici, et `read` sur la page d'origine (à la corbeille aussi) | `201`, `FileInfo` : une attache neuve de cette page, au même contenu et au même nom, sans un octet renvoyé ; corps `CopyFile` (`pageId`, `fileId`) ; `409 trashed`, aussi pour une page mise à la corbeille pendant que la recopie attend son tour d'écriture, que la transaction relit (Ruling R577) ; puis `invalid_json`, puis `422 invalid_source`, la même réponse pour une page d'origine qu'on ne voit pas, inconnue ou mal nommée, et pour un fichier qui n'est pas d'elle, inconnu ou mal nommé (Ruling R558) ; un `GET` à cette adresse répond `405 method_not_allowed`, pour toute page, vue ou non : la route passe avant celle d'un fichier (Ruling R559) |
 //! | `GET /api/v1/pages/{id}/files/{fileId}` | `read` (à la corbeille aussi) | les octets, toujours en téléchargement (`Content-Disposition: attachment`, `nosniff`, CSP `sandbox`, `Cross-Origin-Resource-Policy: same-origin`), sous le type que le serveur a lu à l'envoi (Ruling R246) ; `Cache-Control: private, no-cache` et `ETag` ; `304` si `If-None-Match` nomme l'`ETag`, jugé avant `Range` ; `206` pour une plage simple, `416` si elle commence après la fin ou est de longueur nulle (`bytes=-0`) ; `If-Range` qui ne nomme pas l'`ETag`, deux plages ou une plage illisible : le fichier entier (Ruling R392) ; un fichier qui n'est pas de la page, inconnu ou mal nommé : la réponse d'une page introuvable, après celle de la page ; `404` « fichier indisponible » si le dépôt n'a plus son contenu, ou plus entier (Ruling R393), jugé après le `304` |
+//! | `POST /mcp`, un message JSON-RPC (MCP 2026-07-28, ou 2025-11-25) | un jeton d'API, jamais une session (le cookie n'est pas lu) | le serveur MCP intégré (lot 5, Task M2, Rulings R1236, R1237, R1240 ; `routes/mcp.rs`) : six outils (`search`, `fetch`, `create_pages`, `update_page`, `manage_pages`, `workspace_info`), chacun menant la fonction d'`agent/` de sa route REST, au nom du compte du jeton restreint à lui ; `200` et un résultat (un refus d'outil est un résultat `isError` qui dit son code, quoi faire et, pour un débit, `retry_after_seconds` ; le débit d'un jeton y est un refus `token_busy`, sans ligne de journal), `202` pour une notification, `400` ou `404` pour une erreur JSON-RPC qui ne se lit pas ou une méthode inconnue ; sans jeton, `401 invalid_token` (avec `WWW-Authenticate: Bearer`) ; `403 bad_origin` pour une `Origin` d'un autre site ; `GET` et `DELETE` : `405` ; aucun en-tête CORS, `Cache-Control: no-store` et `nosniff` sur toute réponse |
+//! | `POST /mcp/readonly` | un jeton d'API | la même, avec les seuls outils de lecture (`search`, `fetch`, `workspace_info`) : un outil d'écriture y est un outil inconnu (`-32602`), jamais appelé, quel que soit le niveau du jeton |
 //! | `GET /sync/{id}?schema=N` | `read` | WebSocket y-websocket, au nom du compte : en écriture avec `edit` hors corbeille, pour un client du schéma du serveur ; sinon en lecture seule ; refus avant la poignée de main, dans cet ordre : `403 bad_origin`, `401`, `409 account_changed` (paramètre `account`, ou en-tête `X-Mementum-Account` ; Ruling R541), `404` ; `400 invalid_request` sans demande de WebSocket |
 //! | `GET /events/{spaceId}` | un rôle | WebSocket du canal de l'espace (Ruling R133) : des trames texte `{"lsn":N}`, la version de l'espace, une à l'ouverture puis une chaque fois qu'elle avance, et un ping toutes les 20 s, précédé de la version courante redite, même égale (Ruling R205 : le client, qui ne voit pas les pings, s'en sert comme signe de vie) ; rien d'autre. Toute trame de données reçue du client ferme la connexion ; la session et le rôle sont revérifiés avant de mettre en file chaque trame de version et chaque ping, et la connexion est fermée s'ils ne valent plus ; aucun pong pour les trois derniers pings : fermée au ping suivant (Ruling R153) ; plus de 64 trames en attente : fermée. Refus avant la poignée de main, dans l'ordre de `/sync` : `403 bad_origin`, `401`, `409 account_changed` (paramètre `account`, ou en-tête `X-Mementum-Account` ; Ruling R541), `404` (espace inconnu, mal nommé, ou sans rôle : la réponse de tout espace introuvable, Ruling R152), `400 invalid_request` |
 //!
@@ -99,7 +101,8 @@
 //! appel du compte du jeton, restreint (la colonne « Session » vaut pour lui, sous la portée, le
 //! niveau et l'interdit du jeton). Seul un `Bearer` qui commence par `mmt_` est un jeton ; la
 //! requête ignore alors le cookie de session, et ne retombe jamais sur lui ; tout autre
-//! `Authorization` est ignoré (sauf sur `/mcp`, à venir). Une porte posée sur chaque route
+//! `Authorization` est ignoré, sauf sur `/mcp`, qui n'accepte qu'un jeton (`401` sans lui, le
+//! cookie n'étant pas lu). Une porte posée sur chaque route
 //! déclarée (`auth::token_gate`) juge, dans l'ordre : `403 bad_origin` pour une `Origin` d'un autre
 //! site, lecture comprise ; `401 invalid_token` (avec `WWW-Authenticate: Bearer`) pour un jeton mal
 //! formé, inconnu, révoqué, échu ou d'un compte parti, une seule réponse ; `403 token_not_allowed`
@@ -270,8 +273,9 @@
 //! `GET` : la couche ne regarde pas son `Origin`. C'est la route qui la
 //! contrôle, avant tout le reste, par la même règle (`routes/sync.rs`). Une
 //! seconde couche, par-dessus, pose `Cache-Control: no-store` et
-//! `X-Content-Type-Options: nosniff` sur toute réponse de l'API (`/api/…`),
-//! refus compris ; ni `/sync` ni `/events` n'en sont. Seul un fichier servi,
+//! `X-Content-Type-Options: nosniff` sur toute réponse de l'API (`/api/…`) et du
+//! serveur MCP (`/mcp`, `/mcp/readonly`), refus compris ; ni `/sync` ni `/events`
+//! n'en sont. Aucune réponse ne porte d'en-tête CORS. Seul un fichier servi,
 //! marqué `guard::FileResponse`, garde son `Cache-Control: private, no-cache`.
 
 mod access;
@@ -301,6 +305,7 @@ mod routes {
     pub(crate) mod files;
     pub(crate) mod info;
     pub(crate) mod invitations;
+    pub(crate) mod mcp;
     pub(crate) mod pages;
     pub(crate) mod search;
     pub(crate) mod sharing;
@@ -843,6 +848,9 @@ fn router(state: AppState) -> Router {
             "/api/v1/pages/{id}/versions/{version_id}/restore",
             post(versions::restore),
         )
+        // Le serveur MCP (lot 5, Task M2) : un jeton seulement, jamais une session.
+        .route("/mcp", post(routes::mcp::full))
+        .route("/mcp/readonly", post(routes::mcp::readonly))
         .route("/sync/{id}", get(sync::sync))
         .route("/events/{id}", get(routes::events::events))
         // Sur chaque route déclarée, pas sur les fallbacks : la porte des jetons d'API lit le

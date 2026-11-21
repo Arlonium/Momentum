@@ -152,15 +152,18 @@ pub(crate) async fn check(State(state): State<AppState>, request: Request, next:
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct FileResponse;
 
-/// Couche la plus extérieure : toute réponse de l'API (`/api/…`), réussite ou refus, ceux de
-/// [`check`] compris, porte `Cache-Control: no-store` et `X-Content-Type-Options: nosniff`.
+/// Couche la plus extérieure : toute réponse de l'API (`/api/…`) et du serveur MCP (`/mcp`,
+/// `/mcp/readonly`, lot 5, Ruling R1237), réussite ou refus, ceux de [`check`] compris, porte
+/// `Cache-Control: no-store` et `X-Content-Type-Options: nosniff`. Aucune ne porte d'en-tête CORS :
+/// le serveur n'en pose nulle part.
 /// Défense en profondeur : une réponse peut porter un jeton d'invitation, des adresses ou le
 /// contenu d'une page, qu'aucun cache ne doit garder, et dont aucun navigateur ne doit deviner
 /// un autre type que celui annoncé. Seul un fichier servi, marqué [`FileResponse`], garde son
 /// propre `Cache-Control` (`private, no-cache` : revalidé à chaque usage, donc jugé sur les
 /// droits du moment, Ruling R246) ; ses refus, eux, ne sont pas marqués.
 pub(crate) async fn api_headers(request: Request, next: Next) -> Response {
-    let api = request.uri().path().starts_with("/api/");
+    let path = request.uri().path();
+    let api = path.starts_with("/api/") || path == "/mcp" || path.starts_with("/mcp/");
     let mut response = next.run(request).await;
     if api {
         let served_file = response.extensions().get::<FileResponse>().is_some();

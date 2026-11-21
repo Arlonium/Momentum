@@ -64,6 +64,33 @@ impl ApiError {
         self.body.error
     }
 
+    /// Le statut HTTP de l'erreur.
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    /// Le message, en français, tel que le corps le porte.
+    pub(crate) fn message(&self) -> &str {
+        &self.body.message
+    }
+
+    /// La ligne fautive d'un MMD (`invalid_mmd`), à partir de 1.
+    pub(crate) fn line(&self) -> Option<usize> {
+        self.body.line
+    }
+
+    /// Les secondes de `Retry-After`, pour un refus du débit.
+    pub(crate) fn retry_after(&self) -> Option<u64> {
+        self.retry_after
+    }
+
+    /// Un champ de plus du corps ([`ApiError::with`]) : le rang et la raison d'une opération
+    /// refusée, ses blocs et ses candidats, la révision et le MMD d'un conflit. L'outil MCP les met
+    /// en texte (lot 5, Task M2).
+    pub(crate) fn field(&self, key: &str) -> Option<&serde_json::Value> {
+        self.extra.as_ref()?.get(key)
+    }
+
     /// `404 not_found` : la page n'existe pas, **ou** la personne ne la voit pas. Les deux
     /// cas reçoivent exactement cette réponse, comme un id mal formé : qui ne peut pas lire
     /// une page n'apprend rien d'elle, pas même qu'elle existe.
@@ -635,6 +662,19 @@ impl ApiError {
             StatusCode::UNAUTHORIZED,
             ErrorCode::InvalidToken,
             "jeton d'API révoqué, échu ou inconnu : crée-en un autre dans ton compte",
+        );
+        error.bearer = true;
+        error
+    }
+
+    /// `401 invalid_token`, avec `WWW-Authenticate: Bearer` : `/mcp` reçu sans jeton d'API (lot 5,
+    /// Task M2, Rulings R1214, R1237). Un cookie de session n'y vaut rien : il n'est pas même lu.
+    pub fn token_required() -> ApiError {
+        let mut error = ApiError::new(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::InvalidToken,
+            "le serveur MCP n'accepte qu'un jeton d'API (Authorization: Bearer mmt_…), jamais une \
+             session : crée un jeton dans ton compte",
         );
         error.bearer = true;
         error

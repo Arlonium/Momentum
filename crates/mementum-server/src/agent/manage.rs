@@ -34,12 +34,14 @@ pub(crate) async fn rename(
 }
 
 /// Range la page après la sœur `after` (`None` : en tête), sous le même parent (`PATCH`,
-/// `afterId`).
+/// `afterId`). `after` est l'identifiant tel que l'agent l'a donné : c'est la route qui le juge,
+/// après les refus de la page (un identifiant qu'elle ne lit pas, ou d'une page qui n'est pas une
+/// sœur : `422 invalid_after`).
 pub(crate) async fn reorder(
     state: &AppState,
     user: &AuthUser,
     page: Uuid,
-    after: Option<Uuid>,
+    after: Option<String>,
 ) -> Result<PageNode, ApiError> {
     patch(
         state,
@@ -48,7 +50,7 @@ pub(crate) async fn reorder(
         UpdatePage {
             title: None,
             parent_id: None,
-            after_id: Some(after.map(|a| a.to_string())),
+            after_id: Some(after),
         },
     )
     .await

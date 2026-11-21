@@ -1281,6 +1281,9 @@ pub struct PageDocument {
     pub next: Option<String>,
     /// Les sous-pages, que le compte voit, hors corbeille, dans l'ordre : deux cents au plus.
     pub children: Vec<SearchAncestor>,
+    /// La page est à la corbeille, elle-même ou par une page parente : elle se lit, et ne s'écrit
+    /// plus (lot 5, Task M2 : l'outil `fetch` le dit).
+    pub trashed: bool,
     /// Avec `since` : quelque chose a changé, depuis cette révision, dans les blocs déjà servis.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub changed_since: Option<bool>,

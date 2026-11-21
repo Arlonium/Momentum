@@ -183,6 +183,7 @@ pub(crate) async fn document(
             })
             .collect(),
         level: access.level.into(),
+        trashed: access.in_trash,
         edited_at,
         revision,
         mmd: slice.mmd,

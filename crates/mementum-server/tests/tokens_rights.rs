@@ -594,6 +594,35 @@ async fn a_read_token_writes_nothing() {
         let reply = t.send(with_bearer(request, &token)).await;
         reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
     }
+    // Les outils MCP qui écrivent (Task M2) : un refus `forbidden`, dans les deux révisions.
+    let p = page.to_string();
+    for era in common::mcp::ERAS {
+        let mcp = common::mcp::Mcp::new(&t, &token, era);
+        for (tool, arguments) in [
+            (
+                "manage_pages",
+                json!({ "action": "rename", "page": p, "title": "Autre" }),
+            ),
+            ("manage_pages", json!({ "action": "move", "page": p })),
+            ("manage_pages", json!({ "action": "trash", "page": p })),
+            ("manage_pages", json!({ "action": "restore", "page": p })),
+            ("manage_pages", json!({ "action": "duplicate", "page": p })),
+            (
+                "update_page",
+                json!({ "page": p, "operations": [{ "op": "insert", "position": "end", "markdown": "Plus\n" }] }),
+            ),
+            (
+                "create_pages",
+                json!({ "space": team.space.to_string(), "pages": [{ "title": "Neuve" }] }),
+            ),
+            (
+                "create_pages",
+                json!({ "parent": p, "pages": [{ "title": "Sous-page" }] }),
+            ),
+        ] {
+            mcp.call(tool, arguments).await.refused("forbidden");
+        }
+    }
     let node = t.store.get_node(page).await.unwrap().unwrap();
     assert_eq!((node.title.as_str(), node.trashed_at), ("Notes", None));
     assert_eq!(

@@ -20,6 +20,8 @@
 /// L'horloge de tokio arrêtée (Ruling R179) : l'aide des tests de `mementum-sync`.
 #[path = "../../../mementum-sync/tests/common/clock.rs"]
 pub mod clock;
+/// Un client MCP de test (lot 5, Task M2).
+pub mod mcp;
 pub mod sync;
 /// Le dossier temporaire d'un test, supprimé après lui : l'aide des tests de `mementum-store`.
 #[path = "../../../mementum-store/tests/common/tmp.rs"]

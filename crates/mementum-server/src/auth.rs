@@ -332,8 +332,11 @@ pub const TOKEN_PREFIX: &str = "mmt_";
 /// Une route neuve entre dans cette liste ou dans [`SESSION_ONLY_ROUTES`] : un test lit le
 /// routeur (`only_listed_routes_accept_a_token`). `GET /api/v1/me` et `GET …/members` y sont
 /// avec leur réponse sans adresse e-mail (Ruling R1247), comme les routes des agents
-/// (`…/document`, `…/operations`, `…/pages/batch`, Task S7) ; `/mcp` y entrera avec sa tâche (M2).
+/// (`…/document`, `…/operations`, `…/pages/batch`, Task S7) et le serveur MCP (`/mcp`,
+/// `/mcp/readonly`, Task M2), qui n'accepte **que** un jeton ([`McpCaller`]).
 pub const TOKEN_ROUTES: &[(&str, &str)] = &[
+    ("POST", "/mcp"),
+    ("POST", "/mcp/readonly"),
     ("GET", "/api/v1/me"),
     ("GET", "/api/v1/spaces/{id}/members"),
     ("POST", "/api/v1/spaces/{id}/pages/batch"),
@@ -551,6 +554,13 @@ pub(crate) async fn token_gate(
     {
         state.calls.busy(token.id, now);
         let seconds = wait.as_millis().div_ceil(1000).max(1) as u64;
+        if is_mcp(path) {
+            // Lot 5, Task M2 (Ruling R1240) : sur `/mcp`, un appel d'outil refusé par le débit est
+            // un refus de l'outil qui dit son délai (`retry_after_seconds`), que le modèle lit ; la
+            // route le met en forme sans rien faire de l'appel. Toujours sans ligne (R1244).
+            request.extensions_mut().insert(TokenBusy(seconds));
+            return next.run(request).await;
+        }
         return ApiError::token_busy(seconds).into_response();
     }
     let grant = Arc::new(TokenGrant::from_live(&token));
@@ -840,6 +850,51 @@ impl FromRequestParts<AppState> for LiveCaller {
             }
         };
         Ok(LiveCaller { user, proof })
+    }
+}
+
+/// Le chemin déclaré est-il celui du serveur MCP (`/mcp`, `/mcp/readonly`, lot 5, Task M2) ?
+fn is_mcp(path: &str) -> bool {
+    path == "/mcp" || path == "/mcp/readonly"
+}
+
+/// Un jeton que son débit refuse sur `/mcp` (Ruling R1240) : les secondes à attendre, que la route
+/// dit dans le refus de l'outil.
+#[derive(Debug, Clone, Copy)]
+struct TokenBusy(u64);
+
+/// L'appelant du serveur MCP (`/mcp`, `/mcp/readonly`, lot 5, Task M2 ; Rulings R1214, R1237) :
+/// le compte d'un jeton d'API que la porte a laissé passer, avec de quoi le relire avant d'écrire,
+/// ou un jeton que son débit refuse. **Jamais une session** : sans jeton, `401` (le refus de
+/// [`ApiError::token_required`]), et le cookie n'est pas même lu, si bien qu'une page web ouverte
+/// dans le navigateur d'une personne connectée ne pilote pas ses outils. Un `Authorization` qui
+/// n'est pas un jeton vivant a déjà reçu `401 invalid_token` de la porte (Ruling R1352).
+#[derive(Debug, Clone)]
+pub(crate) enum McpCaller {
+    /// Admis : le compte du jeton, restreint, et sa preuve (`Proof::Token`).
+    Admitted(LiveCaller),
+    /// Refusé par le débit du jeton ou de son compte (Ruling R1241) : les secondes à attendre.
+    Busy(u64),
+}
+
+impl FromRequestParts<AppState> for McpCaller {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &AppState,
+    ) -> Result<McpCaller, ApiError> {
+        if let Some(TokenBusy(seconds)) = parts.extensions.get::<TokenBusy>() {
+            return Ok(McpCaller::Busy(*seconds));
+        }
+        if parts.extensions.get::<TokenCaller>().is_none() {
+            return Err(ApiError::token_required());
+        }
+        // Le compte du jeton, par le chemin de toute route (le compte attendu, la voie de ses
+        // écritures) ; la session n'est jamais regardée.
+        Ok(McpCaller::Admitted(
+            LiveCaller::from_request_parts(parts, state).await?,
+        ))
     }
 }
 
