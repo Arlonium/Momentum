@@ -626,7 +626,12 @@ async fn server_refusals_stay_in_the_server_lines_and_name_the_fields_of_the_too
             )
             .await;
         refused.refused("forbidden");
-        server_only("le niveau", &refused, "il faut « Peut modifier »");
+        // Le jeton borne, et le dit (Ruling R1549).
+        server_only(
+            "le niveau",
+            &refused,
+            "ce jeton d'API est un jeton « Lecture »",
+        );
 
         let editor = Mcp::new(&t, &edit, era);
         editor.open().await;

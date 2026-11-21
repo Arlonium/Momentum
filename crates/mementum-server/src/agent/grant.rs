@@ -180,6 +180,7 @@ mod tests {
             in_trash: false,
             visible_parent: None,
             barred: Barred::default(),
+            capped_from: None,
         };
         let always = [Action::Share, Action::Delete, Action::Move];
         let edit = grant(Level::Edit, Scope::All, false).narrow_own(full);

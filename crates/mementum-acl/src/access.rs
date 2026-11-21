@@ -32,6 +32,11 @@ pub struct NodeAccess {
     /// Les actions refusées quel que soit le niveau (l'interdit d'un jeton d'API, Ruling R1216) ;
     /// vide pour une session.
     pub barred: Barred,
+    /// Le niveau du compte, quand un jeton d'API l'a ramené plus bas (`level` est alors celui du
+    /// jeton) : de quoi dire, dans un refus, que c'est le jeton qui borne et non le compte (recette
+    /// du lot 5, F5, Ruling R1549). `None` pour une session, et quand le jeton ne borne pas. Ne
+    /// permet rien.
+    pub capped_from: Option<Level>,
 }
 
 impl NodeAccess {
@@ -47,6 +52,11 @@ impl NodeAccess {
     pub fn narrowed(self, cap: Level, barred: Barred, has_roots: bool) -> NodeAccess {
         NodeAccess {
             level: self.level.min(cap),
+            capped_from: if cap < self.level {
+                Some(self.capped_from.unwrap_or(self.level))
+            } else {
+                self.capped_from
+            },
             section: if has_roots {
                 Section::Shared
             } else {
@@ -153,6 +163,7 @@ impl SpaceAccess {
                         in_trash: chain.in_trash,
                         visible_parent: node.parent_id.filter(|_| parent_visible),
                         barred: Barred::NONE,
+                        capped_from: None,
                     },
                 ));
             }

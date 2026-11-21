@@ -471,6 +471,7 @@ async fn planned_move(
                 in_trash: false,
                 visible_parent: Some(parent),
                 barred: under.barred,
+                capped_from: under.capped_from,
             };
             (None, Some(access))
         }

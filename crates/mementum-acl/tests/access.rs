@@ -309,6 +309,7 @@ fn shared_subpage_shows_as_root_for_the_guest() {
             in_trash: false,
             visible_parent: None,
             barred: Barred::NONE,
+            capped_from: None,
         })
     );
     assert_eq!(
@@ -319,6 +320,7 @@ fn shared_subpage_shows_as_root_for_the_guest() {
             in_trash: false,
             visible_parent: Some(shared),
             barred: Barred::NONE,
+            capped_from: None,
         })
     );
 
@@ -332,6 +334,7 @@ fn shared_subpage_shows_as_root_for_the_guest() {
             in_trash: false,
             visible_parent: Some(page),
             barred: Barred::NONE,
+            capped_from: None,
         })
     );
     assert_eq!(access.node(deep).unwrap().visible_parent, Some(shared));
@@ -972,6 +975,7 @@ fn barred_refuses_what_the_level_allows() {
         in_trash: false,
         visible_parent: None,
         barred,
+        capped_from: None,
     };
     for action in ACTIONS {
         let refused = matches!(action, Action::Share | Action::Move);

@@ -635,6 +635,100 @@ async fn a_read_token_writes_nothing() {
         .assert_status(StatusCode::OK);
 }
 
+/// Le refus d'écriture fait à un jeton « Lecture » dit que c'est le jeton qui borne quand le compte,
+/// lui, pourrait écrire (recette du lot 5, F5, Ruling R1549) : « il faut « Peut modifier », tu as
+/// « Peut lire » » faisait conclure au modèle que le compte ne fait que lire. Par la route comme par
+/// l'outil. Quand le compte ne le pourrait pas non plus, le refus dit le niveau du compte, comme à
+/// une session.
+#[tokio::test]
+async fn a_read_token_says_that_the_token_is_what_reads_only() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    // Mona peut modifier « Notes » (les membres), et seulement lire « Lue ».
+    let page = team_page(&team, None, "Notes").await;
+    let read_only = team
+        .page(None, "Lue", &[(Subject::Members, Level::Read)])
+        .await;
+    let (token, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Read,
+        TokenScope::All,
+        false,
+    )
+    .await;
+    let insert =
+        json!({ "operations": [{ "op": "insert", "position": "end", "markdown": "Plus\n" }] });
+    let message = |reply: &Reply| {
+        reply.assert_error(StatusCode::FORBIDDEN, "forbidden")["message"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    let capped = message(
+        &json_by(
+            &t,
+            &token,
+            Method::POST,
+            &format!("{}/operations", page_uri(page)),
+            insert.clone(),
+        )
+        .await,
+    );
+    assert!(
+        capped.contains("ce jeton d'API") && capped.contains("« Lecture »"),
+        "{capped}"
+    );
+    assert!(capped.contains("« Peut modifier »"), "{capped}");
+    assert!(!capped.contains("tu as « Peut lire »"), "{capped}");
+    let renamed = message(
+        &json_by(
+            &t,
+            &token,
+            Method::PATCH,
+            &page_uri(page),
+            json!({ "title": "Autre" }),
+        )
+        .await,
+    );
+    assert_eq!(renamed, capped);
+    // La corbeille demande de modifier : un jeton « Lecture » l'apprend par son niveau, pas par
+    // l'option corbeille, qu'il ne peut pas porter (R1665).
+    let trashed = message(
+        &t.send(with_bearer(
+            bare(Method::POST, &format!("{}/trash", page_uri(page))),
+            &token,
+        ))
+        .await,
+    );
+    assert_eq!(trashed, capped);
+    // Le compte ne fait que lire « Lue » : le refus le dit, comme à sa session.
+    let below = message(
+        &json_by(
+            &t,
+            &token,
+            Method::POST,
+            &format!("{}/operations", page_uri(read_only)),
+            insert,
+        )
+        .await,
+    );
+    assert_eq!(
+        below,
+        "niveau insuffisant sur cette page : il faut « Peut modifier », tu as « Peut lire »"
+    );
+    // L'outil le dit dans ses lignes, hors du contenu borné.
+    let mcp = common::mcp::Mcp::new(&t, &token, common::mcp::Era::V2026);
+    let refused = mcp
+        .call(
+            "update_page",
+            json!({ "page": page.to_string(), "operations": [{ "op": "insert", "position": "end", "markdown": "Plus\n" }] }),
+        )
+        .await;
+    refused.refused("forbidden");
+    assert!(refused.head().contains(&capped), "{}", refused.text);
+}
+
 /// Un jeton ne change jamais une page de parent, même au compte qui y a l'accès complet : ni à
 /// la racine, ni sous une page de l'équipe, ni depuis « Privé ». Il la déplace parmi ses sœurs.
 #[tokio::test]

@@ -142,7 +142,24 @@ pub(crate) fn permit(access: &NodeAccess, action: Action) -> Result<(), ApiError
             .into_iter()
             .find(|level| level.allows(action))
             .unwrap_or(Level::Full);
-        return Err(below(needed, access.level));
+        // Le niveau d'un jeton d'API sous celui du compte (recette du lot 5, F5, Ruling R1549) :
+        // si le compte le pourrait, c'est le jeton qui borne, et le refus le dit ; sinon, le
+        // niveau du compte, comme à sa session. Un geste qui demande « Accès complet » n'est
+        // permis à aucun jeton : son interdit le dit mieux. Un geste de « Peut modifier » refusé à
+        // un jeton « Lecture » se dit par le niveau du jeton, même s'il est aussi interdit (la
+        // corbeille sans l'option) : un jeton « Lecture » ne porte pas l'option (R1665).
+        return Err(match access.capped_from {
+            Some(account)
+                if account.allows(action)
+                    && needed > Level::Edit
+                    && access.barred.contains(action) =>
+            {
+                barred(action)
+            }
+            Some(account) if account.allows(action) => capped(needed, access.level, account),
+            Some(account) => below(needed, account),
+            None => below(needed, access.level),
+        });
     }
     // L'interdit d'un jeton d'API, après le niveau (Rulings R1216, R1218) : vide pour une
     // session.
@@ -189,6 +206,25 @@ pub(crate) fn permit_root_page(space: &SpaceAccess, user: &AuthUser) -> Result<R
         ));
     }
     Ok(role)
+}
+
+/// `403 forbidden` : il faut `needed` sur la page ; le compte l'a (`account`), mais son jeton d'API
+/// s'arrête à `token`. Les niveaux de jeton sont ceux de l'écran « Jetons d'API » (« Lecture »,
+/// « Modification ») ; ceux de la page, ceux du menu Partager.
+fn capped(needed: Level, token: Level, account: Level) -> ApiError {
+    ApiError::forbidden(if token < Level::Comment {
+        format!(
+            "ce jeton d'API est un jeton « Lecture » : il lit les pages de sa portée, et n'écrit \
+             rien, même là où ton compte a « {} » ; pour écrire, il faut un jeton « Modification »",
+            level_name(account)
+        )
+    } else {
+        format!(
+            "ce jeton d'API est un jeton « Modification » : ce geste demande « {} », que ton \
+             compte a sur cette page, mais aucun jeton ; passe par l'application",
+            level_name(needed)
+        )
+    })
 }
 
 /// `403 forbidden` : il faut `needed` sur la page, la personne a `held`.
@@ -648,6 +684,7 @@ pub(crate) mod tests {
             in_trash: false,
             visible_parent: None,
             barred: mementum_acl::Barred::NONE,
+            capped_from: None,
         };
         let response = permit(&access, action)
             .expect_err("un refus")
@@ -1612,6 +1649,7 @@ pub(crate) mod tests {
             in_trash: false,
             visible_parent: None,
             barred: grant.barred(),
+            capped_from: None,
         };
         for action in [
             Action::Share,
