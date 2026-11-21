@@ -33,13 +33,18 @@ use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::process::{Command, Stdio};
 
+use mementum_crdt::anchors::HashKey;
+use mementum_crdt::ops::{self, Base, PlanContext};
 use mementum_crdt::{FRAGMENT, PageDoc};
 use yrs::updates::decoder::Decode;
+use yrs::updates::encoder::Encode;
 use yrs::{
     ClientID, Doc, GetString, OffsetKind, Options, ReadTxn, StateVector, Text, Transact, Update,
     Xml, XmlElementPrelim, XmlFragment, XmlOut, XmlTextPrelim,
 };
 
+#[path = "common/agent_ops.rs"]
+mod agent_ops;
 #[path = "common/live.rs"]
 mod live;
 #[path = "common/twins.rs"]
@@ -374,31 +379,105 @@ impl Served {
         match self.page.write_diff(&blocks) {
             Ok(written) if written.update == [0, 0] => Ok(false),
             Ok(written) => {
-                trace(&written.update);
-                if self.watched {
-                    twins::written_alike(
-                        "une écriture par différence",
-                        &mut self.compared,
-                        &state,
-                        &written.update,
+                self.written("l'écriture par différence", &state, written.update);
+                Ok(true)
+            }
+            Err(error) => {
+                self.page = self.reloaded();
+                Err(error.to_string())
+            }
+        }
+    }
+
+    /// Ce qu'une écriture du serveur a écrit (`update`, sur l'état d'avant `state`) : donné aux deux
+    /// yrs, puis son seul jeu de suppressions, la forme des retraits par identifiant que
+    /// l'écriture donne à yrs dans sa première transaction (Ruling R1281 : la seule mise à jour
+    /// donnée à yrs hors de `PageDoc::read`, donc hors de `twins::watching`) ; puis écrit au
+    /// journal, et la page rechargée de son journal est la page vivante.
+    fn written(&mut self, what: &str, state: &[u8], update: Vec<u8>) {
+        trace(&update);
+        if self.watched {
+            twins::written_alike(what, &mut self.compared, state, &update);
+            let deletions = Update::decode_v1(&update)
+                .expect("une écriture du serveur se relit")
+                .delete_set()
+                .encode_v1();
+            if deletions != [0] {
+                let mut only = vec![0];
+                only.extend(deletions);
+                twins::written_alike(
+                    &format!("{what}, ses seuls retraits"),
+                    &mut self.compared,
+                    state,
+                    &only,
+                );
+            }
+        }
+        self.journal.push(update);
+        let reloaded = self.reloaded();
+        assert_eq!(
+            reloaded.read_blocks(),
+            self.page.read_blocks(),
+            "{what} : les blocs de la page rechargée"
+        );
+        assert_eq!(
+            reloaded.revision(),
+            self.page.revision(),
+            "{what} : la révision de la page rechargée"
+        );
+        if self.stored {
+            self.page = reloaded;
+        }
+    }
+
+    /// Une écriture d'agent (Task S3, passe de fin du lot 5) : une liste d'opérations tirée au
+    /// hasard sur les blocs de la page, planifiée (`ops::plan`) puis écrite (`PageDoc::apply`),
+    /// comme l'acteur. Rechargée avant d'écrire dans les mêmes cas que [`Served::diff_write`]. Le
+    /// plan appliqué est le plan vérifié ; ce qui est écrit est donné aux deux yrs.
+    fn agent_write(&mut self, rng: &mut Rng) -> Result<bool, String> {
+        if self.stored || self.page.has_pending_deletions() {
+            self.page = self.reloaded();
+        }
+        let current = self.page.read_blocks();
+        let revision = self.page.revision();
+        let operations = agent_ops::random_ops(&current, &mut |n| rng.below(n));
+        let key = HashKey::new();
+        let mut commented = std::collections::HashSet::new();
+        let mut known = Vec::new();
+        agent_ops::ids(&current, &mut known);
+        if !known.is_empty() && rng.chance(30) {
+            commented.insert(known[rng.below(known.len() as u64) as usize].clone());
+        }
+        let ctx = PlanContext {
+            base: Base::Current,
+            key: &key,
+            revision: &revision,
+            forbid_external_media: rng.chance(50),
+            commented: (!commented.is_empty()).then_some(&commented),
+        };
+        let plan = match ops::plan(&current, &operations, &ctx) {
+            Ok(plan) => plan,
+            Err(refusal) => return Err(format!("opération refusée : {}", refusal.reason.code())),
+        };
+        let state = self.page.encode_state();
+        match self.page.apply(&plan) {
+            Ok(mut written) => {
+                let now = self.page.read_blocks();
+                if !plan.blocks().is_empty() {
+                    let planned = mementum_md::normalize(plan.blocks().to_vec());
+                    assert!(
+                        agent_ops::plan_written(&now, &planned),
+                        "l'écriture d'un agent : la page écrite est le plan, opérations \
+                         {operations:?} ; page {now:?} ; plan {planned:?}"
                     );
                 }
-                self.journal.push(written.update);
-                // L'écriture elle-même : la page rechargée de son journal est la page vivante.
-                let reloaded = self.reloaded();
-                assert_eq!(
-                    reloaded.read_blocks(),
-                    self.page.read_blocks(),
-                    "l'écriture par différence : les blocs de la page rechargée"
-                );
-                assert_eq!(
-                    reloaded.revision(),
-                    self.page.revision(),
-                    "l'écriture par différence : la révision de la page rechargée"
-                );
-                if self.stored {
-                    self.page = reloaded;
+                if let Some(blocks) = written.blocks.take() {
+                    assert_eq!(blocks, now, "l'écriture d'un agent : l'arbre écrit");
                 }
+                if written.update == [0, 0] {
+                    return Ok(false);
+                }
+                self.written("l'écriture d'un agent", &state, written.update);
                 Ok(true)
             }
             Err(error) => {
@@ -906,6 +985,8 @@ struct Tally {
     wrote: u64,
     refused: BTreeMap<String, u64>,
     honest_refused: BTreeMap<String, u64>,
+    /// Les écritures d'agent : écrites, sans effet, ou refusées par le plan (par code).
+    agents: BTreeMap<String, u64>,
     /// Les mises à jour gardées sur lesquelles les deux yrs ont été comparés.
     compared: twins::Compared,
 }
@@ -968,6 +1049,9 @@ fn retouch(blocks: &mut Vec<mementum_md::Block>, rng: &mut Rng) {
 fn case(seed: u64, stored: bool, tally: &mut Tally) {
     let mut rng = Rng(seed.wrapping_mul(0x2545_F491_4F6C_DD1D) ^ u64::from(stored));
     let mut writes = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1FF ^ u64::from(stored));
+    // Les écritures d'agent (passe de fin du lot 5) : un générateur à elles, comme les écritures par
+    // différence (R1299).
+    let mut agents = Rng(seed.wrapping_mul(0xD6E8_FEB8_6659_FD93) ^ 0xA6E7 ^ u64::from(stored));
     let mut served = Served::new(stored);
     // Comparer les deux yrs coûte quatre fois le cas lui-même : dans le passage ordinaire de la
     // suite, un cas sur quatre ; dans un essai élargi (`MEMENTUM_FUZZ_SEEDS`), tous.
@@ -1024,6 +1108,24 @@ fn case(seed: u64, stored: bool, tally: &mut Tally) {
         {
             let key: String = why.chars().take(110).collect();
             *tally.honest_refused.entry(key).or_default() += 1;
+        }
+        // Une écriture d'agent, un pas sur deux : un plan refusé est une réponse ordinaire, une
+        // écriture qui échoue après un plan vérifié est un échec.
+        if agents.chance(50) {
+            let key = match served.agent_write(&mut agents) {
+                Ok(true) => "écrite".to_string(),
+                Ok(false) => "sans effet".to_string(),
+                Err(why) if why.starts_with("opération refusée") => why,
+                Err(why) => {
+                    let key: String = why.chars().take(110).collect();
+                    *tally
+                        .honest_refused
+                        .entry(format!("agent : {key}"))
+                        .or_default() += 1;
+                    "échouée".to_string()
+                }
+            };
+            *tally.agents.entry(key).or_default() += 1;
         }
         served.hammer(&stages, &what);
         served.tail_check(&what);
@@ -1129,6 +1231,9 @@ fn child_cases() {
     for (why, n) in &tally.honest_refused {
         writeln!(out.lock(), "H {n} {why}").unwrap();
     }
+    for (why, n) in &tally.agents {
+        writeln!(out.lock(), "A {n} {why}").unwrap();
+    }
     out.lock().flush().unwrap();
 }
 
@@ -1141,6 +1246,7 @@ fn run(stored: bool, default_seeds: u64) {
     let (mut compared, mut retried) = (0u64, 0u64);
     let mut refused: BTreeMap<String, u64> = BTreeMap::new();
     let mut honest_refused: BTreeMap<String, u64> = BTreeMap::new();
+    let mut agents: BTreeMap<String, u64> = BTreeMap::new();
     let mut failures: Vec<String> = Vec::new();
     let mut from = first;
     let end = first + seeds;
@@ -1168,12 +1274,12 @@ fn run(stored: bool, default_seeds: u64) {
                     retried += numbers.next().unwrap_or(0);
                     finished = true;
                 }
-                "R" | "H" => {
+                "R" | "H" | "A" => {
                     let (n, why) = rest.split_once(' ').unwrap_or((rest, ""));
-                    let into = if kind == "R" {
-                        &mut refused
-                    } else {
-                        &mut honest_refused
+                    let into = match kind {
+                        "R" => &mut refused,
+                        "H" => &mut honest_refused,
+                        _ => &mut agents,
                     };
                     *into.entry(why.to_string()).or_default() += n.parse::<u64>().unwrap_or(0);
                 }
@@ -1208,6 +1314,9 @@ fn run(stored: bool, default_seeds: u64) {
     }
     for (why, n) in &honest_refused {
         println!("  HONNÊTE REFUSÉ {n:>5} : {why}");
+    }
+    for (why, n) in &agents {
+        println!("  agent {n:>7} : {why}");
     }
     for failure in failures.iter().take(20) {
         println!("ÉCHEC {failure}");
