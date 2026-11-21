@@ -143,6 +143,15 @@
 //!   une autre, identifiants des blocs gardés). Une écriture qui n'a rien
 //!   changé n'en ouvre pas ; rien n'est encodé à chaque frappe. Chaque version
 //!   coupée envoie la trame `versions` aux connexions de la page ;
+//! - **écritures d'agent** (Task S4 du lot 5, Rulings R1226, R1229, R1234, R1572) : une écriture
+//!   d'agent ([`Hub::edit_page`]) est une commande de l'acteur, qui lit les blocs et la révision,
+//!   fait le plan des opérations, écrit par différence, journalise avec le jeton, diffuse et rend
+//!   la révision de l'état écrit ; une opération destructrice d'un jeton qui remplace ce
+//!   qu'aucune version ne garde, et qu'un autre que ce jeton a écrit, coupe d'abord une version
+//!   `before_agent`, relue et écrite hors de l'acteur, entre deux commandes. `PUT /mmd` et la
+//!   restauration écrivent aussi par différence : une frappe concurrente dans un bloc qu'elles
+//!   ne touchent pas est gardée (R40, R188 levés en partie). Une tranche écrite par des jetons
+//!   seuls ne coupe pas de version `closing` (R1234, règle 3) ;
 //! - **pages écrites** (Ruling R907) : une fois le contenu d'une page écrit au journal (une
 //!   frappe, une écriture du serveur, une restauration), son acteur ajoute son identifiant à un
 //!   ensemble du hub, et ne fait rien d'autre pour l'index de recherche. L'indexeur le lit
@@ -170,6 +179,7 @@ use mementum_crdt::CrdtError;
 use mementum_store::StoreError;
 use yrs::{Doc, OffsetKind, Options};
 
+pub use actor::agent::{Edit, EditRefusal, Edited, OnConflict, PageRead};
 pub use actor::stored_page;
 pub use brake::{FREE_REFUSALS, MAX_BLOCK};
 pub use hub::{ConnInfo, Hub, PageEvent};
@@ -217,7 +227,15 @@ pub struct SyncConfig {
     /// Le premier temps pendant lequel un compte est freiné après trop de mises à jour refusées
     /// une fois appliquées (Ruling R725, module `brake`) ; il double à chaque refus qui suit.
     pub refusal_block: Duration,
+    /// Le budget d'une écriture d'agent ([`Hub::edit_page`]), en temps d'acteur estimé par
+    /// `mementum_crdt::diff_cost` : au-delà, elle est refusée (`EditRefusal::TooLong`), sans
+    /// repli sur une récriture complète (Task S2 du lot 5, R1294). Huit secondes par défaut, le
+    /// budget de `PUT /mmd` (Ruling R368).
+    pub agent_write_budget: Duration,
 }
+
+/// Le budget par défaut d'une écriture d'agent ([`SyncConfig::agent_write_budget`]).
+pub const AGENT_WRITE_BUDGET: Duration = Duration::from_secs(8);
 
 /// Intervalle par défaut des versions ([`SyncConfig::version_every`]) : dix
 /// minutes (Ruling R135). Au plus dix minutes de frappe entre deux versions.
@@ -263,6 +281,7 @@ impl Default for SyncConfig {
             keepalive_after: KEEPALIVE_AFTER,
             version_every: VERSION_EVERY,
             refusal_block: Duration::from_secs(2),
+            agent_write_budget: AGENT_WRITE_BUDGET,
         }
     }
 }

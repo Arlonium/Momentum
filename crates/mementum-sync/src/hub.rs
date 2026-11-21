@@ -36,6 +36,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use futures::{Sink, SinkExt, Stream, StreamExt};
+use mementum_crdt::anchors::{HashKey, hashes};
 use mementum_md::Block;
 use mementum_schema::SCHEMA_VERSION;
 use mementum_store::Store;
@@ -43,7 +44,9 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Notify, mpsc, oneshot};
 use uuid::Uuid;
 
+use crate::actor::agent::{Edit, EditRefusal, Edited, PageRead, Step, VersionGate, Versioned};
 use crate::actor::{self, Broadcast, Command, Commands, Event, Joined, Membership, Outcome};
+use crate::long_work::off_the_engine;
 use crate::protocol;
 use crate::{SyncConfig, SyncError};
 
@@ -146,6 +149,12 @@ pub struct Hub {
     /// Les états complets encodés par les acteurs depuis le démarrage
     /// ([`Hub::state_encodings`]).
     state_encodings: AtomicU64,
+    /// La clé des empreintes des blocs, tirée au démarrage du processus (Ruling R1226) : une
+    /// seule pour tous les acteurs, et pour les routes qui gardent les empreintes servies.
+    key: HashKey,
+    /// La barrière des versions `before_agent`, que seuls les tests tiennent
+    /// ([`Hub::hold_agent_versions`]).
+    versions: Arc<VersionGate>,
     /// Le hub lui-même, sans le garder en vie : les acteurs s'en servent pour
     /// quitter le registre.
     me: Weak<Hub>,
@@ -172,6 +181,8 @@ impl Hub {
             touched: Mutex::new(HashSet::new()),
             touched_wake: Notify::new(),
             state_encodings: AtomicU64::new(0),
+            key: HashKey::new(),
+            versions: Arc::new(VersionGate::default()),
             me: me.clone(),
         })
     }
@@ -208,6 +219,113 @@ impl Hub {
     pub async fn read_blocks(&self, node_id: Uuid) -> Result<Vec<Block>, SyncError> {
         self.block_reads.fetch_add(1, Ordering::Relaxed);
         self.call(node_id, |reply| Command::Read { reply }).await?
+    }
+
+    /// Les blocs de la page et sa révision, sortis de la même commande de son acteur (Ruling
+    /// R1226 : une frappe ne passe jamais entre les deux), avec les empreintes de ces blocs sous
+    /// la clé du hub ([`Hub::hash_key`]), calculées hors de l'acteur. Comptée comme une lecture
+    /// des blocs ([`Hub::block_reads`]).
+    pub async fn read_page(&self, node_id: Uuid) -> Result<PageRead, SyncError> {
+        self.block_reads.fetch_add(1, Ordering::Relaxed);
+        let (blocks, revision) = self
+            .call(node_id, |reply| Command::ReadPage { reply })
+            .await??;
+        let hashes = Arc::new(off_the_engine(|| hashes(&blocks, &self.key)));
+        Ok(PageRead {
+            blocks,
+            revision,
+            hashes,
+        })
+    }
+
+    /// La clé des empreintes des blocs du processus (Ruling R1226) : celle des empreintes que
+    /// rendent [`Hub::read_page`] et [`Hub::edit_page`], et que `Edit::base` doit porter.
+    pub fn hash_key(&self) -> &HashKey {
+        &self.key
+    }
+
+    /// Une écriture d'agent dans la page (Rulings R1229, R1231, R1234, R1572), menée par son
+    /// acteur : une commande sans version `before_agent` (lecture, plan, conflit, écriture,
+    /// journal, diffusion, révision rendue) ; deux avec, la version relue puis écrite entre elles
+    /// par une tâche hors de l'acteur, qui sert les frappes pendant ce temps ; trois quand la page
+    /// a changé dans les blocs touchés pendant la première version, qui est alors recoupée une
+    /// fois. Un seul appel pour la route. La révision rendue est celle de l'état écrit, sortie de
+    /// la commande qui écrit. Un refus n'a rien écrit.
+    pub async fn edit_page(&self, node_id: Uuid, edit: Edit) -> Result<Edited, EditRefusal> {
+        let edit = Arc::new(edit);
+        let mut then: Option<Versioned> = None;
+        loop {
+            let step = self
+                .call(node_id, |reply| Command::Edit {
+                    edit: edit.clone(),
+                    then: then.clone(),
+                    reply,
+                })
+                .await?;
+            match step {
+                Step::Done(written) => {
+                    let written = written?;
+                    let hashes = Arc::new(off_the_engine(|| hashes(&written.blocks, &self.key)));
+                    return Ok(Edited {
+                        revision: written.revision,
+                        before: written.before,
+                        touched: written.touched,
+                        blocks: written.blocks,
+                        hashes,
+                        version: then.map(|versioned| versioned.version),
+                    });
+                }
+                Step::Version {
+                    written,
+                    encoded,
+                    encoded_revision,
+                } => {
+                    let Ok(Ok(version)) = written.await else {
+                        return Err(EditRefusal::VersionRefused);
+                    };
+                    let cuts = then.as_ref().map_or(0, |versioned| versioned.cuts) + 1;
+                    then = Some(Versioned {
+                        encoded,
+                        encoded_revision,
+                        cuts,
+                        version,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Combien de connexions qui peuvent écrire sont ouvertes sur la page (Ruling R1233), sans la
+    /// charger : 0 sans acteur vivant, et aucun acteur n'est lancé.
+    pub async fn writers(&self, node_id: Uuid) -> usize {
+        let Some(commands) = self.live(node_id) else {
+            return 0;
+        };
+        let (reply, answer) = oneshot::channel();
+        if commands.send(Command::Writers { reply }).is_err() {
+            return 0;
+        }
+        // Une réponse lâchée : l'acteur s'est arrêté, ses connexions avec lui.
+        answer.await.unwrap_or(0)
+    }
+
+    /// Retient toute version `before_agent` avant sa relecture, tant que la garde vit : pour les
+    /// tests, qui prouvent ainsi, sans minutage, ce que l'acteur sert pendant qu'elle s'écrit.
+    /// Panique si les versions sont déjà retenues.
+    #[doc(hidden)]
+    pub fn hold_agent_versions(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.versions.hold()
+    }
+
+    /// Combien de versions `before_agent` attendent la garde de [`Hub::hold_agent_versions`].
+    #[doc(hidden)]
+    pub fn agent_versions_waiting(&self) -> u64 {
+        self.versions.waiting()
+    }
+
+    /// La barrière des versions `before_agent`, pour les acteurs.
+    pub(crate) fn version_gate(&self) -> Arc<VersionGate> {
+        self.versions.clone()
     }
 
     /// Combien de listes de blocs ont été demandées à un acteur ([`Hub::read_blocks`]) depuis
@@ -325,6 +443,12 @@ impl Hub {
     /// Remplace les blocs de la page, au nom de `actor` (le compte qui demande
     /// l'écriture ; `None` : inconnu, ou le serveur). L'écriture est persistée,
     /// puis diffusée à toutes les connexions.
+    ///
+    /// Task S4 du lot 5 (R40 levé en partie) : elle se fait **par différence**
+    /// (`PageDoc::write_diff`) : un bloc sans identifiant reçoit celui du bloc courant qui lui
+    /// correspond, et seuls les blocs qui diffèrent de la page sont écrits ; une frappe
+    /// concurrente dans un bloc qu'elle ne touche pas est gardée. Des blocs qui ne changent rien
+    /// n'écrivent rien (ni journal, ni diffusion).
     pub async fn write_blocks(
         &self,
         node_id: Uuid,
@@ -345,6 +469,8 @@ impl Hub {
     /// version par-dessus le contenu, avec leurs identifiants, comme une
     /// écriture du serveur : persistée, puis diffusée à toutes les connexions,
     /// qui reçoivent aussi la trame `versions`. Rien ne passe entre les deux.
+    /// L'écriture se fait par différence (Task S4 du lot 5, R188 levé en partie) : une frappe
+    /// concurrente dans un bloc que la restauration ne touche pas est gardée.
     ///
     /// `Err(NotFound)` si la version n'est pas de cette page, ou n'existe pas
     /// (comme pour une page inconnue) ; `Err(Crdt(Decode))` si son état gardé
@@ -768,6 +894,7 @@ impl Hub {
             generation,
             self.store.clone(),
             self.cfg,
+            self.key.clone(),
             self.me.clone(),
         );
         actors.insert(

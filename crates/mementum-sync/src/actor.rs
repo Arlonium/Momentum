@@ -33,9 +33,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Weak};
 
-use mementum_crdt::{Applied, Awaited, CrdtError, PageDoc, Refused};
+use mementum_crdt::anchors::HashKey;
+use mementum_crdt::{Applied, Awaited, PageDoc, Refused};
 use mementum_md::Block;
-use mementum_store::{DocState, Store, StoreError};
+use mementum_store::{DocState, Store, StoreError, Writer};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, WeakUnboundedSender};
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tracing::instrument::WithSubscriber;
@@ -51,8 +52,10 @@ use crate::presence::{Holders, Holding};
 use crate::protocol::{self, ClientMessage, EMPTY_UPDATE, RosterLine};
 use crate::{PageEvent, SyncConfig, SyncError, presence};
 
+pub(crate) mod agent;
 mod history;
 
+use agent::{Edit, Step, Versioned, Versioning};
 use history::{History, Slice, Watch};
 
 /// Identifiant d'une connexion, propre à l'acteur.
@@ -88,16 +91,6 @@ const MAX_HELD_UPDATES: usize = 32;
 /// Octets qu'une connexion peut retenir ainsi, toutes ses mises à jour
 /// retenues comptées ensemble : au-delà, elle est fermée.
 const MAX_HELD_BYTES: usize = 1 << 20;
-
-/// Ce qu'une écriture du serveur fait des identifiants des blocs qu'elle écrit.
-#[derive(Debug, Clone, Copy)]
-enum Ids {
-    /// `PUT /mmd` : un bloc sans identifiant reçoit celui du bloc courant qui lui correspond
-    /// (`PageDoc::rewrite_blocks`, Ruling R201). Le MMD lu ne porte pas d'ancres.
-    Matched,
-    /// Une restauration : les blocs de la version portent les leurs, écrits tels quels.
-    AsGiven,
-}
 
 /// Message diffusé aux connexions de la page.
 pub(crate) struct Broadcast {
@@ -162,6 +155,18 @@ pub(crate) enum Command {
     Read {
         reply: oneshot::Sender<Result<Vec<Block>, SyncError>>,
     },
+    /// Lire les blocs et la révision, ensemble (Ruling R1226).
+    ReadPage {
+        reply: oneshot::Sender<Result<(Vec<Block>, String), SyncError>>,
+    },
+    /// Une écriture d'agent (Ruling R1572) ; `then` : la version déjà coupée pour elle.
+    Edit {
+        edit: Arc<Edit>,
+        then: Option<Versioned>,
+        reply: oneshot::Sender<Step>,
+    },
+    /// Compter les connexions qui peuvent écrire (Ruling R1233).
+    Writers { reply: oneshot::Sender<usize> },
     /// Dire si un bloc porte cet identifiant, sans lire la liste des blocs (Ruling R206).
     HasBlock {
         id: String,
@@ -216,6 +221,12 @@ impl Command {
             Command::Read { reply } => {
                 let _ = reply.send(Err(error));
             }
+            Command::ReadPage { reply } => {
+                let _ = reply.send(Err(error));
+            }
+            Command::Edit { reply, .. } => {
+                let _ = reply.send(Step::Done(Err(error.into())));
+            }
             Command::HasBlock { reply, .. } => {
                 let _ = reply.send(Err(error));
             }
@@ -231,7 +242,8 @@ impl Command {
             | Command::KickUser { .. }
             | Command::Forget { .. }
             | Command::Shutdown { .. }
-            | Command::Compacted { .. } => {}
+            | Command::Compacted { .. }
+            | Command::Writers { .. } => {}
         }
     }
 }
@@ -345,6 +357,7 @@ pub(crate) fn spawn(
     generation: u64,
     store: Store,
     cfg: SyncConfig,
+    key: HashKey,
     hub: Weak<Hub>,
 ) -> Commands {
     let (commands, rx) = mpsc::unbounded_channel();
@@ -358,6 +371,7 @@ pub(crate) fn spawn(
         },
         store,
         cfg,
+        key,
         rx,
     ));
     commands
@@ -389,11 +403,17 @@ impl Identity {
     }
 }
 
-async fn run(id: Identity, store: Store, cfg: SyncConfig, mut rx: UnboundedReceiver<Command>) {
+async fn run(
+    id: Identity,
+    store: Store,
+    cfg: SyncConfig,
+    key: HashKey,
+    mut rx: UnboundedReceiver<Command>,
+) {
     match load(&store, id.node_id).await {
         Ok(loaded) => {
             let slice = Slice::read(&store, id.node_id, cfg.version_every, loaded.created).await;
-            let mut actor = Actor::new(id, store, cfg, loaded, slice);
+            let mut actor = Actor::new(id, store, cfg, key, loaded, slice);
             // Un journal qui porte une grosse suppression (écrite avant une
             // panne, ou avant ce réglage) est compacté dès le chargement : il
             // ne coûte qu'une fois.
@@ -806,10 +826,22 @@ struct Actor {
     /// tâche à part pendant que l'acteur sert la page. Une seule à la fois ; attendue avant que
     /// l'acteur quitte le registre.
     compaction: Option<tokio::task::JoinHandle<()>>,
+    /// La clé des empreintes des blocs, celle du hub (Ruling R1226).
+    key: HashKey,
+    /// La version `before_agent` en vol (Ruling R1572) : relue puis écrite par une tâche à part ;
+    /// une seule à la fois, attendue avant que l'acteur quitte le registre.
+    versioning: Option<Versioning>,
 }
 
 impl Actor {
-    fn new(id: Identity, store: Store, cfg: SyncConfig, loaded: Loaded, slice: Slice) -> Actor {
+    fn new(
+        id: Identity,
+        store: Store,
+        cfg: SyncConfig,
+        key: HashKey,
+        loaded: Loaded,
+        slice: Slice,
+    ) -> Actor {
         let awareness = Awareness::new(crate::utf16_doc());
         let (events, _) = broadcast::channel(cfg.broadcast_capacity.max(1));
         Actor {
@@ -828,6 +860,8 @@ impl Actor {
             next_conn: 0,
             roster: Vec::new(),
             compaction: None,
+            key,
+            versioning: None,
         }
     }
 
@@ -859,6 +893,9 @@ impl Actor {
         // un acteur neuf ne relit donc jamais la page pendant qu'elle s'écrit, et le serveur ne
         // ferme pas la base sous elle (`Hub::shutdown`).
         self.compaction_finished().await;
+        // Ruling R1572 b : de même la version d'avant un agent en vol ; ce qu'elle n'a pas pu
+        // garder revient dans la tranche, que la version de fin garde s'il le faut.
+        self.versioning_finished().await;
         // Ruling R135 : avant de disparaître, la version `closing` des écritures
         // pas encore versionnées. L'acteur est encore au registre : ce qui arrive
         // pendant ce temps attend dans sa boîte, puis repart vers un acteur neuf,
@@ -925,6 +962,21 @@ impl Actor {
             }
             Command::HasBlock { id, reply } => {
                 let _ = reply.send(Ok(self.page.has_block(&id)));
+            }
+            Command::ReadPage { reply } => {
+                let _ = reply.send(Ok(self.read_page()));
+            }
+            Command::Edit { edit, then, reply } => {
+                let step = self.edit(&edit, then).await?;
+                let wrote = matches!(&step, Step::Done(Ok(written)) if written.wrote);
+                // Comme une écriture du serveur : la réponse, puis les mises à jour retenues.
+                let _ = reply.send(step);
+                if wrote {
+                    self.release_held().await?;
+                }
+            }
+            Command::Writers { reply } => {
+                let _ = reply.send(self.writers());
             }
             Command::Write {
                 blocks,
@@ -1383,11 +1435,15 @@ impl Actor {
         let mut updates: Vec<&[u8]> = vec![&read];
         updates.extend(carried.as_deref());
         updates.extend(fix.as_deref());
-        if let Err(error) = self.persist(&updates, actor).await {
+        let writer = Writer {
+            account: actor,
+            token: None,
+        };
+        if let Err(error) = self.persist(&updates, &writer).await {
             self.store_failed(&error).await?;
             return Ok(false);
         }
-        self.wrote(changes, actor);
+        self.wrote(changes, &writer);
         self.relay(conn, &read, carried.as_deref(), fix.as_deref());
         self.compact_if_due();
         Ok(true)
@@ -1535,39 +1591,48 @@ impl Actor {
         blocks: Vec<Block>,
         actor: Option<Uuid>,
     ) -> Result<Result<(), SyncError>, Broken> {
-        self.server_write(blocks, actor, History::Slice, Ids::Matched)
-            .await
+        self.server_write(blocks, actor, History::Slice).await
     }
 
     /// Une écriture du serveur, au nom de `actor` : `PUT /mmd`, ou une
-    /// restauration ; `history` dit ce qu'elle fait de l'historique, `ids` des
-    /// identifiants des blocs.
+    /// restauration ; `history` dit ce qu'elle fait de l'historique.
+    ///
+    /// Task S4 du lot 5 (R1227 ; R40 et R188 levés en partie) : elle s'écrit **par différence**
+    /// (`PageDoc::write_diff`) : un bloc sans identifiant reçoit celui du bloc courant qui lui
+    /// correspond (`keep_ids`, R201 : le MMD de `PUT /mmd`), un bloc qui en porte un le garde
+    /// (une restauration), et seuls les blocs qui diffèrent de la page sont écrits. Une frappe
+    /// concurrente dans un bloc que l'écriture ne touche pas est gardée ; ce qu'elle perd encore
+    /// est la limite LA-a du plan du lot 5. Une écriture qui ne change rien n'écrit rien : ni
+    /// journal, ni diffusion, ni tranche.
     async fn server_write(
         &mut self,
         blocks: Vec<Block>,
         actor: Option<Uuid>,
         history: History,
-        ids: Ids,
     ) -> Result<Result<(), SyncError>, Broken> {
         self.version_if_due().await;
         let changes = self.watch.changes();
         // Refusée sans rien écrire : le document reste intact.
-        let written = off_the_engine(|| match ids {
-            Ids::Matched => self.page.rewrite_blocks(&blocks),
-            Ids::AsGiven => self.page.write_blocks(&blocks),
-        });
+        let written = off_the_engine(|| self.page.write_diff(&blocks));
         let update = match written {
-            Ok(update) => update,
-            // Ruling R389 : le retrait est fait dans le document vivant, pas au journal.
-            Err(e @ CrdtError::HalfWritten) => {
-                tracing::error!(node_id = %self.id.node_id, "écriture complète faite à moitié : le document est rechargé");
-                self.reload().await?;
+            Ok(written) if written.update == protocol::EMPTY_UPDATE => return Ok(Ok(())),
+            Ok(written) => written.update,
+            Err(e) => {
+                // Ruling R389 : une erreur levée après la première transaction (`HalfWritten`) :
+                // le retrait est fait dans le document vivant, pas au journal.
+                if self.watch.changed_since(changes) {
+                    tracing::error!(node_id = %self.id.node_id, %e, "écriture complète faite à moitié : le document est rechargé");
+                    self.reload().await?;
+                }
                 return Ok(Err(e.into()));
             }
-            Err(e) => return Ok(Err(e.into())),
+        };
+        let writer = Writer {
+            account: actor,
+            token: None,
         };
         let written = match history {
-            History::Slice => self.persist(&[&update], actor).await,
+            History::Slice => self.persist(&[&update], &writer).await,
             History::Kept(version) => self.persist_restore(&update, actor, version).await,
         };
         if let Err(error) = written {
@@ -1575,7 +1640,7 @@ impl Actor {
             return Ok(Err(error.into()));
         }
         match history {
-            History::Slice => self.wrote(changes, actor),
+            History::Slice => self.wrote(changes, &writer),
             History::Kept(_) => self.wrote_kept(),
         }
         self.broadcast(None, protocol::update(&update));
@@ -1602,11 +1667,11 @@ impl Actor {
     }
 
     /// Écrit des mises à jour au journal, dans l'ordre, toutes ou aucune, au
-    /// nom du compte `actor`.
-    async fn persist(&mut self, updates: &[&[u8]], actor: Option<Uuid>) -> Result<(), StoreError> {
+    /// nom de `writer` : son compte, et le jeton par lequel il écrit (Ruling R1234).
+    async fn persist(&mut self, updates: &[&[u8]], writer: &Writer) -> Result<(), StoreError> {
         self.last_seq = self
             .store
-            .append_updates(self.id.node_id, updates, actor)
+            .append_updates_by(self.id.node_id, updates, writer)
             .await?;
         self.since_snapshot += updates.len() as u64;
         self.name_written_page();
@@ -1915,7 +1980,7 @@ mod tests {
             hub: Weak::new(),
             me: commands.downgrade(),
         };
-        let actor = Actor::new(id, store, cfg, loaded, Slice::default());
+        let actor = Actor::new(id, store, cfg, HashKey::new(), loaded, Slice::default());
         (actor, commands, rx)
     }
 
@@ -1962,7 +2027,7 @@ mod tests {
         let (mut actor, _commands, _mailbox) = actor_with(&dir, cfg).await;
         let node = actor.id.node_id;
         // Saine : la compaction a lieu.
-        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.persist(&[&[0, 0]], &Writer::default()).await.unwrap();
         actor.compact_if_due();
         actor.compaction_finished().await;
         let state = actor.store.load_doc(node).await.unwrap();
@@ -1975,7 +2040,7 @@ mod tests {
             PageDoc::check_state(&spoiled).is_err(),
             "l'état abîmé se relit"
         );
-        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.persist(&[&[0, 0]], &Writer::default()).await.unwrap();
         actor.compact_if_due();
         actor.compaction_finished().await;
         let state = actor.store.load_doc(node).await.unwrap();
@@ -2010,7 +2075,7 @@ mod tests {
         };
         let (mut actor, commands, mailbox) = actor_on(&dir, cfg, slow).await;
         let node = actor.id.node_id;
-        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.persist(&[&[0, 0]], &Writer::default()).await.unwrap();
         actor.compact_if_due();
         assert!(actor.compaction.is_some(), "aucune compaction lancée");
         // Une autre est due pendant que la première s'écrit : elle attend.
@@ -2024,7 +2089,7 @@ mod tests {
         let state = actor.store.load_doc(node).await.unwrap();
         assert_eq!(state.snapshot.as_ref().map(|(seq, _)| *seq), Some(1));
         // L'écriture suivante la lance ; l'acteur qui s'arrête l'attend.
-        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.persist(&[&[0, 0]], &Writer::default()).await.unwrap();
         actor.compact_if_due();
         assert_eq!(actor.since_snapshot, 0);
         drop(commands);
@@ -2056,7 +2121,7 @@ mod tests {
         };
         let (mut actor, _commands, _mailbox) =
             actor_on(&dir, cfg, mementum_store::StoreOptions::default()).await;
-        actor.persist(&[&[0, 0]], None).await.unwrap();
+        actor.persist(&[&[0, 0]], &Writer::default()).await.unwrap();
         let before = PageDoc::state_checks_on_this_thread();
         actor.compact_if_due();
         actor.compaction_finished().await;
@@ -2292,12 +2357,186 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let (mut actor, _commands, _mailbox) = actor(&dir).await;
             watch.arm();
-            for (text, ids) in [("Un\n", Ids::AsGiven), ("Deux\n", Ids::Matched)] {
+            for text in ["Un\n", "Deux\n"] {
                 let blocks = mementum_md::parse(text).unwrap();
-                let written = actor.server_write(blocks, None, History::Slice, ids).await;
+                let written = actor.server_write(blocks, None, History::Slice).await;
                 assert!(written.ok().unwrap().is_ok());
             }
             assert_eq!(watch.seen(), 2);
+        });
+    }
+
+    /// Une opération destructrice du jeton `token` sur le premier bloc de la page : elle remplace
+    /// ce bloc, sur la révision courante.
+    fn destructive_edit(actor: &Actor, token: Uuid) -> Edit {
+        let (blocks, revision) = actor.read_page();
+        Edit {
+            ops: vec![mementum_crdt::ops::Operation::ReplaceBlock {
+                anchor: blocks[0].id.clone(),
+                blocks: mementum_md::parse("Remplacé\n").unwrap(),
+                allow_deleting_content: false,
+            }],
+            base: Some((revision, None)),
+            writer: Writer {
+                account: None,
+                token: Some(token),
+            },
+            ..Edit::default()
+        }
+    }
+
+    /// Un acteur dont la page porte une frappe d'une connexion (pas d'un jeton) : la première
+    /// opération destructrice d'un jeton y coupe une version `before_agent`.
+    async fn actor_with_a_human_keystroke(
+        dir: &tempfile::TempDir,
+        options: mementum_store::StoreOptions,
+    ) -> (Actor, Commands, UnboundedReceiver<Command>) {
+        let (mut actor, commands, mailbox) = actor_on(dir, SyncConfig::default(), options).await;
+        let (keystroke, _) = two_keystrokes(&actor.page, 77);
+        assert!(matches!(
+            actor.client_update(1, None, &keystroke).await,
+            Ok(true)
+        ));
+        (actor, commands, mailbox)
+    }
+
+    /// R1234, règle 4 (R816) : la version `before_agent` devient la seule copie de ce que
+    /// l'opération remplace ; un état qui ne se relit pas n'est pas écrit, et l'opération non plus.
+    /// La tranche revient telle qu'elle était.
+    #[tokio::test]
+    async fn an_unreadable_state_refuses_the_destructive_write() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _commands, _mailbox) = actor(&dir).await;
+        let node = actor.id.node_id;
+        // L'écriture qui abîme l'état compte comme celle d'une personne : une frappe d'un onglet
+        // ne s'applique plus à une page dont yrs ne relit pas l'état (R815).
+        let changes = actor.watch.changes();
+        spoil(&actor.page);
+        actor.wrote(changes, &Writer::default());
+        let journal = actor.store.load_doc(node).await.unwrap();
+        let token = Uuid::now_v7();
+        let edit = destructive_edit(&actor, token);
+        let Ok(Step::Version { written, .. }) = actor.edit(&edit, None).await else {
+            panic!("aucune version coupée");
+        };
+        assert!(written.await.unwrap().is_err(), "la version a été écrite");
+        actor.versioning_finished().await;
+        assert!(actor.store.list_versions(node).await.unwrap().is_empty());
+        assert_eq!(actor.store.load_doc(node).await.unwrap(), journal);
+        assert!(!actor.slice.kept());
+        assert!(
+            actor.slice.written_by_others(token),
+            "la tranche n'est pas revenue"
+        );
+    }
+
+    /// R1257, R859 : la relecture de l'état d'une version `before_agent` (112 ms pour 10 000
+    /// blocs) ne se fait jamais sur le fil de l'acteur ; elle a bien lieu, ailleurs, puisque la
+    /// version s'écrit.
+    #[tokio::test]
+    async fn the_before_agent_version_is_read_again_off_the_actor() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _commands, _mailbox) =
+            actor_with_a_human_keystroke(&dir, mementum_store::StoreOptions::default()).await;
+        let edit = destructive_edit(&actor, Uuid::now_v7());
+        let before = PageDoc::state_checks_on_this_thread();
+        let Ok(Step::Version { written, .. }) = actor.edit(&edit, None).await else {
+            panic!("aucune version coupée");
+        };
+        assert!(written.await.unwrap().is_ok());
+        actor.versioning_finished().await;
+        assert_eq!(
+            PageDoc::state_checks_on_this_thread(),
+            before,
+            "l'état a été relu sur le fil de l'acteur"
+        );
+        let kept = actor.store.list_versions(actor.id.node_id).await.unwrap();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].reason, VersionReason::BeforeAgent);
+    }
+
+    /// R1572 b : l'acteur qui s'arrête attend la version `before_agent` en vol avant de quitter le
+    /// registre (comme la compaction, R826) : sur un disque lent, la version est écrite quand
+    /// l'acteur a fini.
+    #[tokio::test]
+    async fn an_actor_stopping_waits_for_its_before_agent_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let slow = mementum_store::StoreOptions {
+            write_delay: std::time::Duration::from_millis(300),
+            ..mementum_store::StoreOptions::default()
+        };
+        let (mut actor, commands, mailbox) = actor_with_a_human_keystroke(&dir, slow).await;
+        let node = actor.id.node_id;
+        let edit = destructive_edit(&actor, Uuid::now_v7());
+        let Ok(Step::Version {
+            written: _pending, ..
+        }) = actor.edit(&edit, None).await
+        else {
+            panic!("aucune version coupée");
+        };
+        drop(commands);
+        actor.serve(mailbox).await;
+        let kept = Store::open(&dir.path().join("mementum.db"))
+            .await
+            .unwrap()
+            .list_versions(node)
+            .await
+            .unwrap();
+        assert_eq!(
+            kept.iter().map(|v| v.reason).collect::<Vec<_>>(),
+            [VersionReason::BeforeAgent],
+            "l'acteur s'est arrêté avant la fin de la version"
+        );
+    }
+
+    /// R863 : une écriture d'agent (la lecture et le plan, l'écriture, la relecture des blocs
+    /// écrits) rend son fil au moteur ; de même la seconde commande d'une opération destructrice.
+    #[test]
+    fn engine_stays_free_during_an_agent_edit() {
+        engine_stays_free("agent", |watch| async move {
+            let dir = tempfile::tempdir().unwrap();
+            let (mut actor, _commands, _mailbox) =
+                actor_with_a_human_keystroke(&dir, mementum_store::StoreOptions::default()).await;
+            let (_, revision) = actor.read_page();
+            let insert = Edit {
+                ops: vec![mementum_crdt::ops::Operation::Insert {
+                    at: mementum_crdt::ops::Place::End,
+                    blocks: mementum_md::parse("Deux\n").unwrap(),
+                }],
+                base: Some((revision, None)),
+                ..Edit::default()
+            };
+            watch.arm();
+            assert!(matches!(
+                actor.edit(&insert, None).await,
+                Ok(Step::Done(Ok(_)))
+            ));
+            assert_eq!(watch.seen(), 4, "lecture, plan, écriture, relecture");
+            let edit = destructive_edit(&actor, Uuid::now_v7());
+            let Ok(Step::Version {
+                written,
+                encoded,
+                encoded_revision,
+            }) = actor.edit(&edit, None).await
+            else {
+                panic!("aucune version coupée");
+            };
+            let version = written.await.unwrap().unwrap();
+            let then = Versioned {
+                encoded,
+                encoded_revision,
+                cuts: 1,
+                version,
+            };
+            assert!(matches!(
+                actor.edit(&edit, Some(then)).await,
+                Ok(Step::Done(Ok(_)))
+            ));
+            assert_eq!(
+                watch.seen(),
+                4 + 1 + 3 + 4,
+                "la révision lue par le test, puis deux commandes"
+            );
         });
     }
 

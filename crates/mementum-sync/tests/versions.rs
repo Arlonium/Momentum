@@ -848,48 +848,97 @@ async fn slice_older_than_the_machine_is_due_at_once() {
     assert_eq!(authors(&kept[0]), [alice]);
 }
 
-/// La limite de la restauration, telle qu'elle est (Ruling R188) : restaurer remplace tout le
-/// contenu, comme `PUT /mmd`. Une frappe partie avant la restauration, sur le contenu remplacé,
-/// arrive dans des nœuds supprimés : elle n'est ni dans la page, ni dans aucune version.
-/// L'écriture par différence du lot 5 (R40) servira aux deux. Ce test le dit, et changera de
-/// sens ce jour-là.
-#[tokio::test]
-async fn typing_concurrent_with_a_restore_is_lost() {
-    let _clock = StoppedClock::start();
-    let f = Fixture::new(config()).await;
-    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
-    f.hub
-        .write_blocks(f.page, parse("Un\n").unwrap(), Some(alice))
-        .await
-        .unwrap();
-    actor_stops(&f).await;
-    let first = versions(&f).await[0].id;
-    let tab = connect(&f, bob).await;
-    types(&tab, " deux").await;
+mod known_limits {
+    use super::*;
+    use common::limit::known_limit;
 
-    // Une frappe faite sur le contenu d'avant, encore en route quand la restauration passe.
-    let offline = detached(&tab);
-    let typed = {
-        let content = first_content(&offline);
-        let mut txn = offline.transact_mut();
-        let Some(XmlOut::Text(text)) = content.get(&txn, 0) else {
-            panic!("pas de texte dans le premier bloc");
+    /// La limite de la restauration, telle qu'elle est depuis la Task S4 du lot 5 (R188 levé en
+    /// partie, limite LA-a) : restaurer écrit par différence, comme `PUT /mmd` ; une frappe en
+    /// route dans un bloc que la restauration ne touche pas est gardée, comme une frappe dans le
+    /// texte que le préfixe et le suffixe remplacent (R1283). Elle n'est perdue que dans un bloc
+    /// dont le contenu est récrit en entier : ici, son type change (un titre redevient un
+    /// paragraphe), si bien que son nœud de contenu est recréé, et la frappe arrive dans le nœud
+    /// supprimé : elle n'est ni dans la page, ni dans aucune version.
+    #[tokio::test]
+    async fn typing_concurrent_with_a_restore_is_lost() {
+        let _clock = StoppedClock::start();
+        let f = Fixture::new(config()).await;
+        let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+        f.hub
+            .write_blocks(f.page, parse("Un\n\nDeux\n").unwrap(), Some(alice))
+            .await
+            .unwrap();
+        actor_stops(&f).await;
+        let first = versions(&f).await[0].id;
+        // Le premier bloc devient un titre : son nœud de contenu est recréé, à son identifiant.
+        let mut blocks = f.hub.read_blocks(f.page).await.unwrap();
+        blocks[0].kind = "heading".into();
+        f.hub
+            .write_blocks(f.page, blocks, Some(alice))
+            .await
+            .unwrap();
+        let tab = connect(&f, bob).await;
+        until("le client n'a pas reçu le titre", async || {
+            tab.blocks().first().is_some_and(|b| b.kind == "heading")
+        })
+        .await;
+
+        // Une frappe dans chaque bloc, faite sur le contenu d'avant, encore en route quand la
+        // restauration passe.
+        let offline = detached(&tab);
+        let typed = {
+            let fragment = offline.get_or_insert_xml_fragment(mementum_crdt::FRAGMENT);
+            let mut txn = offline.transact_mut();
+            let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+                panic!("pas de racine blockGroup");
+            };
+            for (rank, typed) in [(0, " trois"), (1, " quatre")] {
+                let Some(XmlOut::Element(container)) = group.get(&txn, rank) else {
+                    panic!("pas de bloc de rang {rank}");
+                };
+                let Some(XmlOut::Element(content)) = container.get(&txn, 0) else {
+                    panic!("pas de nœud de contenu");
+                };
+                let Some(XmlOut::Text(text)) = content.get(&txn, 0) else {
+                    panic!("pas de texte dans le bloc de rang {rank}");
+                };
+                let end = text.len(&txn);
+                text.insert(&mut txn, end, typed);
+            }
+            txn.encode_update_v1()
         };
-        let end = text.len(&txn);
-        text.insert(&mut txn, end, " trois");
-        txn.encode_update_v1()
-    };
-    f.hub
-        .restore_version(f.page, first, Some(alice))
-        .await
-        .unwrap();
-    heard(&tab, || tab.send_update(&typed)).await;
+        f.hub
+            .restore_version(f.page, first, Some(alice))
+            .await
+            .unwrap();
+        heard(&tab, || tab.send_update(&typed)).await;
 
-    assert_eq!(live_text(&f).await, "Un", "la frappe en route est perdue");
-    for version in versions(&f).await {
+        let live = live_text(&f).await;
         assert!(
-            !version_text(&f, version.id).await.contains("trois"),
-            "elle n'est dans aucune version"
+            live.ends_with("Deux quatre"),
+            "la frappe du bloc que la restauration ne touche pas est perdue : {live:?}"
+        );
+        let mut unmet = Vec::new();
+        if !live.contains("trois") {
+            unmet.push(
+                "la frappe dans le bloc dont la restauration récrit le contenu est gardée".into(),
+            );
+        }
+        let mut in_a_version = false;
+        for version in versions(&f).await {
+            in_a_version |= version_text(&f, version.id).await.contains("trois");
+        }
+        if !in_a_version && !live.contains("trois") {
+            unmet.push("elle est au moins dans une version".into());
+        }
+        known_limit(
+            "un bloc dont le type change est récrit en entier (LA-a) : la frappe arrive dans son \
+             nœud de contenu supprimé",
+            &unmet,
+            &[
+                "la frappe dans le bloc dont la restauration récrit le contenu est gardée".into(),
+                "elle est au moins dans une version".into(),
+            ],
         );
     }
 }

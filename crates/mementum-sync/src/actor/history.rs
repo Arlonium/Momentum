@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mementum_crdt::PageDoc;
-use mementum_store::{Store, StoreError, VersionReason};
+use mementum_store::{Store, StoreError, Unversioned, VersionReason, Writer};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use super::{Actor, Broken, Ids};
+use super::{Actor, Broken};
 use crate::long_work::off_the_engine;
 use crate::{PageEvent, SyncError};
 
@@ -120,6 +120,15 @@ pub(super) struct Slice {
     /// celui donné à une écriture du serveur. Une écriture sans compte n'ajoute
     /// personne.
     authors: BTreeSet<Uuid>,
+    /// Ceux d'entre eux qui ont écrit par un jeton d'API (Ruling R1234) : la version les garde
+    /// à part (« par un agent »).
+    agent_authors: BTreeSet<Uuid>,
+    /// Les jetons par lesquels ces écritures ont été faites (Ruling R1234).
+    tokens: BTreeSet<Uuid>,
+    /// Une de ces écritures n'est pas d'un jeton (une connexion de synchro, une session, le
+    /// serveur), ou peut ne pas l'être : une part de la tranche relue au démarrage que la
+    /// compaction a purgée (Ruling R1234, règle 2 : « au doute, couper »).
+    others: bool,
     /// Le contenu du document est celui d'une version gardée : la dernière
     /// coupée, ou la dernière restaurée (Ruling R190). Faux tant qu'une écriture
     /// l'a changé depuis, et pour une page qu'aucune version ne garde encore
@@ -128,6 +137,80 @@ pub(super) struct Slice {
 }
 
 impl Slice {
+    /// La tranche qui suit une version que l'acteur confie à une tâche (Ruling R1572) : vide,
+    /// mais son contenu n'est tenu pour gardé qu'une fois la version écrite
+    /// ([`Actor::versioning_finished`]) ; d'ici là, une coupe d'avant restauration, par
+    /// exemple, garde ce qu'elle remplace, au cas où la version serait refusée.
+    pub(super) fn after_a_version_in_flight() -> Slice {
+        Slice::default()
+    }
+
+    /// Ruling R1234, règle 1 (R1278) : quelqu'un d'autre que le jeton `token` a-t-il écrit la
+    /// tranche, ou peut-il l'avoir écrite ? La règle est celle du store
+    /// ([`Unversioned::written_by_others`]), relue sur ce que l'acteur sait de la tranche.
+    pub(super) fn written_by_others(&self, token: Uuid) -> bool {
+        Unversioned {
+            tokens: self.tokens.iter().copied().collect(),
+            others: self.others,
+            ..Unversioned::default()
+        }
+        .written_by_others(token)
+    }
+
+    /// Le contenu est-il celui d'une version gardée ?
+    pub(super) fn kept(&self) -> bool {
+        self.kept
+    }
+
+    /// Les comptes de la tranche, triés.
+    pub(super) fn authors(&self) -> Vec<Uuid> {
+        self.authors.iter().copied().collect()
+    }
+
+    /// Ceux qui ont écrit par un jeton, triés.
+    pub(super) fn agent_authors(&self) -> Vec<Uuid> {
+        self.agent_authors.iter().copied().collect()
+    }
+
+    /// La version confiée à une tâche est écrite : si rien ne s'est écrit depuis l'état encodé,
+    /// le contenu est le sien.
+    pub(super) fn version_written(&mut self) {
+        if self.since.is_none() {
+            self.kept = true;
+        }
+    }
+
+    /// Ruling R1234, règle 3 : une tranche écrite par des jetons seuls ne coupe pas de version
+    /// `closing`. Elle reste au journal, et la `periodic` qui suit d'un intervalle sa première
+    /// écriture la garde : un agent seul coupe au plus une version par intervalle.
+    fn closes(&self) -> bool {
+        self.since.is_some() && self.others
+    }
+
+    /// `self`, la tranche d'avant une version confiée à une tâche que le store a refusée, et
+    /// `after`, ce qui a été écrit depuis : la tranche reprend le tout, comme si la version
+    /// n'avait pas été tentée.
+    pub(super) fn merged_with(self, after: Slice) -> Slice {
+        let since = match (self.since, after.since) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        let mut authors = self.authors;
+        authors.extend(after.authors);
+        let mut agent_authors = self.agent_authors;
+        agent_authors.extend(after.agent_authors);
+        let mut tokens = self.tokens;
+        tokens.extend(after.tokens);
+        Slice {
+            since,
+            authors,
+            agent_authors,
+            tokens,
+            others: self.others || after.others,
+            kept: self.kept && after.kept,
+        }
+    }
+
     /// La tranche en cours quand l'acteur démarre, relue au journal : les
     /// écritures au-delà de la dernière version (`Store::unversioned`), pour
     /// ce qu'il en reste après la compaction. C'est ce qu'un arrêt brutal ne
@@ -139,6 +222,10 @@ impl Slice {
     /// est vide : la page est servie quand même, et la prochaine écriture en
     /// ouvre une. `created` : la page vient de recevoir son document, qu'aucune
     /// version ne garde.
+    ///
+    /// Ruling R1234, règle 2 : une part de la tranche que la compaction a purgée ne dit plus qui
+    /// l'a écrite ; elle compte comme écrite par d'autres (`others`), si bien que la première
+    /// opération destructrice d'un jeton coupe une version, et que l'arrêt coupe la `closing`.
     pub(super) async fn read(
         store: &Store,
         node_id: Uuid,
@@ -153,6 +240,9 @@ impl Slice {
                     Instant::now().checked_sub(ago).unwrap_or_else(Instant::now)
                 }),
                 authors: found.authors.into_iter().collect(),
+                agent_authors: found.agent_authors.into_iter().collect(),
+                tokens: found.tokens.into_iter().collect(),
+                others: found.others || found.unknown_writers,
                 kept: !created && found.since.is_none() && found.versioned,
             },
             Err(error) => {
@@ -179,12 +269,22 @@ impl Actor {
     /// entre pas : sinon, une page qui n'a pas changé couperait une version.
     /// (Une mise à jour de client sans effet n'arrive même pas ici : elle n'est
     /// pas écrite, Ruling R181.)
-    pub(super) fn wrote(&mut self, changes: u64, actor: Option<Uuid>) {
+    ///
+    /// Ruling R1234 : `writer` dit aussi par quel jeton elle a été faite ; une écriture sans
+    /// jeton marque la tranche comme écrite par d'autres qu'un agent.
+    pub(super) fn wrote(&mut self, changes: u64, writer: &Writer) {
         if !self.watch.changed_since(changes) {
             return;
         }
         self.slice.since.get_or_insert_with(Instant::now);
-        self.slice.authors.extend(actor);
+        self.slice.authors.extend(writer.account);
+        match writer.token {
+            Some(token) => {
+                self.slice.tokens.insert(token);
+                self.slice.agent_authors.extend(writer.account);
+            }
+            None => self.slice.others = true,
+        }
         self.slice.kept = false;
     }
 
@@ -259,8 +359,16 @@ impl Actor {
             return Err(error.into());
         }
         let authors: Vec<Uuid> = self.slice.authors.iter().copied().collect();
+        let agent_authors: Vec<Uuid> = self.slice.agent_authors.iter().copied().collect();
         self.store
-            .put_version(self.id.node_id, self.last_seq, &state, &authors, reason)
+            .put_version_by(
+                self.id.node_id,
+                self.last_seq,
+                &state,
+                &authors,
+                &agent_authors,
+                reason,
+            )
             .await?;
         self.slice = Slice {
             kept: true,
@@ -274,8 +382,15 @@ impl Actor {
     /// versionnées. Si le store la refuse, l'arrêt se fait quand même : le
     /// contenu est au journal, et l'acteur suivant y relit la tranche
     /// ([`Slice::read`]).
+    ///
+    /// Ruling R1234, règle 3 : pas pour une tranche écrite par des jetons seuls. L'acteur
+    /// s'arrête `idle_close` après sa dernière connexion ; un agent REST qui écrivait toutes les
+    /// trente et une secondes coupait une version par écriture, et vidait les cent versions de
+    /// la page en moins d'une heure. La tranche reste au journal, relue par l'acteur suivant avec
+    /// la date de sa plus ancienne écriture, et versionnée par la `periodic` qui suit d'un
+    /// intervalle cette écriture.
     pub(super) async fn cut_closing(&mut self) {
-        if self.slice.since.is_none() {
+        if !self.slice.closes() {
             return;
         }
         if let Err(error) = self.cut_version(VersionReason::Closing).await {
@@ -366,7 +481,6 @@ impl Actor {
         } else {
             History::Kept(version)
         };
-        self.server_write(blocks, actor, history, Ids::AsGiven)
-            .await
+        self.server_write(blocks, actor, history).await
     }
 }
