@@ -13,9 +13,11 @@
 //! module ne lit rien de la base lui-même. Un refus d'une route garde son code et son message ;
 //! ses champs de plus (l'opération en cause, ses blocs, le conseil de sa raison, les candidats, la
 //! révision et les blocs à jour d'un conflit) passent dans le texte, le contenu des pages entre
-//! les lignes de borne (Ruling R1239). Le débit des jetons est jugé par la porte (`auth.rs`) : un
-//! appel d'outil qu'il refuse est un résultat `token_busy`, avec `retry_after_seconds`, sans rien
-//! faire de l'appel (Ruling R1240).
+//! les lignes de borne (Ruling R1239) ; un message de route qui cite l'entrée de l'agent y va
+//! entier (R1439). Le débit des jetons est jugé par la porte (`auth.rs`) : un appel d'outil qu'il
+//! refuse, d'un corps annoncé de 64 Kio au plus, est un résultat `token_busy`, avec
+//! `retry_after_seconds`, sans rien faire de l'appel (Rulings R1240, R1434) ; au-delà, le `429`
+//! HTTP, sans lire le corps.
 //!
 //! **Ce que l'outil lit seul** : le nom d'un espace (sans casse, parmi ceux que le jeton ouvre ; un
 //! espace hors de la portée répond comme un nom inconnu), l'espace implicite d'un jeton qui n'en
