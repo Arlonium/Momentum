@@ -43,10 +43,15 @@ struct Destination {
 
 /// `POST /api/v1/spaces/{id}/pages/batch`, et l'outil `create_pages` : `201` et les pages, toutes
 /// ou aucune. `401`, puis `404` sans rôle dans l'espace (ou hors de la portée du jeton) ont été
-/// dits par l'appelant avant le corps ; puis la destination (`422 invalid_parent`, `403` sous le
-/// niveau ou pour une page à la racine d'un invité ou d'un jeton « Lecture »), la forme
-/// (`422 too_many_pages`, un titre, un MMD : `invalid_mmd` avec `index` et `line`, un média du
-/// web par jeton : `external_media`), le débit (`429 duplication_busy`).
+/// dits par l'appelant avant le corps ; puis, dans l'ordre du code (défaut I6 de la relecture
+/// finale) : la destination (`422 invalid_parent`, `403` sous le niveau ou pour une page à la
+/// racine d'un invité ou d'un jeton « Lecture ») ; la forme sans rien bâtir (`422 invalid_request`
+/// pour `section` avec une page parente, `too_many_pages`, `title_too_long` avec `index`) ; le
+/// débit (`429 duplication_busy`) ; puis, page par page, en bâtissant les documents, un MMD
+/// (`invalid_mmd` avec `index` et `line`, `invalid_blocks`, `too_many_blocks`,
+/// `too_long_to_write`, un média du web par jeton : `external_media`) et le poids de tout le lot
+/// (`subtree_too_large`) ; enfin, à l'écriture, `409 page_moved` si la destination a bougé trois
+/// fois (R590), `401` si l'appel ne vaut plus.
 pub(crate) async fn create_pages(
     state: &AppState,
     caller: &LiveCaller,
