@@ -60,7 +60,7 @@ Les quinze tâches sont sur `main` (2026-11-21), dont la Task D : cette document
 2. **L'essai de migration**, sur des copies, jamais `data/instance` : une base du lot 4 passe `0006`, avec `avant-0006.bak`, ses pages datées et toutes ses versions ; mesurer la durée et la taille du fichier (le coût disque de la reconstruction de `doc_versions`, supposé au README) ; une base du lot 3 passe `0005` puis `0006`.
 3. **Le cas d'Alex avec un vrai Claude Code**, une fois, le navigateur ouvert sur la page pendant que l'agent la complète, et ce que Claude Code fait d'une longue sortie (R1662) ; un agent qui le mène suit la forme de R1258 (une configuration à part, jamais celle de l'utilisateur).
 4. **Avec Alex : `claude mcp add` dans ses shells** (R1464, R1488, R1576 ; section C de la recette) : ce que la configuration garde de l'en-tête, si Claude Code développe `${MEMENTUM_TOKEN}` en portée `local`, la ligne de Windows PowerShell 5.1, et `--scope user` dans la commande ou non. L'écran passe à `--scope project` si la portée `local` ne développe pas la variable.
-5. **La recette du propriétaire**, avec la [checklist](recette/2026-11-20-p1-lot5-recette.md) (une heure et demie) : elle commence par les dix-huit décisions et les choix pris en route.
+5. **La recette du propriétaire**, avec la [checklist](recette/2026-11-20-p1-lot5-recette.md) (environ une heure et demie, près de deux heures avec les étapes facultatives) : elle commence par les dix-huit décisions et les choix pris en route.
 6. **La clôture** : au registre, les mesures de clôture et les reports ; ce document à jour ; `0006` figée ; les ateliers retirés, leur `target/` supprimé.
 
 ## Ce qui reste pour clore le lot 3
