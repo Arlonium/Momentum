@@ -939,7 +939,15 @@ async fn measure_agent_edit_on_a_10000_block_page() {
         let start = Instant::now();
         let read = f.hub.read_page(f.page).await.unwrap();
         reads.push(start.elapsed());
-        let middle = read.blocks[BLOCKS / 2].id.clone();
+        // Un paragraphe du milieu qu'aucun tour n'a encore touché.
+        let mark = format!("Paragraphe {} ", BLOCKS / 2 + round);
+        let middle = read
+            .blocks
+            .iter()
+            .find(|b| mementum_md::block_text(b).starts_with(&mark))
+            .expect("le paragraphe du tour")
+            .id
+            .clone();
         let ops = [
             vec![mementum_crdt::ops::Operation::StrReplace {
                 old: "ordinaire".into(),
