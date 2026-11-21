@@ -178,6 +178,14 @@ pub(crate) struct Written {
     pub(crate) wrote: bool,
 }
 
+/// Une page écrite par une commande d'agent : la révision et les blocs de l'état écrit, et les
+/// blocs dont un élément Yjs a changé.
+struct WrittenPage {
+    revision: String,
+    blocks: Vec<Block>,
+    touched: Vec<String>,
+}
+
 /// La version `before_agent` en vol : la tâche qui la relit et l'écrit, et la tranche qu'elle
 /// garde, rendue à l'acteur si elle échoue.
 pub(super) struct Versioning {
@@ -309,8 +317,14 @@ impl Actor {
                     .as_ref()
                     .filter(|v| v.encoded_revision == *base)
                     .map(|v| v.encoded.clone());
-                known = hashes.clone().or(from_encoded);
-                if edit.on_conflict == OnConflict::Fail || known.is_none() {
+                known = match edit.on_conflict {
+                    OnConflict::Rebase => hashes.clone().or(from_encoded),
+                    // R1338 : la coupe en deux commandes est le fait du serveur. L'agent avait lu
+                    // l'état encodé : la seconde commande se juge comme un `rebase` restreint aux
+                    // blocs touchés ; sans cela, toute frappe pendant la version était un conflit.
+                    OnConflict::Fail => from_encoded,
+                };
+                if known.is_none() {
                     return Ok(Step::Done(Err(EditRefusal::Conflict {
                         revision,
                         blocks: current,
@@ -330,14 +344,9 @@ impl Actor {
             forbid_external_media: token.is_some(),
             commented: edit.commented.as_ref(),
         };
-        let planned = off_the_engine(|| {
-            ops::plan(&current, &edit.ops, &ctx).map(|plan| {
-                let cost = diff_cost(&current, plan.blocks());
-                (plan, cost)
-            })
-        });
-        let (plan, cost) = match planned {
-            Ok(planned) => planned,
+        let planned = off_the_engine(|| ops::plan(&current, &edit.ops, &ctx));
+        let plan = match planned {
+            Ok(plan) => plan,
             Err(refusal) => {
                 return Ok(Step::Done(Err(EditRefusal::Operation {
                     refusal: Box::new(refusal),
@@ -346,48 +355,55 @@ impl Actor {
                 })));
             }
         };
-        // Task S2 (R1294) : au-delà du budget, refusée, sans repli silencieux.
-        if u128::from(cost.nanos) > self.cfg.agent_write_budget.as_nanos() {
-            return Ok(Step::Done(Err(EditRefusal::TooLong(cost))));
-        }
         let cuts = then.as_ref().map_or(0, |v| v.cuts);
         let need_version = match (&then, token) {
             // R1234, règle 1 (R1278) : une opération destructrice d'un jeton, sur un contenu
-            // qu'aucune version ne garde, que quelqu'un d'autre que ce jeton a écrit.
+            // qu'aucune version ne garde, que quelqu'un d'autre que ce jeton a écrit ; et qui
+            // change quelque chose (R1339 : une opération sans effet n'a rien à garder).
             (None, Some(token)) => {
-                destructive && !self.slice.kept() && self.slice.written_by_others(token)
+                destructive
+                    && !self.slice.kept()
+                    && self.slice.written_by_others(token)
+                    && plan.blocks() != current.as_slice()
             }
             (None, None) => false,
-            // R1572 d : la page a changé, pendant que la version s'écrivait, dans les blocs que
-            // l'écriture touche ; la version ne garde pas ce qu'elle remplacerait.
+            // R1572 d : la page a changé, pendant que la version s'écrivait, dans le contenu de ce
+            // que l'écriture remplace ; la version ne le garde pas (R1336 : la place d'un bloc
+            // touché par elle seule est jugée par le plan refait).
             (Some(versioned), _) => !plan.changed_since(&versioned.encoded, &self.key).is_empty(),
         };
         if need_version {
             if cuts >= MAX_CUTS {
                 return Ok(Step::Done(Err(EditRefusal::VersionRefused)));
             }
-            let encoded = Arc::new(off_the_engine(|| hashes(&current, &self.key)));
+            // Task S2 (R1294) : une écriture qu'on refusera pour son coût ne coupe pas de version.
+            let (cost, encoded) = off_the_engine(|| {
+                (
+                    diff_cost(&current, plan.blocks()),
+                    hashes(&current, &self.key),
+                )
+            });
+            if u128::from(cost.nanos) > self.cfg.agent_write_budget.as_nanos() {
+                return Ok(Step::Done(Err(EditRefusal::TooLong(cost))));
+            }
             drop(plan);
             let written = self.start_version();
             return Ok(Step::Version {
                 written,
-                encoded,
+                encoded: Arc::new(encoded),
                 encoded_revision: revision,
             });
         }
         let written = self.write_plan(&plan, &edit.writer).await?;
         drop(plan);
         Ok(Step::Done(match written {
-            Ok(Some((after, touched))) => {
-                let (blocks, _) = self.read_page();
-                Ok(Written {
-                    revision: after,
-                    before: revision,
-                    touched,
-                    blocks,
-                    wrote: true,
-                })
-            }
+            Ok(Some(page)) => Ok(Written {
+                revision: page.revision,
+                before: revision,
+                touched: page.touched,
+                blocks: page.blocks,
+                wrote: true,
+            }),
             Ok(None) => Ok(Written {
                 revision: revision.clone(),
                 before: revision,
@@ -399,21 +415,42 @@ impl Actor {
         }))
     }
 
-    /// Écrit un plan : `version_if_due` avant, la transaction (par différence), le journal au nom
-    /// de `writer`, `wrote`, la diffusion. `Ok(None)` : rien ne diffère, rien n'est écrit (ni
-    /// journal, ni diffusion, ni tranche, Task S2). `Ok(Some((révision, touchés)))` : la révision de
-    /// l'état écrit, lue dans cette commande.
-    #[allow(clippy::type_complexity)]
+    /// Écrit un plan : `version_if_due` avant, l'estimation et la transaction (par différence,
+    /// `PageDoc::apply_within` : un seul appariement des blocs pour les deux), le journal au nom de
+    /// `writer`, `wrote`, la diffusion. `Ok(None)` : rien ne diffère, rien n'est écrit (ni journal,
+    /// ni diffusion, ni tranche, Task S2). Sinon la révision de l'état écrit et ses blocs, lus dans
+    /// cette commande, hors du fil du moteur : les blocs que l'écriture rend, sans relire la page,
+    /// quand elle n'est pas retombée sur la récriture complète (R1337).
     async fn write_plan(
         &mut self,
         plan: &Plan<'_>,
         writer: &Writer,
-    ) -> Result<Result<Option<(String, Vec<String>)>, EditRefusal>, Broken> {
+    ) -> Result<Result<Option<WrittenPage>, EditRefusal>, Broken> {
         self.version_if_due().await;
         let changes = self.watch.changes();
-        let written = off_the_engine(|| self.page.apply(plan));
-        let written = match written {
-            Ok(written) => written,
+        let budget = self.cfg.agent_write_budget.as_nanos();
+        let written = off_the_engine(|| -> Result<_, mementum_crdt::CrdtError> {
+            let mut written = match self.page.apply_within(plan, budget)? {
+                Ok(written) => written,
+                Err(cost) => return Ok(Err(cost)),
+            };
+            if written.update == EMPTY_UPDATE {
+                return Ok(Ok(None));
+            }
+            let blocks = match written.blocks.take() {
+                Some(blocks) => {
+                    debug_assert_eq!(blocks, self.page.read_blocks(), "l'arbre écrit");
+                    blocks
+                }
+                None => self.page.read_blocks(),
+            };
+            Ok(Ok(Some((written, blocks, self.page.revision()))))
+        });
+        let (written, blocks, revision) = match written {
+            Ok(Ok(Some(written))) => written,
+            Ok(Ok(None)) => return Ok(Ok(None)),
+            // Task S2 (R1294) : au-delà du budget, refusée, sans repli silencieux.
+            Ok(Err(cost)) => return Ok(Err(EditRefusal::TooLong(cost))),
             Err(error) => {
                 // Une erreur levée après la première transaction (`HalfWritten`) : la page est à
                 // recharger.
@@ -424,9 +461,6 @@ impl Actor {
                 return Ok(Err(EditRefusal::Failed(error.into())));
             }
         };
-        if written.update == EMPTY_UPDATE {
-            return Ok(Ok(None));
-        }
         if let Err(error) = self.persist(&[&written.update], writer).await {
             self.store_failed(&error).await?;
             return Ok(Err(EditRefusal::Failed(error.into())));
@@ -434,7 +468,11 @@ impl Actor {
         self.wrote(changes, writer);
         self.broadcast(None, protocol::update(&written.update));
         self.compact_if_due();
-        Ok(Ok(Some((self.page.revision(), written.touched))))
+        Ok(Ok(Some(WrittenPage {
+            revision,
+            blocks,
+            touched: written.touched,
+        })))
     }
 
     /// Encode l'état au `seq` courant et confie la version `before_agent` à une tâche (R1257) ;
@@ -460,6 +498,22 @@ impl Actor {
             held,
         });
         written
+    }
+
+    /// La version `before_agent` en vol est-elle finie (écrite ou refusée) ? L'acteur la règle
+    /// alors en tête de sa commande suivante (R1335) : une seconde commande qui ne vient pas (un
+    /// appel abandonné, une version refusée) ne laisse pas la tranche en vol.
+    pub(super) fn versioning_done(&self) -> bool {
+        self.versioning
+            .as_ref()
+            .is_some_and(|versioning| versioning.task.is_finished())
+    }
+
+    /// Pour les tests : une version en vol menée par `task`, la tranche en cours partie avec elle.
+    #[cfg(test)]
+    pub(super) fn version_in_flight(&mut self, task: tokio::task::JoinHandle<bool>) {
+        let held = std::mem::replace(&mut self.slice, Slice::after_a_version_in_flight());
+        self.versioning = Some(Versioning { task, held });
     }
 
     /// Attend la version `before_agent` en vol, s'il y en a une, et en tire la tranche : écrite,

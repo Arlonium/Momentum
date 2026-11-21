@@ -579,10 +579,12 @@ async fn an_agent_replacing_what_it_wrote_alone_cuts_no_version() {
 }
 
 /// R1234, règle 3 : un agent qui écrit toutes les trente et une secondes, l'acteur arrêté par
-/// `idle_close` entre deux écritures, ne coupe aucune version `closing`, et une `periodic` au plus
-/// par intervalle. Le journal est daté par l'horloge du système, que l'horloge arrêtée de tokio ne
-/// fait pas avancer : chaque entrée est vieillie de trente et une secondes à chaque tour, l'acteur
-/// arrêté (la base n'est jamais récrite sous un acteur vivant).
+/// `idle_close` entre deux écritures, ne coupe aucune version `closing` une fois la page
+/// versionnée, et une `periodic` au plus par intervalle. La page naît vide, sans version : au doute
+/// (R1601), sa première tranche coupe sa `closing`, et c'est la seule. Le journal est daté par
+/// l'horloge du système, que l'horloge arrêtée de tokio ne fait pas avancer : chaque entrée est
+/// vieillie de trente et une secondes à chaque tour, l'acteur arrêté (la base n'est jamais récrite
+/// sous un acteur vivant).
 #[tokio::test]
 async fn an_agent_writing_every_31_seconds_cuts_at_most_one_version_per_interval() {
     let _clock = StoppedClock::start();
@@ -609,7 +611,10 @@ async fn an_agent_writing_every_31_seconds_cuts_at_most_one_version_per_interval
         .await;
         tokio::time::advance(Duration::from_secs(1)).await;
     }
-    let kept = versions(&f).await;
+    let mut kept = versions(&f).await;
+    // La plus ancienne : la `closing` de la première tranche d'une page jamais versionnée.
+    let first = kept.pop().expect("une version");
+    assert_eq!(first.reason, VersionReason::Closing, "{first:?}");
     assert!(
         kept.iter().all(|v| v.reason == VersionReason::Periodic),
         "{kept:?}"
@@ -669,6 +674,11 @@ async fn after_a_compaction_the_slice_counts_as_written_by_others() {
     .await;
     let bob = new_user(&f.db).await;
     let token = Uuid::now_v7();
+    // Une page versionnée d'abord : une page jamais versionnée compte déjà comme écrite par
+    // d'autres (R1601).
+    f.write_mmd("Humain\n").await;
+    actor_stops(&f).await;
+    assert_eq!(versions(&f).await.len(), 1);
     let read = f.hub.read_page(f.page).await.unwrap();
     let edited = edits(
         &f,
@@ -681,8 +691,9 @@ async fn after_a_compaction_the_slice_counts_as_written_by_others() {
     .await;
     f.hub.compacted(f.page).await.unwrap();
     actor_stops(&f).await;
-    assert!(
-        versions(&f).await.is_empty(),
+    assert_eq!(
+        versions(&f).await.len(),
+        1,
         "une version de fin pour un agent seul"
     );
     let unversioned = f.store.unversioned(f.page).await.unwrap();
@@ -699,8 +710,65 @@ async fn after_a_compaction_the_slice_counts_as_written_by_others() {
     )
     .await;
     let kept = versions(&f).await;
+    assert_eq!(kept.len(), 2, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::BeforeAgent);
+}
+
+/// R1601 (R1234, règle 2) : une page née avec son contenu (une duplication, une page créée en lot),
+/// qu'aucune version ne garde et où personne n'a écrit depuis, ne dit pas qui a écrit ce contenu :
+/// la première opération destructrice d'un jeton coupe une version qui le garde.
+#[tokio::test]
+async fn a_page_born_with_content_is_versioned_before_a_token_replaces_it() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let bob = new_user(&f.db).await;
+    let (born, _) = PageDoc::new_page();
+    born.write_blocks(&parse("Contenu d'origine\n").unwrap())
+        .unwrap();
+    let space = f.store.create_space("Copies", None).await.unwrap();
+    let page = f
+        .store
+        .create_node(mementum_store::NewNode {
+            space_id: space.id,
+            parent_id: None,
+            after: None,
+            kind: mementum_store::NodeKind::Page,
+            title: "Copie".into(),
+            created_by: None,
+            grants: Vec::new(),
+            doc: Some(born.encode_state()),
+        })
+        .await
+        .unwrap()
+        .id;
+    let read = f.hub.read_page(page).await.unwrap();
+    assert_eq!(text(&read.blocks), "Contenu d'origine");
+    let first = read.blocks[0].id.clone();
+    let edited = f
+        .hub
+        .edit_page(
+            page,
+            edit(
+                agent(bob, Uuid::now_v7()),
+                Some(&read),
+                vec![replace_block(&first, "Remplacé\n")],
+            ),
+        )
+        .await
+        .expect("l'écriture de l'agent");
+    let kept = f.store.list_versions(page).await.unwrap();
     assert_eq!(kept.len(), 1, "{kept:?}");
     assert_eq!(kept[0].reason, VersionReason::BeforeAgent);
+    assert_eq!(edited.version, Some(kept[0].id));
+    let state = f
+        .store
+        .get_version(page, kept[0].id)
+        .await
+        .unwrap()
+        .unwrap();
+    let blocks = PageDoc::from_updates([state.as_slice()])
+        .unwrap()
+        .read_blocks();
+    assert_eq!(text(&blocks), "Contenu d'origine");
 }
 
 /// Une page dont un humain vient d'écrire le premier bloc (`humain`), et la lecture qu'en a faite
@@ -1232,5 +1300,105 @@ async fn an_edit_beyond_the_budget_is_refused() {
         matches!(refused, Err(EditRefusal::TooLong(_))),
         "{refused:?}"
     );
+    assert_eq!(f.store.load_doc(f.page).await.unwrap(), journal);
+}
+
+/// R1336 : une frappe dans l'ancre d'un `insert` (un bloc que l'appel ne touche que par sa place),
+/// entre les deux commandes d'une écriture qui coupe une version, ne fait pas recouper la version :
+/// une seule `before_agent`, et l'écriture passe, la frappe gardée.
+#[tokio::test]
+async fn a_keystroke_in_an_insert_anchor_between_the_two_commands_cuts_one_version() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let (tab, _) = page_written_by_a_human(&f, "Un\n\nDeux\n").await;
+    let bob = new_user(&f.db).await;
+    let read = f.hub.read_page(f.page).await.unwrap();
+    let (first, second) = (read.blocks[0].id.clone(), read.blocks[1].id.clone());
+    let held = f.hub.hold_agent_versions();
+    let task = edit_held_at_its_version(
+        &f,
+        edit(
+            agent(bob, Uuid::now_v7()),
+            Some(&read),
+            vec![
+                replace_block(&first, "Agent\n"),
+                insert(Place::After(second), "Trois\n"),
+            ],
+        ),
+    )
+    .await;
+    types_in(&tab, 1, " servi").await;
+    drop(held);
+    task.await.unwrap().expect("l'écriture de l'agent");
+    let kept = versions(&f).await;
+    assert_eq!(kept.len(), 1, "{kept:?}");
+    assert_eq!(kept[0].reason, VersionReason::BeforeAgent);
+    assert_eq!(live_text(&f).await, "Agent\nDeux servi\nTrois");
+}
+
+/// R1338 : `on_conflict: "fail"` sur la révision que l'agent a lue, quand le serveur coupe
+/// l'écriture en deux commandes pour une version : une frappe pendant la version dans un bloc que
+/// l'écriture ne touche pas n'est pas un conflit ; dans un bloc qu'elle remplace, si.
+#[tokio::test]
+async fn fail_is_judged_on_the_touched_blocks_across_the_two_commands() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let (tab, _) = page_written_by_a_human(&f, "Un\n\nDeux\n").await;
+    let bob = new_user(&f.db).await;
+    let failing = |read: &PageRead, mmd: &str| {
+        let mut edit = edit(
+            agent(bob, Uuid::now_v7()),
+            Some(read),
+            vec![replace_block(&read.blocks[0].id, mmd)],
+        );
+        edit.on_conflict = OnConflict::Fail;
+        edit
+    };
+    // Une frappe dans le second bloc : l'écriture passe.
+    let read = f.hub.read_page(f.page).await.unwrap();
+    let held = f.hub.hold_agent_versions();
+    let task = edit_held_at_its_version(&f, failing(&read, "Agent\n")).await;
+    types_in(&tab, 1, " servi").await;
+    drop(held);
+    task.await.unwrap().expect("l'écriture de l'agent");
+    assert_eq!(live_text(&f).await, "Agent\nDeux servi");
+    // Une frappe dans le bloc remplacé, par une personne : c'est un conflit, rien n'est écrit.
+    types_in(&tab, 0, " humain").await;
+    let read = f.hub.read_page(f.page).await.unwrap();
+    let held = f.hub.hold_agent_versions();
+    let task = edit_held_at_its_version(&f, failing(&read, "Encore l'agent\n")).await;
+    types_in(&tab, 0, " encore").await;
+    drop(held);
+    let refused = task.await.unwrap();
+    assert!(
+        matches!(&refused, Err(EditRefusal::Operation { refusal, .. }) if refusal.reason == Reason::RevisionConflict),
+        "{refused:?}"
+    );
+    assert_eq!(live_text(&f).await, "Agent humain encore\nDeux servi");
+}
+
+/// R1339 : une opération destructrice d'un jeton qui ne change rien (un bloc remplacé par lui-même)
+/// ne coupe pas de version, et n'écrit rien.
+#[tokio::test]
+async fn a_destructive_edit_that_changes_nothing_cuts_no_version() {
+    let f = Fixture::new(SyncConfig::default()).await;
+    let (_tab, _) = page_written_by_a_human(&f, "Un\n").await;
+    let bob = new_user(&f.db).await;
+    let journal = f.store.load_doc(f.page).await.unwrap();
+    let read = f.hub.read_page(f.page).await.unwrap();
+    let first = read.blocks[0].id.clone();
+    let edited = edits(
+        &f,
+        edit(
+            agent(bob, Uuid::now_v7()),
+            Some(&read),
+            vec![replace_block(&first, "Un humain\n")],
+        ),
+    )
+    .await;
+    assert!(edited.version.is_none());
+    assert!(
+        versions(&f).await.is_empty(),
+        "une version pour une écriture sans effet"
+    );
+    assert_eq!(edited.revision, read.revision);
     assert_eq!(f.store.load_doc(f.page).await.unwrap(), journal);
 }

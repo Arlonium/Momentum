@@ -925,6 +925,11 @@ impl Actor {
     }
 
     async fn handle(&mut self, command: Command) -> Result<(), Stop> {
+        // R1335 : une version d'agent finie, dont la seconde commande ne viendra peut-être pas, se
+        // règle avant tout le reste.
+        if self.versioning_done() {
+            self.versioning_finished().await;
+        }
         match command {
             Command::Join {
                 writable,
@@ -2511,7 +2516,11 @@ mod tests {
                 actor.edit(&insert, None).await,
                 Ok(Step::Done(Ok(_)))
             ));
-            assert_eq!(watch.seen(), 4, "lecture, plan, écriture, relecture");
+            assert_eq!(
+                watch.seen(),
+                3,
+                "lecture, plan, écriture et révision écrite"
+            );
             let edit = destructive_edit(&actor, Uuid::now_v7());
             let Ok(Step::Version {
                 written,
@@ -2534,10 +2543,89 @@ mod tests {
             ));
             assert_eq!(
                 watch.seen(),
-                4 + 1 + 3 + 4,
+                3 + 1 + 3 + 3,
                 "la révision lue par le test, puis deux commandes"
             );
         });
+    }
+
+    /// R1335 : une version d'agent finie dont la seconde commande ne vient pas (l'appel abandonné,
+    /// ou la version refusée) se règle à la commande suivante de l'acteur, quelle qu'elle soit :
+    /// refusée, la tranche d'avant revient.
+    #[tokio::test]
+    async fn a_finished_version_is_settled_at_the_next_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _commands, _mailbox) = actor(&dir).await;
+        let changes = actor.watch.changes();
+        spoil(&actor.page);
+        actor.wrote(changes, &Writer::default());
+        let token = Uuid::now_v7();
+        let edit = destructive_edit(&actor, token);
+        let Ok(Step::Version { written, .. }) = actor.edit(&edit, None).await else {
+            panic!("aucune version coupée");
+        };
+        assert!(written.await.unwrap().is_err(), "la version a été écrite");
+        assert!(
+            !actor.slice.written_by_others(token),
+            "la tranche en vol est celle d'avant"
+        );
+        while !actor.versioning_done() {
+            tokio::task::yield_now().await;
+        }
+        let (reply, _count) = oneshot::channel();
+        assert!(actor.handle(Command::Writers { reply }).await.is_ok());
+        assert!(
+            actor.versioning.is_none(),
+            "la version finie n'est pas réglée"
+        );
+        assert!(
+            actor.slice.written_by_others(token),
+            "la tranche n'est pas revenue"
+        );
+    }
+
+    /// R1602 : une restauration attend la version d'agent en vol avant de décider : la tranche
+    /// qu'elle juge est celle que la version laisse. Écrite, la version garde le contenu, et la
+    /// restauration ne coupe pas de `before_restore` par-dessus.
+    #[tokio::test]
+    async fn a_restore_waits_for_the_before_agent_version_in_flight() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut actor, _commands, _mailbox) = actor(&dir).await;
+        let node = actor.id.node_id;
+        let other = {
+            let (page, _) = PageDoc::new_page();
+            page.write_blocks(&mementum_md::parse("Autre contenu\n").unwrap())
+                .unwrap();
+            page.encode_state()
+        };
+        let version = actor
+            .store
+            .put_version(node, 0, &other, &[], VersionReason::Periodic)
+            .await
+            .unwrap();
+        // Une version en vol, que le test finit (« écrite ») pendant que la restauration attend.
+        let (finish, finished) = oneshot::channel::<()>();
+        actor.version_in_flight(tokio::spawn(async move {
+            let _ = finished.await;
+            true
+        }));
+        let (restored, ()) = tokio::join!(actor.restore(version, None), async {
+            let _ = finish.send(());
+        });
+        assert!(matches!(restored, Ok(Ok(()))), "la restauration");
+        let reasons: Vec<VersionReason> = actor
+            .store
+            .list_versions(node)
+            .await
+            .unwrap()
+            .iter()
+            .map(|v| v.reason)
+            .collect();
+        assert_eq!(
+            reasons,
+            [VersionReason::Periodic],
+            "une version d'avant restauration coupée pendant que la version d'agent était en vol"
+        );
     }
 
     /// Une connexion du compte `account`, qui s'appelle `name` et peut écrire : inscrite, puis

@@ -438,6 +438,9 @@ impl Actor {
         version: Uuid,
         actor: Option<Uuid>,
     ) -> Result<Result<(), SyncError>, Broken> {
+        // R1602 : une version d'agent en vol est attendue d'abord : la restauration décide sur la
+        // tranche qu'elle laisse, et la purge de cette version ne passe pas sous la borne de R197.
+        self.versioning_finished().await;
         let state = match self.store.get_version(self.id.node_id, version).await {
             Ok(Some(state)) => state,
             Ok(None) => return Ok(Err(SyncError::NotFound)),
