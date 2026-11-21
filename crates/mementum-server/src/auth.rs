@@ -1769,4 +1769,49 @@ mod tests {
             "la seconde de l'agent n'a pas été refusée"
         );
     }
+
+    /// `SessionUser` refuse un appel venu d'un jeton : c'est le second verrou des routes de
+    /// session (Ruling R1222 ; les jetons, Task S6), qui tient seul, la porte des jetons mise à
+    /// part. Posée à la main, l'extension que la porte laisse à un jeton admis (`TokenCaller`)
+    /// suffit à faire refuser la requête, cookie de session vivant compris ; sans elle, la même
+    /// requête passe (le témoin).
+    #[tokio::test]
+    async fn session_user_refuses_a_caller_that_came_by_a_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::access::tests::state(&dir).await;
+        let mona = crate::access::tests::account(&state, "mona").await;
+        let (session, hash) = new_token();
+        state
+            .store
+            .create_session(mona.id, hash, i64::MAX)
+            .await
+            .unwrap();
+        let parts = |by_token: bool| {
+            let mut request = axum::http::Request::builder()
+                .uri("/api/v1/tokens")
+                .header(header::COOKIE, format!("{SESSION_COOKIE}={session}"))
+                .body(())
+                .unwrap();
+            if by_token {
+                request.extensions_mut().insert(TokenCaller(AuthUser {
+                    via: Via::Token(Arc::new(TokenGrant {
+                        token_id: Uuid::now_v7(),
+                        level: mementum_acl::Level::Edit,
+                        scope: Scope::All,
+                        can_trash: true,
+                    })),
+                    ..mona.clone()
+                }));
+            }
+            request.into_parts().0
+        };
+        let refused = SessionUser::from_request_parts(&mut parts(true), &state)
+            .await
+            .unwrap_err();
+        assert_eq!(refused.code(), ErrorCode::TokenNotAllowed);
+        let passed = SessionUser::from_request_parts(&mut parts(false), &state)
+            .await
+            .unwrap();
+        assert_eq!((passed.user.id, passed.session), (mona.id, hash));
+    }
 }

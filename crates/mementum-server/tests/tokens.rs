@@ -192,7 +192,9 @@ async fn a_level_full_is_refused() {
                 json!({ "name": "agent", "level": level, "scope": "all", "password": PASSWORD }),
             )
             .await;
-        reply.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_level");
+        let body = reply.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_level");
+        // Les mots de l'écran, pas ceux de l'API (Ruling R1379).
+        assert_french(&body, &["« Lecture »", "« Modification »"]);
     }
     assert!(t.store.tokens_of(mona.id, now()).await.unwrap().is_empty());
     let (_, info) = created(
@@ -468,12 +470,23 @@ async fn a_token_revoked_by_the_route_is_refused_from_the_next_call() {
         .assert_error(StatusCode::UNAUTHORIZED, "invalid_token");
     let revoked_at = mona.browser.get(TOKENS).await.json()[0]["revokedAt"].clone();
     assert!(revoked_at.is_i64());
+    // La date de révocation reculée d'une minute : une seconde révocation qui la récrirait se
+    // verrait, même dans la même milliseconde que la première.
+    let past = revoked_at.as_i64().unwrap() - 60_000;
+    exec_sql(
+        &t.db_path(),
+        &format!(
+            "UPDATE api_tokens SET revoked_at = {past} WHERE id = '{}'",
+            text(&info, "id")
+        ),
+    )
+    .await;
     mona.browser
         .delete(&uri)
         .await
         .assert_status(StatusCode::NO_CONTENT);
     let rows = mona.browser.get(TOKENS).await.json();
-    assert_eq!(rows[0]["revokedAt"], revoked_at, "rien de plus n'est écrit");
+    assert_eq!(rows[0]["revokedAt"], past, "rien de plus n'est écrit");
     assert_eq!(rows[0]["live"], false);
 }
 
@@ -509,6 +522,15 @@ async fn the_token_of_another_account_is_not_found() {
     }
     let id: Uuid = toms.parse().unwrap();
     assert!(t.store.token_is_live(id, now()).await.unwrap());
+    // Une adresse d'activité qui ne se lit pas reçoit `400` avant tout `404`, pour le jeton d'un
+    // autre compte comme pour le sien : le jeton n'est pas encore cherché (Ruling R1378).
+    let (_, own) = created(&mona.browser, all_scope("agent de Mona")).await;
+    for id in [toms.as_str(), text(&own, "id"), "pas-un-jeton"] {
+        mona.browser
+            .get(&format!("{TOKENS}/{id}/calls?outcome=tout"))
+            .await
+            .assert_error(StatusCode::BAD_REQUEST, "invalid_request");
+    }
 }
 
 /// Aucune route des jetons ne s'ouvre à un jeton, même porté avec le cookie vivant de son compte
@@ -790,4 +812,216 @@ async fn changing_the_password_says_how_many_tokens_went() {
         .await;
     again.assert_status(StatusCode::OK);
     assert_eq!(again.json(), json!({ "tokensRevoked": 0 }));
+}
+
+// ---------------------------------------------------------------------------
+// Le tour de correction (R1375 à R1379).
+
+/// Attend `ready` ([`WAIT`] au plus) : une condition, pas une durée.
+async fn until(what: &str, ready: impl Fn() -> bool) {
+    let deadline = std::time::Instant::now() + WAIT;
+    while !ready() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{what} : attente dépassée"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Le mot de passe d'un compte qu'un autre changement remplace pendant la création.
+const DONOR_PASSWORD: &str = "un-mot-de-passe-donneur";
+
+/// Une création vérifiée contre l'ancien mot de passe, qui écrit après un changement de mot de
+/// passe (R120 ; le modèle de `password_change_verified_before_another_one_changes_nothing`,
+/// `tests/auth.rs`) : aucun jeton n'est créé, la réponse est celle d'un mot de passe faux, et la
+/// tentative compte au frein de la création. Sans la condition du hachage vérifié dans la
+/// transaction, un jeton créé contre l'ancien mot de passe survivrait au changement qui devait tous
+/// les révoquer.
+#[tokio::test]
+async fn a_creation_verified_before_a_password_change_creates_nothing() {
+    let t = open_app().await;
+    let alice = t.account("Alice").await;
+    // Bob, inscrit avec le mot de passe que le changement donne à Alice : son hachage sert.
+    let donor = t.browser();
+    let reply = donor
+        .sign_up("bob@exemple.fr", "Bob", DONOR_PASSWORD, None)
+        .await;
+    reply.assert_status(StatusCode::CREATED);
+    let bob = uuid(&reply.json()["user"]["id"]);
+    // Ce que répond un mot de passe faux : un échec au frein.
+    let mut wrong_body = all_scope("agent");
+    wrong_body["password"] = json!("pas-le-bon-mot-de-passe");
+    let wrong = alice.browser.post(TOKENS, wrong_body.clone()).await;
+    wrong.assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
+
+    let replaced = [
+        format!(
+            "UPDATE users SET password_hash = (SELECT password_hash FROM users WHERE id = \
+             '{bob}') WHERE id = '{}'",
+            alice.id
+        ),
+        format!("DELETE FROM sessions WHERE user_id = '{}'", alice.id),
+    ];
+    let raced = overtaken(
+        &t,
+        alice.space,
+        alice.browser.post(TOKENS, all_scope("agent")),
+        &replaced,
+    )
+    .await;
+
+    // La création avait bien vérifié l'ancien mot de passe ; c'est à l'écriture qu'elle est refusée.
+    assert!(
+        raced
+            .journal
+            .contains("mot de passe changé pendant sa vérification"),
+        "réponse {} : {}\njournal : {}",
+        raced.reply.status,
+        raced.reply.text(),
+        raced.journal
+    );
+    assert!(
+        !raced
+            .journal
+            .contains("création d'un jeton d'API refusée : mot de passe invalide"),
+        "la création est arrivée après le changement : {}",
+        raced.journal
+    );
+    assert_eq!(refusal(&raced.reply), refusal(&wrong));
+    assert!(t.store.tokens_of(alice.id, now()).await.unwrap().is_empty());
+
+    // Elle compte comme un échec : avec celui d'avant et huit autres, la fenêtre est pleine, et
+    // même le bon mot de passe (le nouveau) est refusé.
+    let again = t.browser();
+    again
+        .log_in("alice@exemple.fr", DONOR_PASSWORD)
+        .await
+        .assert_status(StatusCode::OK);
+    for attempt in 1..=8 {
+        let reply = again.post(TOKENS, wrong_body.clone()).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
+    }
+    let mut right = all_scope("agent");
+    right["password"] = json!(DONOR_PASSWORD);
+    again
+        .post(TOKENS, right)
+        .await
+        .assert_error(StatusCode::TOO_MANY_REQUESTS, "too_many_attempts");
+    assert!(t.store.tokens_of(alice.id, now()).await.unwrap().is_empty());
+}
+
+/// L'activité ne nomme pas une page d'un espace où le compte n'a plus de rôle (Ruling R1368) :
+/// sorti de l'espace, l'appel garde l'identifiant de la page, sans titre, et ce titre n'est pas
+/// demandé au store.
+#[tokio::test]
+async fn the_activity_never_names_a_page_of_a_space_the_account_left() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mona = &team.mona;
+    let page = team.page(None, "Notes", &[members(Level::Edit)]).await;
+    let (token, id) = api_token(&t.store, mona.id, TokenLevel::Read, TokenScope::All, false).await;
+    get_by(&t, &token, &format!("/api/v1/pages/{page}"))
+        .await
+        .assert_status(StatusCode::OK);
+    t.calls.flush(&t.store).await;
+    let activity = format!("{TOKENS}/{id}/calls");
+    // Témoin : membre, elle lit le titre.
+    let calls = mona.browser.get(&activity).await.json()["calls"].clone();
+    assert_eq!(calls[0]["pageTitle"], "Notes");
+
+    exec_sql(
+        &t.db_path(),
+        &format!(
+            "DELETE FROM members WHERE space_id = '{}' AND user_id = '{}'",
+            team.space, mona.id
+        ),
+    )
+    .await;
+    exec_sql(
+        &t.db_path(),
+        &format!(
+            "UPDATE spaces SET rev = rev + 1, lsn = lsn + 1 WHERE id = '{}'",
+            team.space
+        ),
+    )
+    .await;
+    let before = t.store.titles_asked().len();
+    let calls = mona.browser.get(&activity).await.json()["calls"].clone();
+    assert_eq!(calls[0]["pageId"], page.to_string());
+    assert_eq!(calls[0]["pageTitle"], Value::Null);
+    assert_eq!(titles_asked_since(&t, before), Vec::<Uuid>::new());
+}
+
+/// Une révocation dont le client part pendant qu'elle attend son tour d'écriture va au bout (Ruling
+/// R1376, comme la déconnexion) : la file tenue, la requête abandonnée, puis la file rendue, le
+/// jeton est révoqué.
+#[tokio::test]
+async fn a_revocation_whose_client_left_still_lands() {
+    let t = open_app().await;
+    let mona = t.account("Mona").await;
+    let (_, id) = api_token(&t.store, mona.id, TokenLevel::Edit, TokenScope::All, false).await;
+    t.indexer.settled().await;
+    t.indexer.freeze();
+    let held = t.store.hold_writes().await;
+    let mut request = bare(Method::DELETE, &format!("{TOKENS}/{id}"));
+    request
+        .headers_mut()
+        .insert(header::HOST, "localhost".parse().unwrap());
+    request.headers_mut().insert(
+        header::COOKIE,
+        mona.browser.cookie().unwrap().parse().unwrap(),
+    );
+    let router = t.router.clone();
+    let asked = tokio::spawn(async move {
+        use tower::ServiceExt;
+        router.oneshot(request).await
+    });
+    until("la révocation attend son tour", || {
+        t.store.queued_writes() >= 1
+    })
+    .await;
+    asked.abort();
+    assert!(
+        asked.await.unwrap_err().is_cancelled(),
+        "le client est parti"
+    );
+    drop(held);
+    let deadline = std::time::Instant::now() + WAIT;
+    while t.store.token_is_live(id, now()).await.unwrap() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "le jeton vit encore : la révocation n'est pas écrite"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
+/// Un changement de mot de passe réussi rouvre la fenêtre du frein de la création (Ruling R1377) :
+/// neuf mots de passe faux à la création, le mot de passe changé, puis neuf autres et une création
+/// juste, qui passe ; sans la remise à zéro, la fenêtre fermait au dixième.
+#[tokio::test]
+async fn a_password_change_reopens_the_token_creation_window() {
+    let t = open_app().await;
+    let mona = t.account("Mona").await;
+    let mut wrong = all_scope("agent");
+    wrong["password"] = json!("pas-le-bon-mot-de-passe");
+    for attempt in 1..=9 {
+        let reply = mona.browser.post(TOKENS, wrong.clone()).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
+    }
+    mona.browser
+        .change_password(PASSWORD, "un-mot-de-passe-neuf")
+        .await
+        .assert_status(StatusCode::OK);
+    for attempt in 1..=9 {
+        let reply = mona.browser.post(TOKENS, wrong.clone()).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "essai {attempt}");
+    }
+    let mut right = all_scope("agent");
+    right["password"] = json!("un-mot-de-passe-neuf");
+    mona.browser
+        .post(TOKENS, right)
+        .await
+        .assert_status(StatusCode::CREATED);
 }

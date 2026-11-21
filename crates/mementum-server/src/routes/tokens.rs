@@ -58,7 +58,7 @@ use crate::types::{
     self, CreateToken, ErrorCode, TokenCall, TokenCallOutcome, TokenCallSurface, TokenCalls,
     TokenCreated, TokenInfo, TokenPage, TokenSpace,
 };
-use crate::{AppState, now_ms};
+use crate::{AppState, now_ms, to_completion};
 
 /// Le nom d'un jeton, au plus, en caractères (Ruling R1220).
 pub const MAX_TOKEN_NAME_CHARS: usize = 60;
@@ -188,6 +188,10 @@ pub(crate) async fn create(
 /// `DELETE /api/v1/tokens/{id}` : `204` ; le jeton ne vaut plus dès l'appel suivant (la porte le
 /// relit à chaque appel). Déjà révoqué : `204`, rien n'est écrit. Un jeton d'un autre compte,
 /// inconnu, mal nommé ou mort depuis quatre-vingt-dix jours : `404 not_found`, la même réponse.
+///
+/// La révocation va au bout même si le client coupe (`to_completion`, Ruling R1376), comme la
+/// déconnexion : qui ferme l'onglet pendant qu'elle attend son tour d'écriture ne laisse pas le
+/// jeton vivant.
 pub(crate) async fn revoke(
     State(state): State<AppState>,
     caller: Result<SessionUser, ApiError>,
@@ -195,16 +199,19 @@ pub(crate) async fn revoke(
 ) -> Result<StatusCode, ApiError> {
     let user = caller?.user;
     let id = token_id(path)?;
-    match state.store.revoke_token(user.id, id, now_ms()).await {
-        Ok(revoked) => {
-            if revoked {
-                tracing::info!(user_id = %user.id, token_id = %id, "jeton d'API révoqué");
+    to_completion(async move {
+        match state.store.revoke_token(user.id, id, now_ms()).await {
+            Ok(revoked) => {
+                if revoked {
+                    tracing::info!(user_id = %user.id, token_id = %id, "jeton d'API révoqué");
+                }
+                Ok(StatusCode::NO_CONTENT)
             }
-            Ok(StatusCode::NO_CONTENT)
+            Err(StoreError::NotFound) => Err(ApiError::token_not_found()),
+            Err(error) => Err(internal(error)),
         }
-        Err(StoreError::NotFound) => Err(ApiError::token_not_found()),
-        Err(error) => Err(internal(error)),
-    }
+    })
+    .await
 }
 
 /// Ce que la lecture de l'activité accepte dans son adresse.
@@ -220,8 +227,10 @@ pub(crate) struct CallsQuery {
 /// `GET /api/v1/tokens/{id}/calls?before=&outcome=` : [`TokenCalls`], le journal d'activité du
 /// jeton, de la plus récente ligne à la plus ancienne, [`CALLS_PER_PAGE`] au plus ; un jeton mort
 /// se lit tant qu'il est gardé (Ruling R1220). Le titre d'une page n'est lu que si `access.rs` la
-/// montre encore au compte (Ruling R1368). Refus : ceux de la révocation, puis `400
-/// invalid_request` pour une adresse qui ne se lit pas.
+/// montre encore au compte (Ruling R1368). Refus, dans l'ordre : `401`, `409 account_changed` ;
+/// `400 invalid_request` pour une adresse qui ne se lit pas, **avant tout `404`** : elle ne dit
+/// rien du jeton, qui n'est pas encore cherché ; puis `404 not_found` pour un jeton d'un autre
+/// compte, inconnu, mal nommé ou mort depuis quatre-vingt-dix jours (Ruling R1378).
 pub(crate) async fn calls(
     State(state): State<AppState>,
     caller: Result<SessionUser, ApiError>,
@@ -229,7 +238,6 @@ pub(crate) async fn calls(
     query: Result<Query<CallsQuery>, QueryRejection>,
 ) -> Result<Json<TokenCalls>, ApiError> {
     let user = caller?.user;
-    let id = token_id(path)?;
     let Query(query) = query.map_err(|_| unreadable_query())?;
     let outcome = match query.outcome.as_deref() {
         None => None,
@@ -238,6 +246,7 @@ pub(crate) async fn calls(
         Some("error") => Some(CallOutcome::Error),
         Some(_) => return Err(unreadable_query()),
     };
+    let id = token_id(path)?;
     let now = now_ms();
     let mut rows = match state
         .store

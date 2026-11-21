@@ -690,8 +690,8 @@ impl ApiError {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::InvalidLevel,
-            "un jeton d'API se donne au niveau « read » (lire) ou « edit » (modifier), jamais \
-             plus ; rien n'a été créé",
+            "un jeton d'API se donne au niveau « Lecture » ou « Modification », jamais plus ; \
+             rien n'a été créé",
         )
     }
 

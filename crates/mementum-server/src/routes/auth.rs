@@ -446,6 +446,9 @@ async fn new_password(
         return Err(wrong_current_password());
     };
     state.logins.succeeded(Guarded::PasswordChange, &user.email);
+    // Le mot de passe a changé, prouvé par l'actuel : les échecs de la création d'un jeton,
+    // comptés contre l'ancien, ne ferment plus rien (Ruling R1377).
+    state.logins.succeeded(Guarded::TokenCreation, &user.email);
     Ok((
         StatusCode::OK,
         [(header::SET_COOKIE, auth::session_cookie(&token, secure))],
