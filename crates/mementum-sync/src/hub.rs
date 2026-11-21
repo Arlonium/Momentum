@@ -146,6 +146,9 @@ pub struct Hub {
     /// Les pages dont un acteur a écrit le contenu depuis le dernier [`Hub::take_touched`]
     /// (Ruling R907) : au plus une entrée par page, quel que soit le nombre de frappes.
     touched: Mutex<HashSet<Uuid>>,
+    /// Combien de fois chaque page a été écrite au journal depuis le démarrage (lot 5, tour de
+    /// correction de S7) : une lecture gardée sous ce compte vaut tant qu'il n'a pas bougé.
+    written_counts: Mutex<HashMap<Uuid, u64>>,
     /// Réveille qui attend [`Hub::touched_changed`] : un seul jeton, gardé s'il n'y a personne.
     touched_wake: Notify,
     /// Les états complets encodés par les acteurs depuis le démarrage
@@ -181,6 +184,7 @@ impl Hub {
             reloads: AtomicU64::new(0),
             brake: crate::brake::Brake::new(cfg.refusal_block),
             touched: Mutex::new(HashSet::new()),
+            written_counts: Mutex::new(HashMap::new()),
             touched_wake: Notify::new(),
             state_encodings: AtomicU64::new(0),
             key: HashKey::new(),
@@ -254,7 +258,7 @@ impl Hub {
     /// fois. Un seul appel pour la route. La révision rendue est celle de l'état écrit, sortie de
     /// la commande qui écrit. Un refus n'a rien écrit.
     pub async fn edit_page(&self, node_id: Uuid, edit: Edit) -> Result<Edited, EditRefusal> {
-        let edit = Arc::new(edit);
+        let mut edit = Arc::new(edit);
         let mut then: Option<Versioned> = None;
         loop {
             let step = self
@@ -285,6 +289,19 @@ impl Hub {
                     let Ok(Ok(version)) = written.await else {
                         return Err(EditRefusal::VersionRefused);
                     };
+                    // Lot 5, tour de correction de S7 : la version s'est écrite hors de l'acteur
+                    // (150 à 300 ms) ; les blocs commentés sont relus avant la seconde commande,
+                    // pour qu'un fil ouvert pendant ce temps protège son bloc (R1571).
+                    if edit.commented.is_some() {
+                        let fresh = self
+                            .store
+                            .commented_blocks(node_id)
+                            .await
+                            .map_err(|e| EditRefusal::Failed(SyncError::Store(e)))?;
+                        let mut renewed = (*edit).clone();
+                        renewed.commented = Some(fresh);
+                        edit = Arc::new(renewed);
+                    }
                     let cuts = then.as_ref().map_or(0, |versioned| versioned.cuts) + 1;
                     then = Some(Versioned {
                         encoded,
@@ -374,6 +391,12 @@ impl Hub {
     /// frappe : ni lecture des blocs, ni encodage, ni attente. Le verrou n'est tenu que le temps
     /// d'une insertion, et jamais pendant une attente.
     pub(crate) fn touched(&self, node_id: Uuid) {
+        *self
+            .written_counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .entry(node_id)
+            .or_insert(0) += 1;
         let first = {
             let mut touched = self.touched.lock().unwrap_or_else(PoisonError::into_inner);
             let was_empty = touched.is_empty();
@@ -382,6 +405,22 @@ impl Hub {
         if first {
             self.touched_wake.notify_one();
         }
+    }
+
+    /// Combien de fois le contenu de la page a été écrit au journal depuis le démarrage du
+    /// processus (une frappe, une écriture du serveur ou d'un agent, une restauration ; 0 si
+    /// jamais), sans rien demander à son acteur (lot 5, tour de correction de S7, R1403). Une
+    /// lecture de la page faite après avoir lu ce compte vaut tant qu'il n'a pas bougé : l'acteur
+    /// écrit le journal, puis l'avance, avant de servir une commande suivante. Une compaction, une
+    /// version, un rechargement ne changent pas le contenu, ni ce compte. Une entrée par page
+    /// écrite depuis le démarrage, jamais retirée (quelques dizaines d'octets chacune).
+    pub fn page_generation(&self, node_id: Uuid) -> u64 {
+        self.written_counts
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&node_id)
+            .copied()
+            .unwrap_or(0)
     }
 
     /// Les pages dont un acteur a écrit le contenu (une frappe, une écriture du serveur, une

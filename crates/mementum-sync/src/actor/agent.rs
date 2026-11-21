@@ -71,8 +71,13 @@ pub struct Edit {
     /// version `before_agent` (R1234).
     pub writer: Writer,
     /// Les identifiants des blocs qui portent un fil de commentaires : un contenu protégé (R1232,
-    /// R1571 ; le hub ne connaît pas les fils, la route les donne).
+    /// R1571 ; la route les donne, et le hub les relit avant la seconde commande d'une écriture
+    /// qui coupe une version, lot 5, tour de correction de S7).
     pub commented: Option<HashSet<String>>,
+    /// L'écriture est refusée (`EditRefusal::PageInUse`) dès qu'une connexion de synchro qui écrit
+    /// est ouverte sur la page (R1233 : `replace_page` par un jeton), jugé dans chaque commande qui
+    /// décide d'écrire, jamais avant.
+    pub alone: bool,
 }
 
 /// Une page lue par son acteur ([`crate::Hub::read_page`]) : ses blocs et sa révision, sortis de
@@ -136,6 +141,9 @@ pub enum EditRefusal {
     },
     /// Une opération destructrice sans révision : `422 revision_required` (R1231).
     RevisionRequired,
+    /// L'écriture demandait la page à elle seule (`Edit::alone`), et une connexion de synchro qui
+    /// écrit y est ouverte : `409 page_in_use` (R1233).
+    PageInUse,
     /// L'écriture est estimée au-delà de [`crate::SyncConfig::agent_write_budget`] : `422
     /// too_long_to_write`, sans repli sur une récriture complète (Task S2, R1294).
     TooLong(WriteCost),
@@ -316,6 +324,11 @@ impl Actor {
         // celle d'une autre écriture destructrice, qui dit ce que garde la tranche.
         if then.is_some() || (destructive && token.is_some()) {
             self.versioning_finished().await;
+        }
+        // R1233, jugé dans la commande : une connexion ouverte pendant la version d'une écriture en
+        // deux commandes la fait refuser à la seconde.
+        if edit.alone && self.writers() > 0 {
+            return Ok(Step::Done(Err(EditRefusal::PageInUse)));
         }
         let (current, revision) = self.read_page();
         // R1231 : la révision nommée, et les empreintes de ses blocs. Celles de l'état encodé ne

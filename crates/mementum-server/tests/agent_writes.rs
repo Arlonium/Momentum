@@ -794,6 +794,244 @@ async fn sqlx_dump(db: &std::path::Path, token: &str) -> String {
         .join("\n")
 }
 
+/// Une requête menée dans une tâche à elle, sur le routeur de l'application : pour agir pendant
+/// qu'elle attend.
+fn in_background(t: &TestApp, mut request: Request<Body>) -> tokio::task::JoinHandle<Reply> {
+    use tower::ServiceExt;
+    request
+        .headers_mut()
+        .insert(header::HOST, "localhost".parse().unwrap());
+    let router = t.router.clone();
+    tokio::spawn(async move {
+        let response = router.oneshot(request).await.unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_string());
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        Reply {
+            status,
+            headers,
+            content_type,
+            body,
+        }
+    })
+}
+
+/// Une écriture d'opérations par jeton, menée dans une tâche à elle.
+fn operations_in_background(
+    t: &TestApp,
+    token: &str,
+    page: Uuid,
+    body: Value,
+) -> tokio::task::JoinHandle<Reply> {
+    in_background(
+        t,
+        with_bearer(
+            json_request(
+                Method::POST,
+                &format!("/api/v1/pages/{page}/operations"),
+                &body,
+            ),
+            token,
+        ),
+    )
+}
+
+/// Tour de correction de S7 (R1404) : le contenu est écrit, puis le titre de `set_properties` est
+/// refusé (la page est partie à la corbeille pendant que la version d'avant l'écriture
+/// s'écrivait). La réponse le dit, avec la révision écrite, et le journal d'activité garde cette
+/// révision, sous le refus.
+#[tokio::test]
+async fn a_title_refused_after_the_content_says_the_content_is_written() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Titrée", "Un\n\nDeux\n").await;
+    let (token, token_id) = token_of(&t, team.olga.id, TokenLevel::Edit).await;
+    let base = revision(&t, &token, page).await;
+    let alias = alias_of(&aliases(&t, &token, page).await, "Deux");
+    let held = t.hub.hold_agent_versions();
+    let write = operations_in_background(
+        &t,
+        &token,
+        page,
+        json!({ "baseRevision": base, "operations": [
+            { "op": "delete_block", "anchor": alias },
+            { "op": "set_properties", "properties": { "title": "Autre titre" } },
+        ]}),
+    );
+    eventually("la version d'avant l'écriture n'attend pas", || {
+        t.hub.agent_versions_waiting() == 1
+    })
+    .await;
+    team.trash(page).await;
+    drop(held);
+    let reply = write.await.unwrap();
+    let body = reply.assert_error(StatusCode::CONFLICT, "trashed");
+    assert!(
+        body["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("le contenu est écrit ; seul le titre ne l'est pas"),
+        "{body}"
+    );
+    let written = body["revision"].as_str().unwrap().to_string();
+    assert_eq!(revision(&t, &token, page).await, written);
+    assert_eq!(mmd_of(&team, page).await, "Un\n");
+    t.calls.flush(&t.store).await;
+    let kept = query_i64(
+        &t.db_path(),
+        &format!(
+            "SELECT COUNT(*) FROM token_calls WHERE token_id = '{token_id}' \
+             AND outcome = 'refused' AND code = 'trashed' AND revision_after = '{written}' \
+             AND blocks_touched = 1"
+        ),
+    )
+    .await;
+    assert_eq!(kept, 1, "le journal d'activité n'a pas la révision écrite");
+}
+
+/// Tour de correction de S7 (R1571) : un fil ouvert sur un bloc pendant que la version d'avant une
+/// écriture destructrice s'écrit protège ce bloc : les blocs commentés sont relus juste avant la
+/// seconde commande.
+#[tokio::test]
+async fn a_thread_opened_during_the_version_protects_its_block() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Commentée en route", "Un\n\nDeux\n").await;
+    let (token, _) = token_of(&t, team.olga.id, TokenLevel::Edit).await;
+    let base = revision(&t, &token, page).await;
+    let alias = alias_of(&aliases(&t, &token, page).await, "Deux");
+    let two = t
+        .hub
+        .read_blocks(page)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|b| mementum_md::block_text(b) == "Deux")
+        .unwrap()
+        .id;
+    let held = t.hub.hold_agent_versions();
+    let write = operations_in_background(
+        &t,
+        &token,
+        page,
+        json!({ "baseRevision": base, "operations": [{ "op": "delete_block", "anchor": alias }] }),
+    );
+    eventually("la version d'avant l'écriture n'attend pas", || {
+        t.hub.agent_versions_waiting() == 1
+    })
+    .await;
+    team.mona
+        .browser
+        .post(
+            &format!("/api/v1/pages/{page}/comments"),
+            json!({ "body": "À garder", "blockId": two }),
+        )
+        .await
+        .assert_status(StatusCode::CREATED);
+    drop(held);
+    let body = write
+        .await
+        .unwrap()
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "operation_failed");
+    assert_eq!(body["reason"], "protected_content", "{body}");
+    assert_eq!(mmd_of(&team, page).await, "Un\n\nDeux\n");
+}
+
+/// Tour de correction de S7 (R1233) : une connexion de synchro qui écrit, ouverte pendant que la
+/// version d'avant un `replace_page` s'écrit, le fait refuser : l'acteur juge dans la commande qui
+/// écrit.
+#[tokio::test]
+async fn a_connection_opened_during_the_version_refuses_replace_page() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Occupée en route", "Un\n").await;
+    let (token, _) = token_of(&t, team.olga.id, TokenLevel::Edit).await;
+    let base = revision(&t, &token, page).await;
+    let held = t.hub.hold_agent_versions();
+    let write = operations_in_background(
+        &t,
+        &token,
+        page,
+        json!({ "baseRevision": base, "operations": [{ "op": "replace_page", "markdown": "Tout\n" }] }),
+    );
+    eventually("la version d'avant l'écriture n'attend pas", || {
+        t.hub.agent_versions_waiting() == 1
+    })
+    .await;
+    let addr = t.listen().await;
+    let _mona = synced_as(&team.mona.browser, &sync_url(addr, page)).await;
+    drop(held);
+    write
+        .await
+        .unwrap()
+        .assert_error(StatusCode::CONFLICT, "page_in_use");
+    assert_eq!(mmd_of(&team, page).await, "Un\n");
+}
+
+/// Ruling R1382 : une écriture d'agent refusée à son tour d'écriture parce que son jeton vient
+/// d'être révoqué ne ferme aucune connexion de la page ; elles ne reçoivent rien de l'écriture
+/// refusée, et une frappe faite autour d'elle n'est pas perdue.
+#[tokio::test]
+async fn a_revoked_write_closes_no_connection_and_loses_no_keystroke() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Frappée", "Un\n").await;
+    let (token, token_id) = token_of(&t, team.olga.id, TokenLevel::Edit).await;
+    let addr = t.listen().await;
+    let url = sync_url(addr, page);
+    let mona = synced_as(&team.mona.browser, &url).await;
+    let tom = synced_as(&team.tom.browser, &url).await;
+    let block = mona.blocks()[0].id.clone();
+    let held = t.store.hold_writes().await;
+    let write = operations_in_background(
+        &t,
+        &token,
+        page,
+        json!({ "operations": [{ "op": "str_replace", "old": "Un", "new": "Uno" }] }),
+    );
+    eventually("l'écriture d'agent n'attend pas son tour", || {
+        t.store.queued_writes() == 1
+    })
+    .await;
+    // Une frappe de Mona arrive pendant que l'écriture d'agent attend son tour.
+    mona.type_text(&block, " et deux");
+    exec_sql(
+        &t.db_path(),
+        &format!("UPDATE api_tokens SET revoked_at = 1 WHERE id = '{token_id}'"),
+    )
+    .await;
+    drop(held);
+    write
+        .await
+        .unwrap()
+        .assert_error(StatusCode::UNAUTHORIZED, "invalid_token");
+    let text = |c: &mementum_sync::testkit::Client| {
+        c.blocks()
+            .first()
+            .map(mementum_md::block_text)
+            .unwrap_or_default()
+    };
+    assert!(
+        tom.wait_until(WAIT, |c| text(c) == "Un et deux").await,
+        "Tom n'a pas la frappe de Mona : « {} »",
+        text(&tom)
+    );
+    assert!(
+        !mona.is_closed() && !tom.is_closed(),
+        "une connexion a été fermée"
+    );
+    assert!(common::sync::still_served(&mona).await);
+    assert!(common::sync::still_served(&tom).await);
+    assert_eq!(text(&mona), "Un et deux");
+    assert_eq!(text(&tom), "Un et deux");
+    assert_eq!(mmd_of(&team, page).await, "Un et deux\n");
+}
+
 /// Tour de correction de S7, sur le modèle de `a_copy_refused_at_its_turn_is_tried_three_times` :
 /// un lot refusé à son tour d'écriture (ce sur quoi il a décidé ne tient plus) est repris ; deux
 /// refus, il s'écrit en entier ; trois, `409 page_moved`, rien d'écrit.

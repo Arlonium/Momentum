@@ -941,3 +941,91 @@ async fn measure_document_of_a_10000_block_page() {
         );
     }
 }
+
+/// Tour de correction de S7 (R1401, R1403) : la lecture complète d'une page de 10 000 blocs par
+/// tranches de 48 Kio, comme un agent qui lit tout : la durée de toute la lecture, le nombre de
+/// tranches, les demandes faites à l'acteur de la page pendant elle (une seule : les tranches
+/// suivantes se servent de la lecture gardée), la durée d'une lecture de la page par son acteur
+/// (ce que chaque tranche coûtait à l'acteur avant la lecture gardée), et chaque tranche.
+/// Cinq lectures complètes, chacune après une petite écriture qui fait relire la page.
+#[tokio::test]
+#[ignore = "mesure, à lancer en --release avec --nocapture"]
+async fn measure_full_read_of_a_10000_block_page() {
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        cfg.token_calls_per_min = 10_000;
+        cfg.account_token_calls_per_min = 10_000;
+    })
+    .await;
+    let alice = t.account("Alice").await;
+    let page = alice.create(json!({ "title": "Lue en entier" })).await;
+    alice
+        .put_mmd(&page.id, paragraphs(10_000))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let id: uuid::Uuid = page.id.parse().unwrap();
+    let (token, _) = common::api_token(
+        &t.store,
+        alice.id,
+        mementum_store::TokenLevel::Edit,
+        mementum_store::TokenScope::All,
+        false,
+    )
+    .await;
+    let send = |request: axum::http::Request<axum::body::Body>| {
+        t.send(common::with_bearer(request, &token))
+    };
+    let mut actor_reads = Vec::new();
+    let mut slices = Vec::new();
+    let mut totals = Vec::new();
+    for round in 0..5 {
+        // Une petite écriture : la lecture gardée ne vaut plus.
+        send(common::json_request(
+            axum::http::Method::POST,
+            &format!("/api/v1/pages/{}/operations", page.id),
+            &json!({ "operations": [{ "op": "str_replace", "old": format!("Bloc {round} :"), "new": format!("Bloc {round} lu :") }] }),
+        ))
+        .await
+        .assert_status(StatusCode::OK);
+        let started = Instant::now();
+        t.hub.read_page(id).await.unwrap();
+        actor_reads.push(started.elapsed());
+        // L'écriture suivante fait relire : la lecture de l'acteur ci-dessus n'est pas gardée.
+        let calls = t.hub.calls();
+        let started = Instant::now();
+        let mut from: Option<String> = None;
+        let mut count = 0;
+        loop {
+            let uri = match &from {
+                None => format!("/api/v1/pages/{}/document?limit=49152", page.id),
+                Some(from) => format!("/api/v1/pages/{}/document?limit=49152&from={from}", page.id),
+            };
+            let slice_started = Instant::now();
+            let reply = send(
+                axum::http::Request::get(uri)
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await;
+            slices.push(slice_started.elapsed());
+            reply.assert_status(StatusCode::OK);
+            count += 1;
+            match reply.json()["next"].as_str() {
+                Some(next) => from = Some(next.to_string()),
+                None => break,
+            }
+        }
+        totals.push(started.elapsed());
+        println!(
+            "MESURE lecture complète {round} : {count} tranches, {} demandes à l'acteur, {:.1} ms",
+            t.hub.calls() - calls,
+            started.elapsed().as_secs_f64() * 1000.0
+        );
+    }
+    report(
+        "lecture de la page par son acteur (10 000 blocs)",
+        actor_reads,
+    );
+    report("tranche de 48 Kio, lecture complète", slices);
+    report("lecture complète de 10 000 blocs", totals);
+}

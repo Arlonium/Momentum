@@ -742,6 +742,13 @@ impl ApiError {
         )
     }
 
+    /// Le refus, son message précédé de `prefix` (lot 5, tour de correction de S7 : le titre
+    /// refusé après un contenu écrit le dit).
+    pub(crate) fn prefixed(mut self, prefix: &str) -> ApiError {
+        self.body.message = format!("{prefix}{}", self.body.message);
+        self
+    }
+
     /// `422 mode_unavailable` : seul le mode `direct` est servi (lot 5, Ruling R1211).
     pub fn mode_unavailable() -> ApiError {
         ApiError::new(

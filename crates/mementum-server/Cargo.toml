@@ -78,3 +78,6 @@ tokio-tungstenite.workspace = true
 tower = { workspace = true, features = ["util"] }
 # Journaux lus par les tests.
 tracing-subscriber.workspace = true
+# Une page écrite par un client Yjs à la main : des blocs sans identifiant ou d'un identifiant
+# répété (`tests/agent.rs`, tour de correction de S7).
+yrs.workspace = true

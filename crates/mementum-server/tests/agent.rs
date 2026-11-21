@@ -480,6 +480,137 @@ async fn a_filtered_search_reads_only_the_pages_the_account_sees() {
     assert_eq!(judged().await, without);
 }
 
+/// Une page écrite par un client à la main (R1402) : des blocs sans identifiant, et deux blocs du
+/// même identifiant, là où les tranches se coupent. Lue en tranches par un agent, elle se lit
+/// jusqu'au bout sans jamais s'arrêter en silence : chaque tranche qui laisse un bloc le dit, et
+/// ce qui est rendu et ce qui est sauté sous une marque couvrent la page.
+#[tokio::test]
+async fn a_page_written_by_a_raw_client_is_read_to_the_end() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let token = edit_token(&t, &team).await;
+    let text = paragraphs(120);
+    let mut blocks = mementum_md::parse(&text).unwrap();
+    // Des blocs sans alias à eux, seuls ou par deux, et une suite de trente-cinq sans
+    // identifiant, plus longue qu'une tranche.
+    for (i, b) in blocks.iter_mut().enumerate() {
+        b.id = match (i, i % 7) {
+            (40..75, _) | (_, 3) => String::new(),
+            (_, 5 | 6) => "jumeau".to_string(),
+            _ => format!("bloc-{i}"),
+        };
+    }
+    let doc = mementum_crdt::PageDoc::new_page().0;
+    doc.write_blocks(&blocks).unwrap();
+    let state = forged_ids(&doc.encode_state(), &blocks);
+    let page = t
+        .store
+        .create_node(mementum_store::NewNode {
+            space_id: team.space,
+            parent_id: None,
+            after: None,
+            kind: mementum_store::NodeKind::Page,
+            title: "Écrite à la main".to_string(),
+            created_by: Some(team.olga.id),
+            grants: vec![mementum_acl::Grant {
+                subject: Subject::Members,
+                level: Level::Edit,
+            }],
+            doc: Some(state),
+        })
+        .await
+        .unwrap()
+        .id;
+    // La page porte bien des blocs sans identifiant et des identifiants répétés.
+    let stored = t.hub.read_blocks(page).await.unwrap();
+    assert!(
+        stored.iter().any(|b| b.id.is_empty()),
+        "aucun bloc sans identifiant"
+    );
+    assert!(
+        stored.iter().filter(|b| b.id == "jumeau").count() > 1,
+        "aucun identifiant répété"
+    );
+    let (mut seen, mut skipped) = (0usize, 0usize);
+    let mut query = "?limit=1024".to_string();
+    for _ in 0..200 {
+        let doc = document(&t, &token, page, &query).await;
+        let mmd = doc["mmd"].as_str().unwrap();
+        seen += mmd.lines().filter(|l| l.starts_with("Paragraphe")).count();
+        skipped += mmd
+            .lines()
+            .filter_map(|l| l.strip_prefix("<unloaded blocks="))
+            .map(|n| n.trim_end_matches("/>").parse::<usize>().unwrap())
+            .sum::<usize>();
+        match doc["next"].as_str() {
+            Some(next) => {
+                assert_eq!(doc["truncated"], true, "{doc}");
+                query = format!("?limit=1024&from={next}");
+            }
+            None => break,
+        }
+    }
+    assert_eq!(seen + skipped, 120, "{seen} rendus, {skipped} sautés");
+    assert!(skipped > 0, "aucun bloc sauté");
+}
+
+/// L'état `state` récrit par un client Yjs à la main : chaque bloc de premier niveau prend
+/// l'identifiant du bloc de même rang de `wanted`, ou n'en a aucun si celui-ci est vide (le serveur,
+/// lui, n'écrit jamais deux fois un identifiant, ni un bloc sans).
+fn forged_ids(state: &[u8], wanted: &[mementum_md::Block]) -> Vec<u8> {
+    use yrs::updates::decoder::Decode;
+    use yrs::{Doc, ReadTxn, StateVector, Transact, Update, Xml, XmlFragment, XmlOut};
+    let doc = Doc::new();
+    let fragment = doc.get_or_insert_xml_fragment(mementum_crdt::FRAGMENT);
+    let mut txn = doc.transact_mut();
+    txn.apply_update(Update::decode_v1(state).unwrap()).unwrap();
+    let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+        panic!("pas de groupe de blocs");
+    };
+    for (i, block) in wanted.iter().enumerate() {
+        let Some(XmlOut::Element(container)) = group.get(&txn, i as u32) else {
+            panic!("pas de bloc au rang {i}");
+        };
+        if block.id.is_empty() {
+            container.remove_attribute(&mut txn, &"id");
+        } else {
+            container.insert_attribute(&mut txn, "id", block.id.clone());
+        }
+    }
+    drop(txn);
+    doc.transact()
+        .encode_state_as_update_v1(&StateVector::default())
+}
+
+/// Une lecture en tranches ne repasse par l'acteur de la page qu'à sa première tranche, tant que
+/// la page n'est pas écrite (R1403) ; écrite entre deux tranches, la page est relue.
+#[tokio::test]
+async fn a_later_slice_of_the_same_revision_does_not_ask_the_actor() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Lue en tranches", &paragraphs(60)).await;
+    let token = edit_token(&t, &team).await;
+    let first = document(&t, &token, page, "?limit=1024").await;
+    let calls = t.hub.calls();
+    let next = first["next"].as_str().unwrap();
+    let second = document(&t, &token, page, &format!("?limit=1024&from={next}")).await;
+    assert_eq!(
+        t.hub.calls(),
+        calls,
+        "la seconde tranche a demandé l'acteur"
+    );
+    assert_eq!(second["revision"], first["revision"]);
+    team.olga
+        .put_mmd(&page.to_string(), paragraphs(61))
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let calls = t.hub.calls();
+    let next = second["next"].as_str().unwrap();
+    let third = document(&t, &token, page, &format!("?limit=1024&from={next}")).await;
+    assert!(t.hub.calls() > calls, "la page écrite n'a pas été relue");
+    assert_ne!(third["revision"], first["revision"]);
+}
+
 /// La date du contenu d'une page (`editedAt`) est posée par l'indexeur, d'après le journal
 /// (Ruling R1246) : la date de l'écriture, pas celle de l'indexation ; les filtres de date de la
 /// recherche la lisent.

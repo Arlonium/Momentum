@@ -49,6 +49,35 @@ pub(crate) struct Updated {
     pub(crate) details: CallDetails,
 }
 
+/// Une écriture d'agent refusée : la réponse, et, quand le contenu a été écrit avant le refus (le
+/// titre de `set_properties`), ce que le journal d'activité en garde (R1404).
+pub(crate) struct UpdateRefused {
+    pub(crate) error: ApiError,
+    /// En boîte : un `Result<_, UpdateRefused>` reste sous la borne de `clippy::result_large_err`.
+    pub(crate) details: Option<Box<CallDetails>>,
+}
+
+impl From<ApiError> for UpdateRefused {
+    fn from(error: ApiError) -> UpdateRefused {
+        UpdateRefused {
+            error,
+            details: None,
+        }
+    }
+}
+
+impl From<mementum_sync::SyncError> for UpdateRefused {
+    fn from(error: mementum_sync::SyncError) -> UpdateRefused {
+        ApiError::from(error).into()
+    }
+}
+
+impl From<mementum_store::StoreError> for UpdateRefused {
+    fn from(error: mementum_store::StoreError) -> UpdateRefused {
+        ApiError::from(error).into()
+    }
+}
+
 /// `POST /api/v1/pages/{id}/operations`, et l'outil `update_page` : les opérations de `request`
 /// sur la page `id`, toutes ou aucune : `404`, `403`, `409 trashed` d'abord (`edit`), puis la
 /// forme de l'appel, et ainsi de suite (voir le module).
@@ -57,7 +86,7 @@ pub(crate) async fn update_page(
     caller: &LiveCaller,
     id: Uuid,
     request: PageOperations,
-) -> Result<Updated, ApiError> {
+) -> Result<Updated, UpdateRefused> {
     let user = &caller.user;
     // Les refus de la page d'abord (la route les a déjà dits avant de lire le corps ; un outil
     // arrive ici avec ses arguments lus).
@@ -84,6 +113,38 @@ pub(crate) async fn update_page(
         _ => OnConflict::Rebase,
     };
     to_completion(async move {
+        Ok(write_under_the_lock(
+            state,
+            caller,
+            write,
+            id,
+            ops,
+            title,
+            checked,
+            base_revision,
+            on_conflict,
+            token,
+        )
+        .await)
+    })
+    .await?
+}
+
+/// La suite d'`update_page`, verrou de la page tenu, menée au bout même si le client coupe.
+#[allow(clippy::too_many_arguments)]
+async fn write_under_the_lock(
+    state: AppState,
+    caller: LiveCaller,
+    write: crate::page_writes::PageWrite,
+    id: Uuid,
+    ops: Vec<Operation>,
+    title: Option<String>,
+    checked: Checked,
+    base_revision: Option<String>,
+    on_conflict: OnConflict,
+    token: Option<Uuid>,
+) -> Result<Updated, UpdateRefused> {
+    {
         let _write = write;
         let LiveCaller { user, proof } = caller;
         // La page chargée, l'appel et les droits sont relus : c'est ce second contrôle qui
@@ -111,10 +172,6 @@ pub(crate) async fn update_page(
                 },
             });
         }
-        // Ruling R1233 : un jeton ne récrit pas toute une page où quelqu'un écrit.
-        if checked.replaces_page && token.is_some() && state.hub.writers(id).await > 0 {
-            return Err(ApiError::page_in_use());
-        }
         let commented = state.store.commented_blocks(id).await?;
         let base = base_revision.map(|revision| {
             let hashes = state.revisions.hashes(id, &revision);
@@ -129,21 +186,45 @@ pub(crate) async fn update_page(
                 token,
             },
             commented: Some(commented),
+            // Ruling R1233 : un jeton ne récrit pas toute une page où quelqu'un écrit ; jugé par
+            // l'acteur dans chaque commande qui décide d'écrire (tour de correction de S7).
+            alone: checked.replaces_page && token.is_some(),
         };
-        let edited = state
-            .hub
-            .edit_page(id, edit)
-            .await
-            .map_err(|refusal| refused(refusal, &checked))?;
+        // La réponse, ses alias et son MMD se bâtissent hors des fils du serveur (R863, R1401).
+        let party = user.party();
+        let edited = match state.hub.edit_page(id, edit).await {
+            Ok(edited) => edited,
+            Err(refusal) => {
+                let error = state
+                    .mmd_reads
+                    .run(party, move || refused(refusal, &checked))
+                    .await?;
+                return Err(error.into());
+            }
+        };
         state
             .revisions
             .served(id, &edited.revision, edited.hashes.clone());
+        let updated = state.mmd_reads.run(party, move || written(edited)).await?;
         if let Some(title) = title {
-            rename(&state, &user, id, title).await?;
+            // Lot 5, tour de correction de S7 (R1404) : le contenu est écrit ; un titre refusé
+            // ensuite le dit, avec la révision écrite, et le journal d'activité la garde.
+            if let Err(error) = rename(&state, &user, id, title).await {
+                return Err(UpdateRefused {
+                    error: error
+                        .prefixed("le contenu est écrit ; seul le titre ne l'est pas : ")
+                        .with("revision", &updated.result.revision),
+                    // L'issue et le code, la porte les lit du refus ; les révisions et les blocs
+                    // touchés sont ceux de l'écriture faite.
+                    details: Some(Box::new(CallDetails {
+                        outcome: None,
+                        ..updated.details
+                    })),
+                });
+            }
         }
-        Ok(written(edited))
-    })
-    .await
+        Ok(updated)
+    }
 }
 
 /// La réponse d'une écriture faite.
@@ -524,6 +605,7 @@ fn refused(refusal: EditRefusal, checked: &Checked) -> ApiError {
         EditRefusal::RevisionRequired => {
             ApiError::revision_required(checked.first_destructive.unwrap_or(0))
         }
+        EditRefusal::PageInUse => ApiError::page_in_use(),
         EditRefusal::TooLong(cost) => ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::TooLongToWrite,

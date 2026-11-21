@@ -617,7 +617,12 @@ pub(crate) async fn get_mmd(
         .revisions
         .served(id, &read.revision, read.hashes.clone());
     let mmd = if anchors {
-        crate::agent::fetch::anchored(&read.blocks)
+        // Les alias et le rendu, hors des fils du serveur (tour de correction de S7).
+        let blocks = read.blocks.clone();
+        state
+            .mmd_reads
+            .run(user.party(), move || crate::agent::fetch::anchored(&blocks))
+            .await?
     } else {
         render(&read.blocks, RenderOpts::default()).markdown
     };

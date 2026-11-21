@@ -97,11 +97,10 @@ pub(crate) async fn document(
     query: Result<Query<DocumentQuery>, QueryRejection>,
 ) -> Result<Json<PageDocument>, ApiError> {
     let id = page_id(path)?;
-    // Les refus d'abord : une page qu'on ne voit pas, puis l'adresse.
-    state.node_access(&user, id, Action::Read).await?;
-    let fetch = fetch_of(query)?;
+    // Les refus d'abord : une page qu'on ne voit pas, puis l'adresse (`document` juge l'accès,
+    // une fois, avant de lire `fetch`).
     Ok(Json(
-        crate::agent::fetch::document(&state, &user, id, fetch).await?,
+        crate::agent::fetch::document(&state, &user, id, fetch_of(query)).await?,
     ))
 }
 
@@ -116,9 +115,18 @@ pub(crate) async fn operations(
     // Premier contrôle : les refus, avant que le corps soit jugé.
     state.node_access(&caller.user, id, Action::Edit).await?;
     let Json(request) = body?;
-    let updated = crate::agent::update::update_page(&state, &caller, id, request).await?;
-    let mut response = Json(updated.result).into_response();
-    response.extensions_mut().insert(updated.details);
+    let (mut response, details) =
+        match crate::agent::update::update_page(&state, &caller, id, request).await {
+            Ok(updated) => (Json(updated.result).into_response(), Some(updated.details)),
+            Err(refused) => (
+                refused.error.into_response(),
+                refused.details.map(|details| *details),
+            ),
+        };
+    // Ce que le journal d'activité garde de l'appel, refus d'après l'écriture compris (R1404).
+    if let Some(details) = details {
+        response.extensions_mut().insert(details);
+    }
     Ok(response)
 }
 

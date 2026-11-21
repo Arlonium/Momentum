@@ -151,6 +151,7 @@ fn edit(writer: Writer, base: Option<&PageRead>, ops: Vec<Operation>) -> Edit {
         on_conflict: OnConflict::Rebase,
         writer,
         commented: None,
+        alone: false,
     }
 }
 
