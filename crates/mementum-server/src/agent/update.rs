@@ -539,6 +539,8 @@ fn operation_failed(refusal: ops::OpRefusal) -> ApiError {
     .with("index", refusal.index)
     .with("reason", refusal.reason.code())
     .with("hint", refusal.reason.hint())
+    // Le message cite l'entrée de l'agent (une ligne de son MMD, une ancre nommée deux fois).
+    .quoting()
 }
 
 /// La réponse d'une écriture d'agent refusée (voir « Pour S7 et M2 » au registre du lot, S4).
@@ -557,9 +559,9 @@ fn refused(refusal: EditRefusal, checked: &Checked) -> ApiError {
                 .collect();
             let index = refusal.index;
             match refusal.reason {
-                Reason::ExternalMedia => {
-                    ApiError::external_media(refusal.message).with("index", index)
-                }
+                Reason::ExternalMedia => ApiError::external_media(refusal.message)
+                    .with("index", index)
+                    .quoting(),
                 Reason::RevisionConflict => {
                     let (mmd, truncated) = touched_mmd(&blocks, &refusal.blocks, MAX_LIMIT);
                     ApiError::revision_conflict(&revision)
@@ -573,7 +575,8 @@ fn refused(refusal: EditRefusal, checked: &Checked) -> ApiError {
                     ErrorCode::TooLongToWrite,
                     refusal.message,
                 )
-                .with("index", index),
+                .with("index", index)
+                .quoting(),
                 reason => {
                     let candidates: Vec<serde_json::Value> = refusal
                         .candidates
@@ -590,6 +593,9 @@ fn refused(refusal: EditRefusal, checked: &Checked) -> ApiError {
                     .with("hint", reason.hint())
                     .with("candidates", candidates)
                     .with("blocks", aliases)
+                    // Les messages d'un refus d'opération citent l'entrée de l'agent : un `old`,
+                    // une ancre, une adresse (`mementum_crdt::ops`, par `excerpt`).
+                    .quoting()
                 }
             }
         }

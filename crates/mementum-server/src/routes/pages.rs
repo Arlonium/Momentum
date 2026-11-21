@@ -954,6 +954,7 @@ fn unregistered_prop(name: &str, place: String, target: &str, known: &[PropSpec]
             mementum_md::excerpt(name)
         ),
     )
+    .quoting()
 }
 
 /// Ruling R33 : un bloc `unknown` écrit par MMD n'est jamais recréé en élément

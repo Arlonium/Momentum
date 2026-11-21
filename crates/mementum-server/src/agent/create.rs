@@ -217,7 +217,8 @@ fn built_doc(markdown: &str, forbid_media: bool) -> Result<Vec<u8>, ApiError> {
              l'adresse « {} » est sur le web : un agent ne pose que des médias envoyés à \
              l'instance ; un lien ([texte](adresse)) passe ; rien n'a été créé",
             mementum_md::excerpt(url)
-        )));
+        ))
+        .quoting());
     }
     let page = PageDoc::new_page().0;
     if !blocks.is_empty() {

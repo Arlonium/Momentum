@@ -31,6 +31,10 @@ pub struct ApiError {
     /// refusée, la révision courante d'un conflit) : jamais `error` ni `message`.
     /// En boîte : le refus ordinaire reste petit (`clippy::result_large_err`).
     extra: Option<Box<serde_json::Map<String, serde_json::Value>>>,
+    /// Le message cite l'entrée de l'appelant (un `old`, une ancre, une ligne de MMD, une adresse,
+    /// le nom d'une prop), entre « et » ([`ApiError::quoting`]) : l'outil MCP le met alors dans le
+    /// contenu borné, jamais dans les lignes du serveur (Rulings R1439, R1517). Jamais dans le corps.
+    quotes_input: bool,
 }
 
 impl ApiError {
@@ -45,7 +49,23 @@ impl ApiError {
             retry_after: None,
             bearer: false,
             extra: None,
+            quotes_input: false,
         }
+    }
+
+    /// Le refus, marqué comme citant l'entrée de l'appelant (lot 5, correction groupée, défaut I1,
+    /// Ruling R1517). À poser là où le message est bâti avec ce que l'appelant a envoyé (par
+    /// `mementum_md::excerpt`), et nulle part ailleurs : un message que le serveur écrit seul (un
+    /// niveau, l'interdit d'un jeton, une révision exigée) n'est pas une citation, même s'il porte
+    /// des « », et l'outil MCP le laisse dans ses lignes.
+    pub(crate) fn quoting(mut self) -> ApiError {
+        self.quotes_input = true;
+        self
+    }
+
+    /// Le message cite-t-il l'entrée de l'appelant ([`ApiError::quoting`]), entre « et » ?
+    pub(crate) fn quotes_input(&self) -> bool {
+        self.quotes_input && self.body.message.contains(['«', '»'])
     }
 
     /// Le refus, avec le champ `key` de plus dans son corps.
@@ -1054,7 +1074,8 @@ impl From<MmdError> for ApiError {
             e.message,
         );
         error.body.line = Some(e.line);
-        error
+        // Un refus de la lecture cite le MMD reçu, coupé (`err`, R434).
+        error.quoting()
     }
 }
 

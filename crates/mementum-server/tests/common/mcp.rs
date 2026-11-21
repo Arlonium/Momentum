@@ -231,9 +231,11 @@ impl ToolResult {
         Some(&self.text[nonce_end + 1..end])
     }
 
-    /// Les lignes du serveur, avant le contenu borné.
+    /// Les lignes du serveur, avant le contenu borné et la ligne qui l'annonce (le début de
+    /// `DATA_LINE`, `mementum-mcp/src/text.rs`, recopié : défaut I7 de la relecture finale, l'aide
+    /// cherchait « Ce qui suit est », et débordait sur cette ligne).
     pub fn head(&self) -> &str {
-        match self.text.find("\nCe qui suit est") {
+        match self.text.find("\nCe qui suit, jusqu'à la ligne « >>> »") {
             Some(end) => &self.text[..end],
             None => match self.text.find("\n<<<contenu ") {
                 Some(end) => &self.text[..end],

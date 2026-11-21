@@ -730,6 +730,32 @@ fn unknown_space() -> Failure {
     }
 }
 
+/// Les champs de la route que nomme un message du serveur, et leur nom dans les outils (défauts I2
+/// et O4 de la relecture finale, Ruling R1518) : un agent qui recopie le nom de la route reçoit
+/// « champ inconnu » (`deny_unknown_fields`).
+const TOOL_FIELDS: &[(&str, &str)] = &[
+    ("« baseRevision »", "« base_revision »"),
+    ("« onConflict »", "« on_conflict »"),
+    ("« editedAfter »", "« edited_after »"),
+    ("« editedBefore »", "« edited_before »"),
+    ("« createdBy »", "« created_by »"),
+    ("« parentId »", "« parent »"),
+    ("« spaceId »", "« space »"),
+    ("« afterId »", "« after »"),
+    ("« allowDeletingContent »", "« allow_deleting_content »"),
+    ("« replaceAll »", "« replace_all »"),
+];
+
+/// Le message d'un refus que le serveur écrit seul, les champs de la route nommés comme dans les
+/// outils ([`TOOL_FIELDS`]). Jamais pour une citation : elle est l'entrée de l'agent, telle quelle.
+fn tool_fields(message: &str) -> String {
+    TOOL_FIELDS
+        .iter()
+        .fold(message.to_string(), |message, (route, tool)| {
+            message.replace(route, tool)
+        })
+}
+
 /// Un refus d'une route, tel que l'outil le dit : son code, son message, et ses champs de plus.
 /// Le message et les champs que le serveur écrit (alias, révision, conseil) restent hors des
 /// lignes de borne ; le texte des pages (candidats, blocs à jour) va entre elles (Ruling R1239).
@@ -746,14 +772,17 @@ fn refusal_of(error: &ApiError, counted: Counted) -> Refusal {
             .to_string(),
         // Un message de route qui cite l'entrée de l'agent (un `old`, une ancre, une adresse, une
         // ligne de MMD) la met entre « et » (R434) ; où finit la citation ne se lit pas (elle peut
-        // porter ces signes) : le message entier va dans le contenu borné (R1439).
-        _ if error.message().contains(['«', '»']) => {
+        // porter ces signes) : le message entier va dans le contenu borné (R1439). Seul un refus
+        // marqué à sa source (`ApiError::quoting`) cite : un message que le serveur écrit seul
+        // (un niveau, l'interdit d'un jeton, une révision exigée) reste dans ses lignes, même
+        // s'il porte des « » (correction groupée, défaut I1, Ruling R1517).
+        _ if error.quotes_input() => {
             quotes.push(error.message().to_string());
             "le message du serveur cite ce que tu as envoyé : il est plus bas, entre les lignes \
              de borne (citation [1])."
                 .to_string()
         }
-        _ => error.message().to_string(),
+        _ => tool_fields(error.message()),
     };
     if let Some(line) = error.line() {
         message.push_str(&format!(" (ligne {line} du MMD)"));

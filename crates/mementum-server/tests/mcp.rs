@@ -587,6 +587,122 @@ async fn a_tool_refusal_is_an_error_result_that_says_what_to_do() {
     );
 }
 
+/// Lot 5, correction groupée (défauts I1, I2 et O4 de la relecture finale, Rulings R1517,
+/// R1518) : un refus que le serveur écrit seul reste dans les lignes du serveur, même quand il
+/// porte des « », et nomme les champs de l'outil, pas ceux de la route ; seul un refus qui cite
+/// l'entrée de l'agent passe en citation, entre les lignes de borne. Trois refus du serveur (le
+/// niveau d'un jeton « Lecture », la corbeille sans l'option, la révision exigée), deux champs
+/// récrits (`base_revision`, `edited_after` et `edited_before`, `parent`), et une vraie citation
+/// (un `old` introuvable).
+#[tokio::test]
+async fn server_refusals_stay_in_the_server_lines_and_name_the_fields_of_the_tool() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Notes", "Le chat dort.\n").await;
+    let token_of = async |level: TokenLevel| {
+        api_token(&t.store, team.mona.id, level, TokenScope::All, false)
+            .await
+            .0
+    };
+    let (read, edit) = (
+        token_of(TokenLevel::Read).await,
+        token_of(TokenLevel::Edit).await,
+    );
+    let server_only = |what: &str, tool: &ToolResult, said: &str| {
+        let head = tool.head();
+        assert!(head.contains(said), "{what} : {}", tool.text);
+        assert!(!head.contains("citation"), "{what} : {}", tool.text);
+        assert!(tool.content().is_none(), "{what} : {}", tool.text);
+    };
+    for era in ERAS {
+        let reader = Mcp::new(&t, &read, era);
+        reader.open().await;
+        let refused = reader
+            .call(
+                "update_page",
+                json!({ "page": page.to_string(), "operations": [
+                    { "op": "insert", "position": "end", "markdown": "Fin.\n" },
+                ] }),
+            )
+            .await;
+        refused.refused("forbidden");
+        server_only("le niveau", &refused, "il faut « Peut modifier »");
+
+        let editor = Mcp::new(&t, &edit, era);
+        editor.open().await;
+        let refused = editor
+            .call(
+                "manage_pages",
+                json!({ "action": "trash", "page": page.to_string() }),
+            )
+            .await;
+        refused.refused("forbidden");
+        server_only("la corbeille", &refused, "l'option « corbeille »");
+
+        // La révision est exigée avant que l'ancre soit cherchée.
+        let refused = editor
+            .call(
+                "update_page",
+                json!({ "page": page.to_string(), "operations": [
+                    { "op": "replace_block", "anchor": "abcd", "markdown": "Autre.\n" },
+                ] }),
+            )
+            .await;
+        refused.refused("revision_required");
+        server_only("la révision", &refused, "« base_revision »");
+        assert!(!refused.text.contains("baseRevision"), "{}", refused.text);
+
+        let refused = editor
+            .call(
+                "search",
+                json!({ "query": "chat", "space": team.space.to_string(), "edited_after": "2026-11-20", "edited_before": "2026-11-20" }),
+            )
+            .await;
+        refused.refused("invalid_filter");
+        server_only(
+            "le filtre",
+            &refused,
+            "« edited_after » doit venir avant « edited_before »",
+        );
+
+        let refused = editor
+            .call(
+                "create_pages",
+                json!({ "parent": page.to_string(), "section": "space", "pages": [{ "title": "Sous" }] }),
+            )
+            .await;
+        refused.refused("invalid_request");
+        server_only("la section", &refused, "« parent »");
+        assert!(!refused.text.contains("parentId"), "{}", refused.text);
+
+        // La vraie citation : l'`old` de l'agent, entre les lignes de borne.
+        let refused = editor
+            .call(
+                "update_page",
+                json!({ "page": page.to_string(), "operations": [
+                    { "op": "str_replace", "old": "Le chien rêve", "new": "Le chien dort" },
+                ] }),
+            )
+            .await;
+        refused.refused("operation_failed");
+        assert!(refused.head().contains("citation [1]"), "{}", refused.text);
+        assert!(
+            !refused.head().contains("Le chien rêve"),
+            "{}",
+            refused.text
+        );
+        // L'aide `head` s'arrête avant la ligne qui annonce le contenu borné (défaut I7).
+        assert!(
+            !refused.head().contains("Ce qui suit"),
+            "{}",
+            refused.head()
+        );
+        let content = refused.content().expect("la citation");
+        assert!(content.contains("[1]"), "{content}");
+        assert!(content.contains("Le chien rêve"), "{content}");
+    }
+}
+
 /// Le débit d'un jeton (Ruling R1241) refuse l'appel d'outil suivant par un résultat
 /// `token_busy` qui dit son délai (`retry_after_seconds`, R1240), sans rien faire ; un refus du
 /// débit ne laisse qu'un compte, aucune ligne (Ruling R1244).
