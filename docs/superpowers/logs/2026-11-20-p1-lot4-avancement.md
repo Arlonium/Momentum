@@ -4,10 +4,11 @@
 
 ## Où en est le lot
 
+- **Le lot est clos le 21 novembre** (R1596) : la recette a été jouée par le coordinateur dans Chromium, à la demande de Lenny, qui en a confirmé les choix ; ses corrections (R1577 à R1595, dont le surlignage du bloc atteint et Échap qui reste dans le texte) sont sur `main` (`71e6b49`). La migration `0005` est figée.
 - **Le code est fini sur `main`** : seize tâches (S0 à S7, C1 à C3, X1, X2, et D pour la documentation), de `97d3847` (le plan, le 19 novembre) à `6f5ae38` (la Task X2, le 20 novembre à 11 h 08). Chaque tâche a eu une relecture, une seule, et ses constats ont été corrigés une fois (méthode de R935, plus bas). Tout a été poussé au fil du travail (R934).
 - **La passe complète de fin de lot, la correction groupée et la passe de contrôle sont faites** (le 20 novembre ; section « Passe de fin et correction groupée », plus bas). La passe n'a trouvé aucun défaut bloquant ; la correction en lève huit (D1 à D4, D7 à D9, D11), en reporte quatre (D5, D6, D12, D13), et en laisse un à Lenny, D10 (ce qu'Échap doit faire dans le texte). Restent : l'essai de migration d'une base du lot 3, que ni l'une ni l'autre n'ont fait, la recette du propriétaire, puis la clôture, qui fige `0005`. **Le reste de ce document est tel que la Task D l'a écrit avant la passe** : là où il dit « pour la fin du lot » ou « la passe en cours », lire la section du bas.
 - **Les dix-neuf décisions du plan** (L1 à L19) sont retenues par défaut depuis le 20 novembre (Lenny : « tu es autonome »), sauf L12 (pousser : sa réponse, R934) et L1 (Tantivy, retenu sur les mesures de S0, R933). Elles sont listées, avec les choix pris en route, en tête de la recette.
-- **La migration `0005`** peut changer jusqu'à la clôture du lot. Elle a changé trois fois (`8600ad9`, `6f093e8`, `865338c`) : aucun binaire du lot n'ouvre une instance que quelqu'un regarde.
+- **La migration `0005`** pouvait changer jusqu'à la clôture du lot ; elle est figée depuis. Elle a changé trois fois (`8600ad9`, `6f093e8`, `865338c`) : aucun binaire du lot n'ouvre une instance que quelqu'un regarde.
 
 ## Les tâches
 
