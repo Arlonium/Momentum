@@ -414,15 +414,22 @@ async fn run(
     key: HashKey,
     mut rx: UnboundedReceiver<Command>,
 ) {
+    let node_id = id.node_id;
     match load(&store, id.node_id).await {
         Ok(loaded) => {
             let slice = Slice::read(&store, id.node_id, cfg.version_every, loaded.created).await;
             let mut actor = Actor::new(id, store, cfg, key, loaded, slice);
+            // La mesure de la mémoire au repos (`memory_after_500_agent_reads`) compte ces deux
+            // lignes : combien d'acteurs vivent quand elle lit (défaut D1, Ruling R1526).
+            tracing::debug!(%node_id, "acteur de la page lancé");
             // Un journal qui porte une grosse suppression (écrite avant une
             // panne, ou avant ce réglage) est compacté dès le chargement : il
             // ne coûte qu'une fois.
             actor.compact_if_due();
+            // L'acteur, sa page et ses connexions partent avec `serve`.
             actor.serve(rx).await;
+            tracing::debug!(%node_id, "acteur de la page arrêté");
+            release_memory_soon();
         }
         Err(error) => {
             tracing::error!(node_id = %id.node_id, %error, "document de la page impossible à charger");
@@ -432,6 +439,43 @@ async fn run(
                 first.fail(error);
             }
         }
+    }
+}
+
+/// Délai entre l'arrêt d'un acteur et le `malloc_trim` qui suit : les arrêts d'une rafale (un agent
+/// qui a lu cinquante pages) n'en demandent qu'un, fait après le dernier.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+const TRIM_AFTER: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Un `malloc_trim` est prévu, pas encore fait.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+static TRIM_PENDING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Rend au système, peu après l'arrêt d'un acteur, la mémoire que sa page tenait (correction
+/// groupée du lot 5, défaut D1 de la passe de fin, Ruling R1526). Sous Windows, l'allocateur la
+/// rend de lui-même (mesuré : 404 Mo les acteurs vivants, 104 Mo arrêtés) ; sous Linux, la glibc
+/// la garde dans ses arènes, si bien que la mémoire tenue en propre ne baissait pas (720 à 790 Mo
+/// au repos sur la CI, pour un budget de 150) : `malloc_trim(0)` la rend. Un seul appel par rafale
+/// d'arrêts, une seconde après le premier, sur un fil bloquant : il parcourt les arènes et en
+/// tient les verrous, ce qu'aucune frappe n'attend. Ailleurs, rien.
+fn release_memory_soon() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if !TRIM_PENDING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        tokio::spawn(async {
+            tokio::time::sleep(TRIM_AFTER).await;
+            // Remis avant l'appel : un acteur arrêté pendant l'appel en prévoit un autre.
+            TRIM_PENDING.store(false, std::sync::atomic::Ordering::Release);
+            let trimmed = tokio::task::spawn_blocking(|| {
+                // SAFETY : `malloc_trim` n'a aucune précondition ; il ne rend au système que des
+                // pages libres des arènes de la glibc, et ne touche à aucune allocation vivante.
+                unsafe { libc::malloc_trim(0) }
+            })
+            .await;
+            tracing::debug!(
+                released = matches!(trimmed, Ok(1)),
+                "malloc_trim après l'arrêt d'acteurs"
+            );
+        });
     }
 }
 

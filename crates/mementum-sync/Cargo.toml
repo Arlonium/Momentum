@@ -31,6 +31,11 @@ yrs.workspace = true
 axum = { workspace = true, optional = true, features = ["ws"] }
 tokio-tungstenite = { workspace = true, optional = true }
 
+# Sous Linux (glibc), rendre au système la mémoire libérée par les acteurs arrêtés
+# (`malloc_trim`, correction groupée du lot 5, défaut D1, Ruling R1526). Déjà dans l'arbre (tokio).
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Les tests d'intégration utilisent le client et le serveur de la feature `testkit`.
 mementum-sync = { path = ".", features = ["testkit"] }

@@ -422,6 +422,9 @@ fn memory_after_500_agent_reads() {
         &[
             ("MEMENTUM_TOKEN_CALLS_PER_MIN", "100000"),
             ("MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN", "100000"),
+            // Les lignes du lancement et de l'arrêt de chaque acteur, et de `malloc_trim` sous
+            // Linux : la mesure dit combien d'acteurs vivent quand elle lit (défaut D1, R1526).
+            ("RUST_LOG", "info,mementum_sync::actor=debug"),
         ],
     );
     let password = "un mot de passe assez long";
@@ -526,13 +529,16 @@ fn memory_after_500_agent_reads() {
     // la boucle, sans débit, revient à chaque page en moins de 3 s), chacun avec sa page.
     thread::sleep(Duration::from_secs(2));
     let working = memory_of(server.pid());
+    let working_actors = actors_alive(&server);
     // Ruling R1657 : un acteur qu'aucune connexion n'a ouvert s'arrête 3 s après son dernier
     // appel.
     thread::sleep(IDLE_CLOSE_UNOPENED + Duration::from_secs(1) - after_reads.elapsed());
     let unopened = memory_of(server.pid());
+    let unopened_actors = actors_alive(&server);
     // Au repos : `idle_close` passé, tous les acteurs arrêtés.
     thread::sleep(IDLE_CLOSE + Duration::from_secs(3) - after_reads.elapsed());
     let used = memory_of(server.pid());
+    let used_actors = actors_alive(&server);
     println!(
         "MESURE après {READS} lectures d'agent de pages de {BLOCKS} blocs ({read_in:?}, une \
          écriture d'agent avant chaque relecture, {PAGES} pages) : 2 s après, les acteurs vivants, \
@@ -544,6 +550,18 @@ fn memory_after_500_agent_reads() {
         own_mb(unopened),
         mb(used.rss),
         own_mb(used),
+    );
+    println!(
+        "MESURE acteurs vivants (lancés moins arrêtés, d'après le journal du serveur) et appels de \
+         malloc_trim (Linux seulement), aux mêmes instants (défaut D1, R1526) : 2 s après {} \
+         acteurs, {} malloc_trim ; 4 s après {} acteurs, {} malloc_trim ; au repos {} acteurs, \
+         {} malloc_trim",
+        working_actors.0,
+        working_actors.1,
+        unopened_actors.0,
+        unopened_actors.1,
+        used_actors.0,
+        used_actors.1,
     );
     server.kill();
     // Ruling R1659 : la borne n'est affirmée que là où un passage l'a vue tenir (sous Windows, 117
@@ -567,6 +585,18 @@ fn memory_after_500_agent_reads() {
         own_mb(used),
         mb(IDLE_RSS),
     );
+}
+
+/// Les acteurs de page vivants (lancés moins arrêtés) et les appels de `malloc_trim` faits, d'après
+/// le journal du serveur (au niveau `debug` pour `mementum_sync::actor`) : ce que la mesure de la
+/// mémoire au repos lit sous Linux pour séparer ses deux hypothèses (défaut D1, Ruling R1526 : la
+/// glibc qui garde la mémoire libérée, ou des acteurs qui ne s'arrêtent pas).
+fn actors_alive(server: &Server) -> (usize, usize) {
+    let log = server.stderr();
+    let started = log.matches("acteur de la page lancé").count();
+    let stopped = log.matches("acteur de la page arrêté").count();
+    let trims = log.matches("malloc_trim après l'arrêt d'acteurs").count();
+    (started.saturating_sub(stopped), trims)
 }
 
 /// L'attente de [`memory_after_500_agent_reads`] suit `idle_close` : sans cela, la mémoire « au
