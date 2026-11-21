@@ -1,6 +1,7 @@
 // L'écran « Jetons d'API » du compte (lot 5, Task C1), dans un vrai navigateur : un jeton créé,
-// copié, qui sert à un vrai appel, puis révoqué et refusé dès l'appel suivant ; et un changement de
-// mot de passe qui les révoque tous, que la fenêtre dit avant et après, et que la liste montre.
+// copié, qui sert à un vrai appel, puis révoqué et refusé dès l'appel suivant ; un changement de mot
+// de passe qui les révoque tous, que la fenêtre dit avant et après, et que la liste montre ; et
+// l'activité d'un jeton, dépliée sous sa ligne (Task C2).
 //
 // L'appel fait avec le jeton passe par une route REST ouverte aux jetons (`GET …/tree`) : `/mcp` n'est
 // pas encore servi (Task M2) ; la Task X1 branche un vrai client MCP. Les jetons sont créés par le
