@@ -37,7 +37,8 @@
 //! du compte du jeton, restreint ici, et nulle part ailleurs : les fonctions gardent leur
 //! signature et lisent elles-mêmes `AuthUser::via`. Un espace hors de la portée du jeton vaut un
 //! espace sans rôle, avant toute lecture ; une route de tout l'espace ([`AppState::space_access`])
-//! reçoit le calcul du compte restreint (`SpaceAccess::narrowed`, sans cache) ; une route d'une
+//! reçoit le calcul du compte restreint (`SpaceAccess::narrowed`, gardé sous `(jeton, espace,
+//! rev)` dans le cache des accès, Ruling R1347) ; une route d'une
 //! page ([`AppState::seen_node`]) juge la page seule, par la remontée de ses parents visibles
 //! (`SpaceAccess::narrowed_node`), si bien qu'une page hors de la portée reçoit son `404` sans que
 //! tout l'espace soit restreint ; [`AppState::own_access`] restreint aussi. L'interdit d'un jeton
@@ -75,7 +76,7 @@ use mementum_store::{Authorship, Node};
 use uuid::Uuid;
 
 use crate::AppState;
-use crate::auth::AuthUser;
+use crate::auth::{AuthUser, TokenGrant};
 use crate::error::{ApiError, internal};
 
 /// Plafond du cache des accès (Ruling R59), en nœuds visibles plus le coût fixe de chaque
@@ -304,7 +305,7 @@ impl AppState {
         let Some(node) = self.store.get_node(id).await.map_err(internal)? else {
             return Ok(None);
         };
-        let Some(account) = self.account_access(user, node.space_id).await? else {
+        let Some((account, rev)) = self.account_access(user, node.space_id).await? else {
             return Ok(None);
         };
         match user.token() {
@@ -322,7 +323,8 @@ impl AppState {
                 let Some(access) = token.narrow_node(&account, id) else {
                     return Ok(None);
                 };
-                Ok(Some((node, access, Arc::new(token.narrow_space(&account)))))
+                let space = self.narrowed_space(token, &account, node.space_id, rev);
+                Ok(Some((node, access, space)))
             }
         }
     }
@@ -370,14 +372,34 @@ impl AppState {
         user: &AuthUser,
         space_id: Uuid,
     ) -> Result<Option<Arc<SpaceAccess>>, ApiError> {
-        let Some(account) = self.account_access(user, space_id).await? else {
+        let Some((account, rev)) = self.account_access(user, space_id).await? else {
             return Ok(None);
         };
         Ok(Some(match user.token() {
             None => account,
-            // Sans cache : la restriction est faite à chaque appel (Rulings R1573, R1340).
-            Some(token) => Arc::new(token.narrow_space(&account)),
+            Some(token) => self.narrowed_space(token, &account, space_id, rev),
         }))
+    }
+
+    /// Le calcul du compte `account`, fait à la révision `rev`, restreint au jeton `token` : gardé
+    /// dans le cache des accès sous `(jeton, espace, rev)`, la révision du calcul qu'il restreint
+    /// (Ruling R1347 : à 100 000 pages, la restriction coûtait 2,6 ms à chaque page lue par jeton).
+    /// Un jeton ne change jamais de niveau ni de portée, et une page de sa portée qui part avance
+    /// la révision : la clé suffit.
+    fn narrowed_space(
+        &self,
+        token: &TokenGrant,
+        account: &SpaceAccess,
+        space_id: Uuid,
+        rev: i64,
+    ) -> Arc<SpaceAccess> {
+        if let Some(kept) = self.access.get(token.token_id, space_id, rev) {
+            return kept;
+        }
+        let narrowed = Arc::new(token.narrow_space(account));
+        self.access
+            .put(token.token_id, space_id, rev, Arc::clone(&narrowed));
+        narrowed
     }
 
     /// Ce que voit le compte de l'appel, sans la restriction d'un jeton : par le cache des accès.
@@ -387,7 +409,7 @@ impl AppState {
         &self,
         user: &AuthUser,
         space_id: Uuid,
-    ) -> Result<Option<Arc<SpaceAccess>>, ApiError> {
+    ) -> Result<Option<(Arc<SpaceAccess>, i64)>, ApiError> {
         if user.token().is_some_and(|token| !token.opens(space_id)) {
             return Ok(None);
         }
@@ -397,7 +419,7 @@ impl AppState {
             return Ok(None);
         };
         if let Some(access) = self.access.get(user.id, space_id, rev) {
-            return Ok(Some(access));
+            return Ok(Some((access, rev)));
         }
         // Ruling R99 : l'appartenance d'abord, par une lecture indexée. Pour qui n'a aucun
         // rôle, l'espace n'est pas lu et le tour de lecture n'est pas pris : sa réponse ne dit
@@ -446,7 +468,7 @@ impl AppState {
             // plus ancienne, et ce calcul n'est pas le sien.
             self.access
                 .put(user.id, space_id, inputs.rev, Arc::clone(&access));
-            return Ok(Some(access));
+            return Ok(Some((access, inputs.rev)));
         }
         // Relues, et toujours plus anciennes : pas de droits calculés sur un état dépassé.
         Err(internal(format_args!(
@@ -1601,5 +1623,54 @@ pub(crate) mod tests {
             assert!(state.node_access(&token, page, action).await.is_err());
             assert!(state.node_access(&olga, page, action).await.is_ok());
         }
+    }
+
+    /// La restriction d'un jeton est gardée sous `(jeton, espace, rev)` (Ruling R1347) : servie
+    /// telle quelle tant que l'espace ne change pas, refaite dès qu'il change, et une page qui
+    /// apparaît dans la portée y est ; le calcul de la session reste le sien.
+    #[tokio::test]
+    async fn the_narrowed_access_is_kept_until_the_space_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state(&dir).await;
+        let olga = account(&state, "olga").await;
+        let space = state
+            .store
+            .create_space("Mien", Some(olga.id))
+            .await
+            .unwrap();
+        let members = Grant {
+            subject: Subject::Members,
+            level: Level::Full,
+        };
+        let first = page_with(&state, space.id, olga.id, members).await;
+        let token = by_token(&olga, Level::Edit, crate::auth::Scope::All);
+        let narrowed = state
+            .find_space_access(&token, space.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let again = state
+            .find_space_access(&token, space.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(Arc::ptr_eq(&narrowed, &again), "la restriction est gardée");
+        let (_, _, seen) = state.seen_node(&token, first).await.unwrap().unwrap();
+        assert!(
+            Arc::ptr_eq(&narrowed, &seen),
+            "une route de page la reprend"
+        );
+        assert_eq!(narrowed.node(first).unwrap().level, Level::Edit);
+        let session = state.space_access(&olga, space.id).await.unwrap();
+        assert_eq!(session.node(first).unwrap().level, Level::Full);
+        // Une page de plus : l'espace a changé, la restriction est refaite et la voit.
+        let second = page_with(&state, space.id, olga.id, members).await;
+        let after = state
+            .find_space_access(&token, space.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!Arc::ptr_eq(&narrowed, &after));
+        assert_eq!(after.node(second).unwrap().level, Level::Edit);
     }
 }
