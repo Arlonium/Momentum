@@ -310,6 +310,7 @@ test("account_menu_by_keyboard", async ({ browser }) => {
   for (const next of [
     menu.getByRole("button", { name: "Créer un espace" }),
     menu.getByRole("link", { name: "Réglages de l'espace" }),
+    menu.getByRole("link", { name: "Jetons d'API" }),
     menu.getByRole("button", { name: "Changer le mot de passe" }),
     menu.getByRole("button", { name: "Se déconnecter" }),
   ]) {
