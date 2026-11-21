@@ -513,6 +513,7 @@ async fn the_token_name_is_never_in_a_version() {
                     token: Some(token),
                 },
                 commented: None,
+                alone: false,
             },
         )
         .await
