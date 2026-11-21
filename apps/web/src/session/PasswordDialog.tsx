@@ -1,8 +1,22 @@
 // La fenêtre « Changer le mot de passe », ouverte depuis le menu du compte (dans le sélecteur
 // d'espace). Même dessin que les autres fenêtres (`mm-dialog`).
+//
+// Changer de mot de passe révoque aussi tous les jetons d'API du compte (R1221) : la fenêtre le dit
+// avant (décision L3), puis dit combien en sont partis, et l'écran des jetons, s'il est ouvert
+// derrière, relit sa liste (`tokensChanged.ts`).
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
+import { announceTokensChanged } from "../account/tokensChanged";
 import { ApiError, changePassword, isSessionLost } from "../api";
 import { Field, FormError, messageOf } from "./forms";
+
+/** Ce que la fenêtre dit des jetons révoqués ; `null` : la réponse n'a pas dit combien (R1375). */
+function revokedTokens(count: number | null): string {
+  if (count === null) return " Tes jetons d'API, s'il y en avait, sont révoqués.";
+  if (count === 0) return "";
+  return count === 1
+    ? " 1 jeton d'API révoqué : l'agent qui s'en servait en demandera un neuf."
+    : ` ${count} jetons d'API révoqués : les agents qui s'en servaient en demanderont un neuf.`;
+}
 
 /**
  * Changer son mot de passe : le serveur ferme les autres sessions du compte, et celle-ci
@@ -16,7 +30,8 @@ export function PasswordDialog({ email, onClose }: { email: string; onClose: () 
   const [next, setNext] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [done, setDone] = useState(false);
+  /** Le changement est fait ; `revoked`, les jetons d'API qu'il a révoqués (`null` : inconnu). */
+  const [done, setDone] = useState<{ revoked: number | null } | null>(null);
   const currentRef = useRef<HTMLInputElement>(null);
   const nextRef = useRef<HTMLInputElement>(null);
 
@@ -31,8 +46,10 @@ export function PasswordDialog({ email, onClose }: { email: string; onClose: () 
     setBusy(true);
     setError(null);
     try {
-      await changePassword({ current, new: next });
-      setDone(true);
+      const changed = await changePassword({ current, new: next });
+      const revoked = changed === null ? null : changed.tokensRevoked;
+      setDone({ revoked });
+      if (revoked !== 0) announceTokensChanged();
     } catch (e) {
       // Session perdue : la connexion est demandée par-dessus ; les champs restent remplis.
       if (!isSessionLost(e)) {
@@ -54,11 +71,11 @@ export function PasswordDialog({ email, onClose }: { email: string; onClose: () 
       <h2 id={titleId} className="mm-dialog-title">
         Changer le mot de passe
       </h2>
-      {done ? (
+      {done !== null ? (
         <>
           <p className="mm-dialog-lead">
             Mot de passe changé. Les autres sessions de ce compte sont fermées : sur tes autres
-            appareils, il faudra te reconnecter.
+            appareils, il faudra te reconnecter.{revokedTokens(done.revoked)}
           </p>
           <div className="mm-dialog-actions">
             <button type="button" className="mm-button mm-button-primary" autoFocus onClick={close}>
@@ -69,7 +86,8 @@ export function PasswordDialog({ email, onClose }: { email: string; onClose: () 
       ) : (
         <>
           <p className="mm-dialog-lead">
-            Sur tes autres appareils, il faudra te reconnecter avec le nouveau.
+            Sur tes autres appareils, il faudra te reconnecter avec le nouveau. Tes jetons d'API seront
+            tous révoqués : chaque agent qui s'en sert en demandera un neuf.
           </p>
           <form className="mm-auth-form" onSubmit={submit} noValidate>
             {/* Pour les gestionnaires de mots de passe : le compte dont on change le mot de passe. */}
