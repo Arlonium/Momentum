@@ -1,105 +1,255 @@
 # Le format MMD (Mementum Markdown)
 
-> Texte provisoire, embarqué par le serveur MCP comme ressource `mementum://spec/mmd` (Task M1 du
-> lot 5). Il reprend les règles du §6.2 de la conception ; la Task D du lot 5 le récrit en
-> spécification publiée (Apache-2.0).
+> Spécification du format des pages de Mementum, telle que la phase 1 la sert (lot 5, novembre
+> 2026). Licence Apache-2.0. Le serveur MCP la donne telle quelle comme ressource
+> `mementum://spec/mmd`. Elle est tirée de la conception (§6.2) et du code qui lit et écrit le
+> format (`crates/mementum-md`) ; en cas d'écart, le serveur juge : il refuse toute forme qu'elle
+> ne décrit pas, et son message dit quoi écrire à la place.
 
-MMD est le texte d'une page de Mementum : CommonMark et GFM (tableaux, cases à cocher, barré),
-`$maths$`, et des balises de type XML pour les blocs propres à Mementum. **La lecture est
-stricte** : le serveur n'accepte que la forme canonique décrite ici, et dit quoi écrire à la place
-de toute autre forme. Écrire ce que `fetch` rend redonne la même page.
+## En bref
 
-## Ancres et révision
+- MMD est le texte d'une page : CommonMark et GFM (tableaux, cases à cocher, barré), `$maths$`,
+  et des balises de type XML pour les blocs propres à Mementum.
+- **Une forme par contenu, et une lecture stricte** : le serveur n'accepte que la forme canonique
+  décrite ici. Écrire ce que `fetch` rend redonne la même page.
+- Un agent lit une page par `fetch` (avec `anchors: true` pour viser des blocs), la change par les
+  opérations d'`update_page` (`str_replace` d'abord), et crée des pages par `create_pages`. Le
+  MMD d'une opération (`insert`, `replace_block`, `replace_page`) est une suite de blocs entiers,
+  écrite comme une page.
+- **Le MMD ne porte pas les métadonnées de la page** : ni titre, ni identifiant, ni révision, ni
+  propriétés (pas de frontmatter YAML en phase 1). `fetch` les donne à côté du texte ; le titre se
+  change par l'opération `set_properties`.
 
-- Lu avec `anchors`, chaque bloc porte un alias court, local à la page, calculé à partir de son
-  identifiant (`^bk7qa`) : ` ^bk7qa` en fin de ligne pour un bloc de texte, seul sur la ligne qui
-  suit un bloc à clôture (code, équation, séparateur, image, tableau), attribut `id="bk7qa"` d'une
-  balise, `anchor="bk7qa"` d'un `<page>` ou d'un `<database>`. L'alias est `b` suivi d'au moins
-  quatre caractères tirés de l'identifiant du bloc : il **s'allonge** autant qu'il faut pour être
-  seul dans la page au moment de la lecture. Un alias déjà servi peut donc devenir ambigu quand un
-  bloc arrive dont l'alias commence pareil : l'écriture est alors refusée (`ambiguous_anchor`), et
-  il faut relire la page avec ses ancres ; un alias dont le bloc n'existe plus est refusé aussi
-  (`stale_anchor`). L'identifiant entier d'un bloc est toujours accepté à la place de son alias.
-- Un bloc écrit sans ancre reçoit un identifiant neuf.
-- `revision` est une poignée opaque (`r_` suivi de 16 chiffres hexadécimaux), rendue à chaque
-  lecture et à chaque écriture ; on la redonne à `update_page` (`base_revision`).
-- Une page longue se lit par tranches : `truncated`, l'alias `next` du premier bloc non rendu, et
-  `<unloaded id="…"/>` pour les enfants d'un bloc trop gros.
+## Une page
+
+- Un document est une suite de blocs. Chaque ligne finit par `\n` (LF, jamais CRLF) ; un document
+  vide est le texte vide. Une page sans bloc n'existe pas dans l'éditeur : une page vide se relit
+  `<p/>`, un paragraphe vide.
+- **Lignes vides** : une entre deux blocs frères ; aucune entre deux éléments voisins d'une même
+  liste (puces, numérotés, cases) ni entre deux `<column>`. Une ligne vide n'a jamais d'espaces. Un
+  marqueur sans contenu n'a pas d'espace finale (`##`, `-`, `- [ ]`, `1.`, `>`).
+- **Listes** : les éléments consécutifs d'un même type forment une seule liste, sans ligne vide
+  entre eux.
+
+## Ancres, alias et révision
+
+- **Lue avec ses ancres** (`anchors: true`), chaque bloc qui a un identifiant porte son **alias** :
+  ` ^bk7qa` en fin de première ligne pour un bloc de texte, seul sur la ligne qui suit un bloc à
+  clôture (code, équation, séparateur, image, tableau), attribut `id="bk7qa"` d'une balise,
+  `anchor="bk7qa"` d'un `<page>` ou d'un `<database>` (leur `id` est déjà pris). Sans ancres, le
+  texte reste propre et économe.
+- **Un alias** est `b` suivi d'au moins quatre caractères de base32 en minuscules (`a` à `z`, `2` à
+  `7`), le début du SHA-256 de l'identifiant du bloc. Il ne dépend que des identifiants des blocs,
+  jamais de leur rang : un bloc inséré au-dessus ne le change pas. Il **s'allonge** autant qu'il
+  faut pour être seul dans la page au moment de la lecture, si bien qu'une lecture plus tardive peut
+  rendre un alias plus long pour le même bloc.
+- Un alias se résout au bloc de la page dont le hachage commence ainsi. Aucun : `stale_anchor` (le
+  bloc n'existe plus, ou a été recréé sous un autre identifiant : relis la page). Plusieurs :
+  `ambiguous_anchor` (un bloc arrivé depuis partage son début : relis la page avec ses ancres, tu
+  recevras un alias plus long).
+- **L'identifiant entier d'un bloc** est accepté à la place de son alias, sauf s'il a lui-même la
+  forme d'un alias : une ancre de cette forme ne se lit que comme un alias.
+- `<block>` écrit toujours le vrai identifiant du bloc, même avec les ancres, et ne reçoit pas
+  d'alias.
+- **Les ancres d'un MMD écrit** : `replace_page` reconnaît un alias (ou l'identifiant) d'un bloc de
+  la page lue, et garde ce bloc ; un alias périmé ou ambigu y est refusé ; un identifiant qui n'est
+  ni l'un ni l'autre est oublié, et le bloc est neuf. Les blocs qu'insèrent `insert` et `replace_block` reçoivent des identifiants neufs,
+  quoi que porte leur MMD ; `replace_block` donne l'identifiant du bloc remplacé au premier bloc de
+  premier niveau de son type dans le MMD neuf (les fils de commentaires gardent leur bloc).
+- **`revision`** est une poignée opaque (`r_` suivi de 16 chiffres hexadécimaux), rendue à chaque
+  lecture et à chaque écriture. On la redonne à `update_page` (`base_revision`) : si les blocs que
+  l'appel touche ont changé depuis, il est refusé (`revision_conflict`) avec les blocs à jour.
+- **Une longue page se lit par tranches** : 24 Kio de MMD par défaut, 48 Kio au plus, coupés entre
+  deux blocs. Une tranche coupée dit `truncated` et l'alias `next` du bloc où reprendre ; on reprend
+  avec `from` (cet alias) et `since` (la révision de la première tranche), et la tranche dit alors
+  quels blocs déjà lus ont changé depuis. La révision à donner ensuite est celle de la **dernière**
+  tranche. Marques d'une tranche :
+  - `<unloaded id="bk7qa"/>` : un bloc trop gros a été rendu avec ceux de ses sous-blocs qui
+    tiennent ; la lecture reprend à ce sous-bloc ;
+  - `<unloaded id="bk7qa" bytes=N/>` (ou `<unloaded bytes=N/>`) : un bloc sans enfant dont le texte
+    seul dépasse 48 Kio ; il ne se lit pas par `fetch`, et ne se change que par `replace_block` ou
+    `delete_block` ;
+  - `<unloaded blocks=N/>` : des blocs sans alias à eux (sans identifiant, ou d'un identifiant porté
+    deux fois) qui ne tenaient pas ; ils ne se lisent pas par `fetch`.
+- **Les tranches mises bout à bout ne sont pas le MMD de la page** : chaque bloc y est rendu avec ses
+  sous-blocs à la racine de la tranche, la numérotation d'une liste y reprend à 1, et les marques
+  `<unloaded>` n'existent pas dans la page. Pour changer une longue page, vise ses blocs ; ne la
+  récris jamais par `replace_page` à partir de tranches recollées.
 
 ## Règles de base
 
 - **Marques** : en Markdown (`**`, `*`, `~~`, `` ` ``) quand le texte marqué commence et finit par
   une lettre ou un chiffre et qu'il est entouré de texte sans marque ; sinon en balises
   (`<strong>`, `<em>`, `<s>`, `<code>`). `<u>` et `<span color>` sont toujours en balises. Un seul
-  genre de délimiteur Markdown à la fois (voir « Contenu en ligne » plus bas).
+  genre de délimiteur Markdown à la fois (voir « Contenu en ligne »).
 - **Espaces en début et fin de contenu** : écrites `&#32;` (Markdown les supprimerait). Un
   paragraphe vide s'écrit `<p/>`.
 - **Indentation** : les enfants d'un élément numéroté sont indentés de la largeur du marqueur
-  (« 1. » = 3 espaces) ; ceux de tout autre bloc, de 2 espaces (voir « Enfants de tout bloc »).
+  (« 1. » = 3 espaces, « 10. » = 4) ; ceux de tout autre bloc, de 2 espaces.
 - **Maths en ligne** `$…$` : LaTeX à accolades équilibrées ; une formule que `$…$` ne relit pas
   exactement s'écrit `<math latex="…"/>`.
 - **Point d'exclamation** : un `!` juste avant un lien est échappé (`\!`), sinon il serait relu
   comme une image.
 - **Texte littéral** : `` \ * _ ` [ ] ~ $ | ^ `` sont précédés de `\` ; `<` s'écrit `&lt;` et `&`
-  s'écrit `&amp;`. Dans un attribut, `&`, `"` et `<` s'écrivent `&amp;`, `&quot;` et `&lt;`. `{` et
-  `}` s'écrivent `\{` et `\}`, et les caractères de contrôle en références numériques (voir
-  « Échappements » plus bas).
+  s'écrit `&amp;`. Dans un attribut, `&`, `"` et `<` s'écrivent `&amp;`, `&quot;` et `&lt;`. `{`
+  et `}` s'écrivent `\{` et `\}`, et les caractères de contrôle en références numériques (voir
+  « Échappements »).
 - **Début de ligne** : un contenu qui commence par `#`, `>`, `-`, `+`, `N.` ou `N)` est échappé
   (`\#`, `1\.`) pour ne pas être lu comme un bloc.
 - **Blocs de code** : clôture de backticks plus longue d'un cran que la plus longue suite de
   backticks du code (3 au minimum).
-- **Listes** : les éléments consécutifs d'un même type forment une seule liste, sans ligne vide
-  entre eux.
 - **Toggle** : le titre est du MMD en ligne écrit dans l'attribut `title`. **Callout** : le premier
   paragraphe est le contenu du callout, les suivants sont ses enfants.
 - **Texte brut** (sans marques ni échappement Markdown) : le titre d'un `<page>` et le texte
   alternatif d'une image.
 
-## Règles du format
+## Les blocs
 
-- **Format MMD de la P1** (crate `mementum-md`, lot 1). Ces règles complètent les règles de base ci-dessus ; là où elles diffèrent (enfants, tableaux, échappements, marques), elles les remplacent. Le principe : **tout ce que BlockNote sait représenter a une forme MMD, et la relecture est exacte** (aller-retour vérifié par proptest sur tous les types du registre). Les types, props, défauts et formes viennent du registre `mementum-schema` (`spec/schema/blocks.json`). Une prop égale à son défaut ne s'écrit pas.
+Les types, leurs props, leurs défauts et leurs formes viennent du registre des blocs
+(`spec/schema/blocks.json`). Tout ce que l'éditeur sait représenter a une forme MMD, et la
+relecture est exacte. Une prop égale à son défaut ne s'écrit pas.
 
-  | Type BlockNote | Forme MMD | Props portées par la forme | Autres props (nom MMD) |
-  |---|---|---|---|
-  | `paragraph` | une ligne ; vide : `<p/>` (props en attributs) | — | `bg`, `color`, `align` |
-  | `heading` | `#` × niveau, puis une espace (niveaux 1 à 4) | `level` | `bg`, `color`, `align`, `toggle` (`isToggleable`) |
-  | `bulletListItem` | `- ` | — | `bg`, `color`, `align` |
-  | `numberedListItem` | `N. ` (N = `start` sur le premier élément de la liste, s'il vaut autre chose que 1) | `start` | `bg`, `color`, `align` |
-  | `checkListItem` | `- [ ] ` ou `- [x] ` | `checked` | `bg`, `color`, `align` |
-  | `toggleListItem` | `<toggle title="…">` … `</toggle>` | contenu en ligne = `title` | `bg`, `color`, `align` (attributs) |
-  | `quote` | `> ` | — | `bg`, `color` |
-  | `codeBlock` | clôture de backticks + langue ; contenu en texte brut (BlockNote : `content: "plain"`) : ni marque, ni lien, ni mention, ni formule, un saut de ligne reste un saut de ligne du texte (`\n`) ; toute langue est gardée, même hors de celles que colore le client | `language` | — |
-  | `divider` | `---` | — | — |
-  | `image` | `![légende](url)` | `url`, `caption` | `name`, `preview` (`showPreview`), `width` (`previewWidth`), `align`, `bg` |
-  | `video` | `<video src="…"/>` | `url` (`src`) | `caption`, `name`, `preview`, `width`, `align`, `bg` |
-  | `audio` | `<audio src="…"/>` | `url` (`src`) | `caption`, `name`, `preview`, `bg` |
-  | `file` | `<file src="…" name="…"/>` | `url` (`src`), `name` | `caption`, `bg` |
-  | `table` | tableau GFM ; la ligne `{…}` qui suit porte `header-rows` (omis s'il vaut 1), `header-cols` (`headerCols`, omis s'il vaut 0), `widths` (`"120,,80"`, vide = auto : une largeur par colonne de la grille, comme `columnWidths` de BlockNote, une cellule fusionnée de la première ligne en couvrant `colspan`) et `color`. En-têtes dans la grille, sous la forme que portent les cellules `tableHeader` de BlockNote : un tableau tout en en-têtes s'écrit `header-rows` = nombre de lignes, sans `header-cols` | lignes | `header-rows`, `header-cols`, `widths`, `color` |
-  | cellule de tableau | `\| texte {…} \|` | contenu | `bg`, `color`, `align`, `colspan` (de 1 à 100), `rowspan` (de 1 au nombre de lignes restantes) |
-  | `callout` | `<callout icon="…" color="…">` : 1ᵉʳ paragraphe = contenu, puis enfants ; contenu vide et 1ᵉʳ enfant paragraphe : `<p/>` en tête | `icon`, `color` | — |
-  | `equation` | `$$`, le LaTeX ligne à ligne, puis `$$` ; une équation vide garde sa ligne : `$$`, une ligne vide, `$$` (Ruling R660) | `latex` | — |
-  | `bookmark` | `<bookmark url="…"/>` | `url` | — |
-  | `columnList` / `column` | `<columns>` / `<column>`, au schéma de `@blocknote/xl-multi-column` 0.57 : un `<columns>` contient deux `<column>` ou plus, et rien d'autre ; une `<column>` n'existe que dans un `<columns>`, contient au moins un bloc, et jamais directement un `<columns>` | — | `width` (omis s'il vaut 1) |
-  | `pageLink` | `<page id="…">titre</page>` | `pageId`, `title` | — |
-  | `databaseRef` | `<database id="…" view="…"/>` | `databaseId`, `view` | — |
-  | `syncedBlock` | `<synced ref="…">` … `</synced>` | `ref` | — |
-  | `toc` | `<toc/>` | — | — |
-  | `unknown` et **tout type inconnu du serveur** | `<block type="…" id="…" data="…"/>`, `data` = base64 du JSON `{"attrs":{…},"content":[…],"children":[…]}` du nœud Yjs d'origine | `originalType` (`type`), `data` | `foreign` (`foreign=true` pour un nœud étranger à recréer tel quel) |
+| Type | Forme MMD | Props portées par la forme | Autres props (nom MMD) |
+|---|---|---|---|
+| `paragraph` | une ligne ; vide : `<p/>` (props en attributs) | — | `bg`, `color`, `align` |
+| `heading` | `#` × niveau, puis une espace (niveaux 1 à 4) | `level` | `bg`, `color`, `align`, `toggle` (`isToggleable`) |
+| `bulletListItem` | `- ` | — | `bg`, `color`, `align` |
+| `numberedListItem` | `N. ` (N = `start` sur le premier élément de la liste, s'il vaut autre chose que 1) | `start` | `bg`, `color`, `align` |
+| `checkListItem` | `- [ ] ` ou `- [x] ` | `checked` | `bg`, `color`, `align` |
+| `toggleListItem` | `<toggle title="…">` … `</toggle>` | contenu en ligne = `title` | `bg`, `color`, `align` (attributs) |
+| `quote` | `> ` | — | `bg`, `color` |
+| `codeBlock` | clôture de backticks + langue ; contenu en texte brut : ni marque, ni lien, ni mention, ni formule ; un saut de ligne reste un saut de ligne du texte ; toute langue est gardée | `language` | — |
+| `divider` | `---` | — | — |
+| `image` | `![légende](url)` | `url`, `caption` | `name`, `preview` (`showPreview`), `width` (`previewWidth`), `align`, `bg` |
+| `video` | `<video src="…"/>` | `url` (`src`) | `caption`, `name`, `preview`, `width`, `align`, `bg` |
+| `audio` | `<audio src="…"/>` | `url` (`src`) | `caption`, `name`, `preview`, `bg` |
+| `file` | `<file src="…" name="…"/>` | `url` (`src`), `name` | `caption`, `bg` |
+| `table` | tableau GFM ; la ligne `{…}` qui suit porte `header-rows` (omis s'il vaut 1), `header-cols` (omis s'il vaut 0), `widths` (`"120,,80"`, vide = auto : une largeur par colonne de la grille, une cellule fusionnée de la première ligne en couvrant `colspan`) et `color` | lignes | `header-rows`, `header-cols`, `widths`, `color` |
+| cellule de tableau | `\| texte {…} \|` | contenu | `bg`, `color`, `align`, `colspan` (de 1 à 100), `rowspan` (de 1 au nombre de lignes restantes) |
+| `callout` | `<callout icon="…" color="…">` : 1ᵉʳ paragraphe = contenu, puis enfants ; contenu vide et 1ᵉʳ enfant paragraphe : `<p/>` en tête | `icon`, `color` | — |
+| `equation` | `$$`, le LaTeX ligne à ligne, puis `$$` ; une équation vide garde sa ligne : `$$`, une ligne vide, `$$` | `latex` | — |
+| `bookmark` | `<bookmark url="…"/>` | `url` | — |
+| `columnList` / `column` | `<columns>` / `<column>` : un `<columns>` contient deux `<column>` ou plus, et rien d'autre ; une `<column>` n'existe que dans un `<columns>`, contient au moins un bloc, et jamais directement un `<columns>` | — | `width` (omis s'il vaut 1) |
+| `pageLink` | `<page id="…">titre</page>` | `pageId`, `title` | — |
+| `databaseRef` | `<database id="…" view="…"/>` | `databaseId`, `view` | — |
+| `syncedBlock` | `<synced ref="…">` … `</synced>` | `ref` | — |
+| `toc` | `<toc/>` | — | — |
+| `unknown` et tout type inconnu du serveur | `<block type="…" id="…" data="…"/>`, `data` = base64 du JSON `{"attrs":{…},"content":[…],"children":[…]}` du nœud d'origine | `originalType` (`type`), `data` | `foreign` (`foreign=true` : un nœud étranger à recréer tel quel) |
 
-  - **Props hors forme** : sur une forme en ligne ou à clôture, liste `{…}` en fin de première ligne, avant l'ancre (`Texte {align="center" color="red"} ^b3`, `` ``` {language="mon langage"} ``) ; pour un tableau, sur la ligne qui suit ses lignes ; sur une balise, en attributs. Clés triées par ordre alphabétique. Chaîne toujours entre guillemets (échappée comme un attribut), nombre et booléen sans guillemets, y compris dans les balises (`width=320`, `preview=false`, `<column width=0.5>`). Un flottant d'une prop du registre s'écrit sans « .0 » (`width=320`).
-  - **Sac de props** : une prop inconnue du registre garde son nom BlockNote et son type d'après son écriture (guillemets : chaîne ; nombre sans point : entier ; nombre avec point : flottant, `2.0` gardé tel quel ; `true`/`false`). Rien ne se perd **à la lecture** : `GET /mmd` rend telle quelle une prop inconnue déjà présente dans Yjs. À l'écriture, au lot 1, `PUT /mmd` la refuse, sur un bloc comme sur une cellule de tableau (`422 invalid_blocks`, Ruling R41 ; voir « Limites connues »).
-  - **Valeur que la forme ne peut pas porter** : elle passe dans la liste `{…}` sous son nom MMD. Titre de niveau 5 : `# Titre {level=5}` ; `start` sur un élément qui n'est pas le premier de sa liste, ou valant 1, ou hors de 0 à 999 999 999 : `{start=…}` ; langue avec une espace : `` ``` {language="mon langage"} `` ; adresse d'image avec une espace : `![légende]() {url="…"}` ; LaTeX qui contient une ligne `$$` : `$$ {latex="…"}`, suivi d'une ligne vide, puis `$$` (le corps vide d'une équation vide, R660).
-  - **Balises** : attributs dans cet ordre : ancre `id`, `title` (toggle), attributs portés par la forme (toujours écrits, même à leur défaut : `<callout icon="💡" color="default">`), autres props triées, puis l'ancre `anchor` pour `<page>` et `<database>`. Pas d'espace avant `/>`. `<block>` écrit toujours le vrai id du bloc, même avec les ancres, et ne reçoit pas d'alias.
-  - **Enfants de tout bloc** : les enfants d'un bloc à forme en ligne, à clôture ou autofermante (`<video/>`, `<page>…</page>`, `<p/>`, `<block/>`…) suivent sa dernière ligne (ancre et ligne `{…}` comprises), sans ligne vide, indentés de 2 espaces (de la largeur du marqueur pour un élément numéroté : « 1. » = 3, « 10. » = 4). Entre deux enfants, la séparation est la même qu'au premier niveau ; une ligne vide n'a jamais d'espaces. Les balises `toggle`, `callout`, `columns`, `column` et `synced` contiennent leurs enfants entre leurs balises, sans ligne vide après l'ouvrante ni avant la fermante. Dans un callout, le premier enfant suit le contenu sans ligne vide.
-  - **Lignes vides** : une entre deux blocs frères, aucune entre deux éléments voisins d'une même liste (puces, numérotés, cases) ou entre deux `<column>`. Un marqueur sans contenu n'a pas d'espace finale (`##`, `-`, `- [ ]`, `1.`, `>`).
-  - **Contenu en ligne** : les règles de base (marques, espaces de bord, maths en ligne), avec trois précisions. Délimiteurs Markdown seulement pour un seul genre de marque (`**`, `*`, `***` pour gras et italique, `~~` ou `` ` ``) : deux genres imbriqués (`~~**a**~~`, `` **`a`** ``) ne se refermeraient pas devant une lettre, ils passent en balises. Formule en ligne : `$…$` quand cette forme relit exactement la formule (`$\frac{a}{b}$`, `$\$5$`) ; sinon (formule vide, blanc en bord, `$` non échappé, `$$`, accolades déséquilibrées, saut de ligne, barre oblique finale…) `<math latex="…"/>`, attribut échappé comme les autres ; la lecture refuse la balise pour une formule que `$…$` porte. Un `$` non échappé impose la balise **même entre accolades**, où pulldown-cmark relirait pourtant `$…$` (`<math latex="\text{aire $x^{2}$}"/>`, la formule dans le texte d'une formule, en ligne comme dans une cellule) : écrit `$\text{aire $x^{2}$}$`, le repérage des listes `{…}` et des cellules arrêtait la formule au `$` intérieur, et la lecture refusait la ligne (Ruling R658) ; un `$` échappé (`$\$5$`) reste dans `$…$`. Mention : `<mention type="…" id="…">libellé</mention>`, où `type` dit la sorte (`page`, `user` ou `date`), `id` l'identifiant (celui de la page ou du compte, ou la date au format `AAAA-MM-JJ`), et le libellé est celui qui a été copié quand on l'a posée (le titre, le nom, la date écrite « 1 déc. 2026 » ; §4.2, Ruling R251), échappé comme du texte, les deux attributs comme les autres (`crates/mementum-md/src/inline.rs`). Surlignage : `<span bg="…">` ; couleur et surlignage : `<span bg="…" color="…">`. Ordre des marques, de l'intérieur vers l'extérieur : `<code>`, `<em>`, `<strong>`, `<s>`, `<u>`, puis `<span bg="…" color="…">` ; un délimiteur Markdown prend la place de sa balise, donc à l'intérieur de `<u>` et de `<span>` (`<span color="blue"><u>souligné coloré</u></span>`, `<u>**gras souligné**</u>`) ; un lien entoure ses textes marqués (`[**a**](x)`). Saut de ligne (`hardBreak`) : `<br/>`. Lien : `[texte](href)` si le `href` ne contient ni blanc, ni caractère de contrôle, ni `(`, `)`, `<`, `>`, `\`, `&` ; sinon `<a href="…">texte</a>`. Deux liens voisins de même `href` n'en font qu'un, comme dans Yjs et ProseMirror : la lecture refuse `[a](x)[b](x)` et demande `[ab](x)`. Un `<span>` ne porte qu'un texte, d'une seule mise en forme (`<span color="red">a</span><span color="red"><em>b</em></span>`), et un lien porte ses `<span>` à l'intérieur ; la lecture refuse le reste dès le deuxième texte (Ruling R434). Une couleur s'écrit en 100 octets au plus, une adresse de lien en 16 Kio au plus : ce que la garde des mises à jour admet dans Yjs (Rulings R381, R431).
-  - **Échappements** : le jeu des règles de base (« Texte littéral », « Début de ligne »), plus `{` et `}` (écrits `\{` et `\}`), puisqu'une liste `{…}` porte des props. Un caractère de contrôle du texte (tabulation, saut de ligne…) s'écrit en référence numérique (`&#9;`, `&#10;`) ; dans un attribut, saut de ligne et retour chariot s'écrivent `&#10;` et `&#13;`. Le titre d'un `<page>` échappe `&`, `<`, `\n` et `\r`.
-  - **Document** : chaque ligne finit par `\n` (LF) ; un document vide est le texte vide.
-  - **Identifiants** : `^xyz` en fin de ligne (ou seul sur la ligne qui suit un bloc à clôture) et `id="…"` (`anchor="…"` pour `<page>` et `<database>`) donnent l'id du bloc, tel quel ; la traduction des alias `bN` est faite par l'API des agents (lot 5). Un bloc sans id est lu avec `id = ""`. Dans l'écriture de `PUT /mmd`, il reçoit d'abord l'identifiant du bloc courant qui lui correspond, liste de frères par liste de frères : une plus longue sous-suite commune sur le type, le contenu et les props, puis un bloc identique ailleurs dans la même liste, puis, entre deux blocs gardés, le même rang et le même type (Rulings R201, R202) ; sans correspondant, `mementum-crdt` lui donne un UUIDv7. Les fils de commentaires gardent ainsi leur bloc, et une page récrite à l'identique garde ses identifiants. Seule l'écriture par différence (lot 5) gardera aussi une frappe concurrente (Ruling R40).
-  - **Lecture stricte** : `parse` n'accepte que la forme canonique. Tout le reste est une erreur `MmdError { line, message }`, avec un message en français qui dit quoi écrire : marqueurs `*` ou `+`, `N)`, titres soulignés (setext), `#####`, code indenté, clôture `~~~`, balise ou clôture non fermée, indentation incohérente, ligne vide manquante ou en trop, liste `{…}` mal formée, accolade non échappée, fusions de cellules hors grille (voir « Tableaux » plus bas), fins de ligne CRLF, imbrication de plus de 100 niveaux (`MAX_DEPTH`, « imbrication trop profonde : 100 niveaux au plus »), colonnes hors du schéma de BlockNote (`<column>` hors de `<columns>`, `<columns>` d'une seule colonne ou qui contient autre chose, `<column>` vide, `<columns>` directement dans une `<column>`)… Après la lecture, l'arbre est réécrit et doit redonner l'entrée octet pour octet ; sinon, la première ligne qui diffère est signalée avec la forme attendue (valeur par défaut écrite, échappement ou marque non canonique). L'import de Markdown quelconque (Obsidian, Notion) est un autre convertisseur, prévu au lot 6.
-- **Limites connues du format P1** :
-  - **Imbrication** : 100 niveaux au plus (`MAX_DEPTH`). En lisant la page, `mementum-crdt` place les descendants d'un bloc de niveau 100 à sa suite, au même niveau, et défait une liste de colonnes trop profonde ou mal formée (ses blocs prennent sa place). Une liste de colonnes est jugée avant d'être lue, sans lire ses blocs, puis lue une seule fois, en liste ou défaite : la juger en la lisant faisait doubler le travail à chaque niveau de listes imbriquées (Ruling R385). Une page Yjs ne dépasse jamais `MAX_YJS_DEPTH` éléments imbriqués (2 par niveau de bloc, plus une marge) : la suppression et le ramasse-miettes de yrs sont récursifs, et un arbre plus profond ferait déborder la pile du serveur.
-  - **Page vide** : BlockNote n'a pas de document sans bloc. `mementum-crdt` écrit un arbre vide en un paragraphe vide, relu `<p/>`.
-  - **Sac de props** : le nom d'une prop inconnue doit être un identifiant (`[A-Za-z][A-Za-z0-9_-]*`) qui ne recoupe aucun nom MMD du bloc ni `id`, `anchor`, `title`, `type`, `data`, `header-rows`, `header-cols`, `widths`. Les props connues sont supposées typées selon le registre ; un flottant non fini (`NaN`, infini) n'a pas de forme. **Refusé à l'écriture au lot 1** (Ruling R41) : `mementum-md` lit et rend toujours le sac, mais `PUT /mmd` répond `422 invalid_blocks` à toute prop hors registre, avec un message qui nomme la prop et le type du bloc. Raison : y-prosemirror retire du document partagé tout attribut que le schéma du client ne déclare pas, dès qu'un navigateur modifie le bloc, chez tout le monde et sans trace ; un 204 aurait promis une donnée qui disparaît ensuite. Le refus sera levé quand un porteur durable existera : un attribut déclaré au schéma du client, qui porte le sac (à voir au lot 3 ou au lot 5). D'ici là, une page qui porte une prop inconnue écrite par un client Yjs se relit par `GET /mmd`, mais ce texte est refusé par `PUT /mmd`.
-  - **Tableaux** : un tableau sans ligne ou une ligne sans cellule n'ont pas de forme (BlockNote n'en produit pas). Les fusions forment une grille (Ruling R37) : `colspan` vaut de 1 à 100 (`MAX_WIDTH_COLUMNS`), `rowspan` de 1 au nombre de lignes restantes, ligne courante comprise, et chaque ligne couvre autant de colonnes que la première, cases occupées par une cellule d'une ligne au-dessus comprises, sans chevauchement ; sinon `parse` refuse le tableau, en disant quoi écrire. prosemirror-tables parcourt toute la grille et y crée une colonne par case : un `colspan` démesuré fige l'onglet, un négatif fait lever BlockNote, et une ligne trop courte ou trop longue, ou un `rowspan` trop long, sont corrigés par `fixTables`, qui réécrit le document à la première édition. Un client Yjs peut écrire un tableau hors de ces règles : lignes inégales, fusions qui sortent du tableau ou se recouvrent, ligne sans cellule ou entièrement couverte par des `rowspan`. Le serveur ne le récrit pas, mais le lit toujours en une grille que `parse` accepte, sans rien écrire dans le document : `GET /mmd` rend un MMD que `PUT /mmd` relit en les mêmes blocs (Rulings R54 et R137). C'est la règle de `parse`, lue à l'envers, sans perdre une cellule. La grille a la largeur de la ligne qui couvre le moins de colonnes, fusions des lignes au-dessus comptées, sans être plus étroite que la ligne qui a le plus de cellules (Ruling R148) ; une ligne sans cellule en reçoit une vide. Les lignes se lisent de haut en bas, chaque cellule à la première colonne libre. Si les cellules d'une ligne n'ont pas chacune une colonne libre, les `rowspan` d'au-dessus qui la couvrent s'arrêtent avant elle, du plus à gauche au plus à droite, autant qu'il faut. Un `colspan` est ramené avant la colonne suivante prise par une cellule d'au-dessus, et à ce qui reste de la ligne une fois gardée une colonne pour chaque cellule suivante ; un `rowspan`, au nombre de lignes restantes. Une ligne encore trop courte reçoit des cellules vides à droite, à la balise de sa première cellule, comme les ajouterait `fixTables`. Ces cellules vides ne dépassent jamais les cellules lues plus seize : un tout petit tableau inégal est toujours bourré ; au-delà, le tableau se lit en une seule colonne, une cellule par ligne dans l'ordre du document, sans fusion (Ruling R147). La lecture coûte ainsi au plus `O(n log n)` pour `n` cellules, et le tableau lu en a au plus `2n + 16`, quels que soient la forme des lignes et les `colspan` ou `rowspan` écrits. `fixTables` complète le document à sa façon à la première frappe dans un navigateur (sa grille prend la ligne la plus longue) : après elle, le serveur peut lire le tableau autrement qu'avant. `widths` s'écrit dès qu'une colonne a une largeur, et en porte une par colonne de la grille de la première ligne, ni plus ni moins (une cellule fusionnée en couvre `colspan`) : `widths="1,2,3"` sur deux colonnes se lit comme une erreur qui demande `widths="1,2"`. Dans Yjs, chaque cellule porte la largeur des colonnes qu'elle couvre (`colwidth`, `[120, undefined]` pour une cellule fusionnée dont seule la première colonne a une largeur), colonnes décalées par un `rowspan` comprises. À la lecture, chaque cellule de la première ligne de la grille donne la largeur des colonnes qu'elle y couvre : les premières valeurs de son `colwidth`, une par colonne, automatiques au-delà, comme prosemirror-tables les lit (Ruling R149). Au plus 100 colonnes de la grille portent une largeur (`MAX_WIDTH_COLUMNS`) : le MMD borne `colspan` à cette même valeur (Ruling R37), mais pas un client Yjs, dont une seule cellule ferait sinon écrire des millions de largeurs. Lignes et colonnes d'en-tête sont ramenées dans la grille (au plus le nombre de lignes, et la longueur de la plus courte ligne), puis à ce que distinguent les cellules d'en-tête : `header-rows=5` sur deux lignes se lit comme une erreur qui demande `header-rows=2`. Depuis Yjs, elles se lisent sur les balises (`tableHeader`) des cellules de la grille obtenue.
-  - **Type hors registre** : `render` l'écrit `<block type="…"/>`, relu en `unknown` ; `mementum-crdt` lit d'abord tout nœud étranger en `unknown` avec `foreign=true`.
+- **En-têtes de tableau** : la première ligne reste la ligne d'en-tête de GFM ; `header-rows` et
+  `header-cols` disent combien de lignes et de colonnes sont des en-têtes. Un tableau tout en
+  en-têtes s'écrit `header-rows` = nombre de lignes, sans `header-cols`.
+- **`<block>`** est l'échappatoire sans perte d'un bloc d'une version plus récente ou d'une
+  extension : laisse-le tel quel. Le retirer demande `allow_deleting_content`.
+
+## Props, balises, enfants
+
+- **Props hors forme** : sur une forme en ligne ou à clôture, liste `{…}` en fin de première ligne,
+  avant l'ancre (`Texte {align="center" color="red"} ^bk7qa`, `` ``` {language="mon langage"} ``) ;
+  pour un tableau, sur la ligne qui suit ses lignes ; sur une balise, en attributs. Clés triées par
+  ordre alphabétique. Une chaîne est toujours entre guillemets (échappée comme un attribut), un
+  nombre et un booléen sans guillemets, y compris dans les balises (`width=320`, `preview=false`,
+  `<column width=0.5>`). Un flottant s'écrit sans « .0 » (`width=320`).
+- **Valeur que la forme ne peut pas porter** : elle passe dans la liste `{…}` sous son nom MMD.
+  Titre de niveau 5 : `# Titre {level=5}` ; `start` sur un élément qui n'est pas le premier de sa
+  liste, ou valant 1, ou hors de 0 à 999 999 999 : `{start=…}` ; langue avec une espace :
+  `` ``` {language="mon langage"} `` ; adresse d'image avec une espace : `![légende]() {url="…"}` ;
+  LaTeX qui contient une ligne `$$` : `$$ {latex="…"}`, suivi d'une ligne vide, puis `$$`.
+- **Prop inconnue du registre** : elle se lit (son nom tel quel, son type d'après son écriture :
+  guillemets, chaîne ; nombre sans point, entier ; avec point, flottant ; `true` ou `false`), mais
+  **une écriture qui en porte une est refusée**, sur un bloc comme sur une cellule : l'éditeur
+  l'effacerait sans bruit à la première modification du bloc. Une page qui en porte une se lit,
+  mais son texte ne se récrit pas tel quel par `replace_page` ; les opérations ciblées n'y touchent
+  pas.
+- **Balises** : attributs dans cet ordre : l'ancre `id`, `title` (toggle), les attributs portés par
+  la forme (toujours écrits, même à leur défaut : `<callout icon="💡" color="default">`), les autres
+  props triées, puis l'ancre `anchor` pour `<page>` et `<database>`. Pas d'espace avant `/>`.
+- **Enfants de tout bloc** : les enfants d'un bloc à forme en ligne, à clôture ou autofermante
+  (`<video/>`, `<page>…</page>`, `<p/>`, `<block/>`…) suivent sa dernière ligne (ancre et ligne
+  `{…}` comprises), sans ligne vide, indentés de 2 espaces (de la largeur du marqueur pour un élément
+  numéroté). Entre deux enfants, la séparation est la même qu'au premier niveau. Les balises
+  `toggle`, `callout`, `columns`, `column` et `synced` contiennent leurs enfants entre leurs
+  balises, sans ligne vide après l'ouvrante ni avant la fermante. Dans un callout, le premier enfant
+  suit le contenu sans ligne vide.
+
+## Contenu en ligne
+
+- **Délimiteurs Markdown** pour un seul genre de marque (`**`, `*`, `***` pour gras et italique,
+  `~~` ou `` ` ``) : deux genres imbriqués (`~~**a**~~`, `` **`a`** ``) ne se refermeraient pas
+  devant une lettre, ils passent en balises.
+- **Ordre des marques**, de l'intérieur vers l'extérieur : `<code>`, `<em>`, `<strong>`, `<s>`,
+  `<u>`, puis `<span bg="…" color="…">`. Un délimiteur Markdown prend la place de sa balise, donc à
+  l'intérieur de `<u>` et de `<span>` (`<span color="blue"><u>souligné coloré</u></span>`,
+  `<u>**gras souligné**</u>`). Surlignage : `<span bg="…">` ; couleur et surlignage :
+  `<span bg="…" color="…">`. Un `<span>` ne porte qu'un texte, d'une seule mise en forme
+  (`<span color="red">a</span><span color="red"><em>b</em></span>`), jamais un lien, une mention,
+  une formule, un `<br/>` ni un autre `<span>`.
+- **Lien** : `[texte](href)` si le `href` ne contient ni blanc, ni caractère de contrôle, ni `(`,
+  `)`, `<`, `>`, `\`, `&` ; sinon `<a href="…">texte</a>`. Un lien entoure ses textes marqués et ses
+  `<span>` (`[**a**](x)`, `[<span bg="blue">c</span>](u)`). Deux liens voisins de même adresse n'en
+  font qu'un : la lecture refuse `[a](x)[b](x)` et demande `[ab](x)`.
+- **Formule en ligne** : `$…$` quand cette forme relit exactement la formule (`$\frac{a}{b}$`,
+  `$\$5$`) ; sinon (formule vide, blanc en bord, `$` non échappé, `$$`, accolades déséquilibrées,
+  saut de ligne, barre oblique finale…) `<math latex="…"/>`, l'attribut échappé comme les autres.
+  Un `$` non échappé impose la balise **même entre accolades** (`<math latex="\text{aire
+  $x^{2}$}"/>`). La lecture refuse la balise pour une formule que `$…$` porte.
+- **Mention** : `<mention type="…" id="…">libellé</mention>`, où `type` est `page`, `user` ou
+  `date`, `id` l'identifiant de la page ou du compte, ou la date `AAAA-MM-JJ`, et le libellé celui
+  qui a été copié quand on l'a posée (le titre, le nom, la date écrite), échappé comme du texte.
+  Une mention ne donne aucun droit sur ce qu'elle nomme.
+- **Saut de ligne** dans un bloc : `<br/>` (hors d'un bloc de code, où c'est un saut de ligne du
+  texte).
+- **Bornes** : une couleur s'écrit en 100 octets au plus, une adresse de lien en 16 Kio au plus.
+
+## Échappements
+
+- Le jeu des règles de base (« Texte littéral », « Début de ligne »), plus `{` et `}` (écrits `\{`
+  et `\}`), puisqu'une liste `{…}` porte des props.
+- Un caractère de contrôle du texte (tabulation, saut de ligne…) s'écrit en référence numérique
+  (`&#9;`, `&#10;`) ; dans un attribut, saut de ligne et retour chariot s'écrivent `&#10;` et
+  `&#13;`. Le titre d'un `<page>` échappe `&`, `<`, `\n` et `\r`.
+
+## Lecture stricte
+
+Tout ce qui n'est pas la forme canonique est refusé, avec la ligne en cause et un message en
+français qui dit quoi écrire : marqueurs `*` ou `+`, `N)`, titres soulignés, `#####`, code
+indenté, clôture `~~~`, balise ou clôture non fermée, indentation incohérente, ligne vide manquante
+ou en trop, liste `{…}` mal formée, accolade non échappée, fusions de cellules hors de la grille,
+fins de ligne CRLF, imbrication de plus de 100 niveaux, colonnes hors de leur règle (`<column>` hors
+de `<columns>`, `<columns>` d'une seule colonne ou qui contient autre chose, `<column>` vide,
+`<columns>` directement dans une `<column>`). Après la lecture, l'arbre est récrit et doit redonner
+l'entrée octet pour octet ; sinon, la première ligne qui diffère est signalée avec la forme
+attendue (valeur par défaut écrite, échappement ou marque non canonique). L'import d'un Markdown
+quelconque (Obsidian, Notion) est un autre convertisseur, prévu plus tard.
+
+## Ce qu'une écriture d'agent refuse en plus
+
+- **Les médias du web** : un bloc `image`, `video` ou `audio` dont l'adresse n'est ni celle d'un
+  fichier de l'instance (`/api/v1/pages/<uuid>/files/<uuid>`), ni celle d'un média que la page
+  porte déjà, est refusé (`external_media`), à la création comme dans une page. Un lien, un signet
+  et un bloc `file` à adresse web passent.
+- **Les contenus protégés** : une opération qui retirerait un bloc `<page>`, `<database>`,
+  `<synced>` ou `<block>`, ou un bloc qui porte un fil de commentaires, est refusée
+  (`protected_content`) sauf si elle porte `allow_deleting_content`.
+- **Les bornes** : 12 000 blocs par page, lignes de tableau comprises ; une écriture estimée à plus
+  de 8 s est refusée (`too_long_to_write`, à découper en opérations plus petites) ; 100 niveaux
+  d'imbrication ; 2 000 000 caractères par MMD, et 2 Mio de corps par appel.
+
+## Lectures de pages venues de l'éditeur
+
+Une page écrite par l'éditeur (ou par un client Yjs) peut porter ce que le MMD n'accepte pas en
+écriture. Le serveur la lit toujours sous une forme que sa lecture accepte, sans rien écrire dans
+le document :
+
+- **Imbrication** : au-delà de 100 niveaux, les descendants d'un bloc du centième niveau sont lus à
+  sa suite, au même niveau ; une liste de colonnes mal formée est défaite (ses blocs prennent sa
+  place).
+- **Tableaux** : un tableau aux lignes inégales, aux fusions qui sortent du tableau ou se
+  recouvrent, est lu en une grille que la lecture accepte, sans perdre une cellule : la grille a
+  la largeur de la ligne qui couvre le moins de colonnes, sans être plus étroite que celle qui a le
+  plus de cellules ; un `colspan` ou un `rowspan` trop long est ramené ; une ligne trop courte
+  reçoit des cellules vides à droite (au plus seize de plus que les cellules lues ; au-delà, le
+  tableau se lit en une seule colonne, une cellule par ligne, sans fusion). `widths` porte une
+  largeur par colonne de la grille de la première ligne, ni plus ni moins, 100 colonnes au plus ;
+  `header-rows` et `header-cols` sont ramenés dans la grille.
+- **Type hors registre** : lu `<block type="…" id="…" data="…"/>`, que l'on récrit tel quel.
