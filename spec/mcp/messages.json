@@ -1,5 +1,5 @@
 {
-  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. « pad_to » allonge le corps d'espaces jusqu'à ce nombre d'octets (un corps de plus de 2 Mio, Task M2). « outcome » est l'issue que serve rend d'un tools/call pour le journal d'activité (l'outil nommé et le code du refus, null pour une réussite) ; sans « outcome », un tools/call doit en rendre une, et toute autre requête aucune. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0 (2.1.329) ou par X1 (2.1.330 : resources/read, dans les deux révisions), ou la spécification seule (Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, et une sortie de plus de 25 000 jetons ne l'ont été par aucun client).",
+  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. « pad_to » allonge le corps d'espaces jusqu'à ce nombre d'octets (un corps de plus de 2 Mio, Task M2). « outcome » est l'issue que serve rend d'un tools/call pour le journal d'activité (l'outil nommé et le code du refus, null pour une réussite) ; sans « outcome », un tools/call doit en rendre une, et toute autre requête aucune. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0 (2.1.329) ou par X1 (2.1.330 : resources/read, dans les deux révisions), ou la spécification seule, quand aucun vrai client n'a joué le cas : il n'est alors éprouvé que par les tests qui rejouent cette table (Task M1, the_message_table_holds_in_both_eras), et, quand le cas le dit, par un test de la route qu'il nomme (Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, une sortie de plus de 25 000 jetons, une requête en lot, du JSON illisible ne l'ont été par aucun client). « une requête de même forme » : Claude Code a envoyé cette méthode avec les mêmes clés, le cas en garde une forme réduite.",
   "statuses": "Statut HTTP d'une erreur JSON-RPC (Rulings R1406, R1407) : 400 pour ce qui empêche de lire la requête ou d'en savoir l'ère (-32700 JSON illisible ; -32600 lot, corps qui n'est pas un objet, jsonrpc, method ou id mal formés, requête sans id, params qui ne sont pas un objet, réponse envoyée au serveur ; -32020 en-tête absent, répété, aux caractères non permis ou qui ne dit pas le corps, requête qui n'est d'aucune des deux révisions ; -32022 version nommée mais non servie, au _meta, ou par l'en-tête seul quand il a la forme AAAA-MM-JJ ; -32602 champ exigé du _meta qui manque ou n'a pas sa forme) ; 404 pour une méthode inconnue en 2026-07-28 (-32601) ; 200 pour une erreur des params d'une méthode servie (-32602 outil inconnu, arguments qui ne sont pas un objet, tools/call sans nom, ressource inconnue en 2026-07-28, curseur de liste, initialize sans protocolVersion ; -32002 ressource inconnue en 2025-11-25) et pour toute méthode inconnue en 2025-11-25 (-32601). Des arguments refusés ne sont pas une erreur JSON-RPC : un résultat isError, 200. -32021 (MissingRequiredClientCapability) existe dans la 2026-07-28 et n'a pas d'usage ici : aucun outil n'exige une capacité du client.",
   "cases": [
     {
@@ -25,7 +25,7 @@
     {
       "name": "2026 : tools/list sur /mcp/readonly rend les trois outils de lecture",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "endpoint": "readonly",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
@@ -47,7 +47,7 @@
     {
       "name": "2026 : tools/call sans arguments vaut des arguments vides",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
       "body": { "jsonrpc": "2.0", "id": 8, "method": "tools/call", "params": { "name": "workspace_info", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -57,7 +57,7 @@
     {
       "name": "2026 : tools/call, Mcp-Name en =?base64?…?=",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?d29ya3NwYWNlX2luZm8=?=" },
       "body": { "jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -85,7 +85,7 @@
     {
       "name": "2026 : resources/read, Mcp-Name en =?base64?…?=",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/read", "Mcp-Name": "=?base64?bWVtZW50dW06Ly9zcGVjL21tZA==?=" },
       "body": { "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": "mementum://spec/mmd", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -94,7 +94,7 @@
     {
       "name": "2026 : un lot JSON-RPC",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": [{ "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } }],
       "status": 400,
@@ -104,7 +104,7 @@
     {
       "name": "2026 : un JSON illisible",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "raw": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": ",
       "status": 400,
@@ -113,7 +113,7 @@
     {
       "name": "2026 : un corps vide",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "raw": "",
       "status": 400,
@@ -122,7 +122,7 @@
     {
       "name": "2026 : un corps de plus de 2 Mio",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (une requête invalide de JSON-RPC) ; la borne est celle de toute route du serveur (Task M2, éprouvé par la route : a_body_over_the_bound_is_a_json_rpc_error)",
+      "proven_by": "la spécification seule (une requête invalide de JSON-RPC, rejouée par les tests de M1 ; aucun vrai client) ; la borne est celle de toute route du serveur (Task M2, éprouvé par la route : a_body_over_the_bound_is_a_json_rpc_error)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "raw": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\", \"params\": {",
       "pad_to": 2097153,
@@ -132,7 +132,7 @@
     {
       "name": "2025 : un corps de plus de 2 Mio",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (une requête invalide de JSON-RPC) ; la borne est celle de toute route du serveur (Task M2)",
+      "proven_by": "la spécification seule (une requête invalide de JSON-RPC, rejouée par les tests de M1 ; aucun vrai client) ; la borne est celle de toute route du serveur (Task M2)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "raw": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\", \"params\": {",
       "pad_to": 2097153,
@@ -142,7 +142,7 @@
     {
       "name": "2026 : un corps qui n'est pas un objet",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "raw": "\"tools/list\"",
       "status": 400,
       "expect": { "id": null, "error": { "code": -32600 } }
@@ -150,7 +150,7 @@
     {
       "name": "2026 : une méthode inconnue",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "prompts/list" },
       "body": { "jsonrpc": "2.0", "id": 4, "method": "prompts/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 404,
@@ -159,7 +159,7 @@
     {
       "name": "2026 : initialize sous la 2026-07-28",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "initialize" },
       "body": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2026-07-28", "capabilities": {}, "clientInfo": { "name": "x", "version": "1" }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 404,
@@ -168,7 +168,7 @@
     {
       "name": "2026 : ping n'existe plus",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "ping" },
       "body": { "jsonrpc": "2.0", "id": 5, "method": "ping", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 404,
@@ -177,7 +177,7 @@
     {
       "name": "2026 : subscriptions/listen n'est pas servi",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "subscriptions/listen" },
       "body": { "jsonrpc": "2.0", "id": 6, "method": "subscriptions/listen", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 404,
@@ -186,7 +186,7 @@
     {
       "name": "2026 : une version inconnue",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "1900-01-01", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "1900-01-01", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -195,7 +195,7 @@
     {
       "name": "2026 : un _meta qui demande la 2025-11-25, servie seulement par initialize",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2025-11-25", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -204,7 +204,7 @@
     {
       "name": "2026 : une version du _meta qui n'est pas un texte est un champ exigé qui manque",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": 2026, "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -213,7 +213,7 @@
     {
       "name": "2026 : un MCP-Protocol-Version qui ne dit pas le _meta",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -222,7 +222,7 @@
     {
       "name": "2026 : un MCP-Protocol-Version absent",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -231,7 +231,7 @@
     {
       "name": "2026 : un MCP-Protocol-Version répété",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": ["2026-07-28", "2026-07-28"], "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -240,7 +240,7 @@
     {
       "name": "2026 : un Mcp-Method faux",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -249,7 +249,7 @@
     {
       "name": "2026 : un Mcp-Method absent",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -258,7 +258,7 @@
     {
       "name": "2026 : un Mcp-Method aux caractères non permis",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/listé" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/listé", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -278,7 +278,7 @@
     {
       "name": "2026 : un Mcp-Name absent sur tools/call",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -288,7 +288,7 @@
     {
       "name": "2026 : un Mcp-Name en base64 illisible",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?***?=" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -298,7 +298,7 @@
     {
       "name": "2026 : un Mcp-Name en base64 d'un autre nom",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?c2VhcmNo?=" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -308,7 +308,7 @@
     {
       "name": "2026 : un nom qui ressemble à la forme =?base64?…?=, envoyé sans être encodé, ne dit pas le corps",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?d29ya3NwYWNlX2luZm8=?=" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "=?base64?d29ya3NwYWNlX2luZm8=?=", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -318,7 +318,7 @@
     {
       "name": "2026 : un nom qui ressemble à la forme =?base64?…?=, encodé, dit le corps (puis l'outil est inconnu)",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "=?base64?PT9iYXNlNjQ/ZDI5eWEzTndZV05sWDJsdVptOD0/PQ==?=" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": { "name": "=?base64?d29ya3NwYWNlX2luZm8=?=", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -328,7 +328,7 @@
     {
       "name": "2026 : un Mcp-Name faux sur resources/read",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/read", "Mcp-Name": "mementum://spec/sql" },
       "body": { "jsonrpc": "2.0", "id": 3, "method": "resources/read", "params": { "uri": "mementum://spec/mmd", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -337,7 +337,7 @@
     {
       "name": "2026 : un _meta sans clientCapabilities",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28" } } },
       "status": 400,
@@ -346,7 +346,7 @@
     {
       "name": "2026 : des clientCapabilities qui ne sont pas un objet",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": true } } },
       "status": 400,
@@ -366,7 +366,7 @@
       "name": "2026 : une requête sans id n'est jamais faite",
       "outcome": { "tool": "workspace_info", "code": "invalid_request" },
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
       "body": { "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "workspace_info", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -376,7 +376,7 @@
     {
       "name": "2026 : une notification est acceptée sans effet",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "notifications/cancelled" },
       "body": { "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 3, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 202,
@@ -385,7 +385,7 @@
     {
       "name": "2026 : un id null",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": null, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -394,7 +394,7 @@
     {
       "name": "2026 : un id booléen",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": true, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -403,7 +403,7 @@
     {
       "name": "2026 : un id trop long, jamais recopié",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -413,7 +413,7 @@
       "name": "2026 : un outil inconnu",
       "outcome": { "tool": "query_database", "code": "unknown_tool" },
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "query_database" },
       "body": { "jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": { "name": "query_database", "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -425,7 +425,7 @@
       "name": "2026 : un outil d'écriture sur /mcp/readonly est un outil inconnu",
       "outcome": { "tool": "update_page", "code": "unknown_tool" },
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "endpoint": "readonly",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "update_page" },
       "body": { "jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": { "name": "update_page", "arguments": { "page": "p", "operations": [{ "op": "str_replace", "old": "a", "new": "b" }] }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
@@ -436,7 +436,7 @@
     {
       "name": "2026 : des arguments d'un autre type sont un échec de l'outil",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
       "body": { "jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": { "name": "workspace_info", "arguments": { "space": 3 }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -448,7 +448,7 @@
     {
       "name": "2026 : un refus de l'outil est un résultat isError, pas une erreur JSON-RPC",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "fetch" },
       "body": { "jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": "0193a1b2-0000-7000-8000-000000000009" }, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -461,7 +461,7 @@
       "name": "2026 : des arguments qui ne sont pas un objet",
       "outcome": { "tool": "workspace_info", "code": "invalid_params" },
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call", "Mcp-Name": "workspace_info" },
       "body": { "jsonrpc": "2.0", "id": 14, "method": "tools/call", "params": { "name": "workspace_info", "arguments": [], "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -471,7 +471,7 @@
     {
       "name": "2026 : un tools/call sans nom",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/call" },
       "body": { "jsonrpc": "2.0", "id": 15, "method": "tools/call", "params": { "arguments": {}, "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -481,7 +481,7 @@
     {
       "name": "2026 : une ressource inconnue",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/read", "Mcp-Name": "mementum://spec/sql" },
       "body": { "jsonrpc": "2.0", "id": 16, "method": "resources/read", "params": { "uri": "mementum://spec/sql", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -490,7 +490,7 @@
     {
       "name": "2026 : un curseur de liste, que le serveur ne donne jamais",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 17, "method": "tools/list", "params": { "cursor": "page-2", "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -499,7 +499,7 @@
     {
       "name": "2026 : jsonrpc absent",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "id": 18, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -508,7 +508,7 @@
     {
       "name": "2026 : méthode absente",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28" },
       "body": { "jsonrpc": "2.0", "id": 19, "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -517,7 +517,7 @@
     {
       "name": "2026 : des params qui ne sont pas un objet",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 20, "method": "tools/list", "params": ["2026-07-28"] },
       "status": 400,
@@ -526,7 +526,7 @@
     {
       "name": "2026 : une réponse JSON-RPC envoyée au serveur",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28" },
       "body": { "jsonrpc": "2.0", "id": 21, "result": {} },
       "status": 400,
@@ -643,7 +643,7 @@
     {
       "name": "2025 : initialize qui demande une autre version reçoit la 2025-11-25",
       "era": "2025-11-25",
-      "proven_by": "Claude Code 2.1.329 (S0, une requête de même forme)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client) : Claude Code 2.1.329 demande la 2025-11-25 (S0), jamais une autre version",
       "body": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "x", "version": "1" } } },
       "status": 200,
       "expect": { "id": 0, "result": { "protocolVersion": "2025-11-25" } }
@@ -651,7 +651,7 @@
     {
       "name": "2025 : initialize sans protocolVersion",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "body": { "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "capabilities": {} } },
       "status": 200,
       "expect": { "id": 0, "error": { "code": -32602 } }
@@ -659,7 +659,7 @@
     {
       "name": "2025 : ping",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 4, "method": "ping" },
       "status": 200,
@@ -669,7 +669,7 @@
     {
       "name": "2025 : server/discover sous la 2025-11-25",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 5, "method": "server/discover" },
       "status": 200,
@@ -678,7 +678,7 @@
     {
       "name": "2025 : une méthode inconnue",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 6, "method": "prompts/list" },
       "status": 200,
@@ -697,7 +697,7 @@
     {
       "name": "2025 : une ressource inconnue",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 8, "method": "resources/read", "params": { "uri": "mementum://spec/sql" } },
       "status": 200,
@@ -706,7 +706,7 @@
     {
       "name": "2025 : tools/list sur /mcp/readonly",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "endpoint": "readonly",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 9, "method": "tools/list" },
@@ -716,7 +716,7 @@
     {
       "name": "2025 : un outil d'écriture sur /mcp/readonly est un outil inconnu",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "endpoint": "readonly",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 10, "method": "tools/call", "params": { "name": "create_pages", "arguments": { "pages": [{ "title": "x" }] } } },
@@ -727,7 +727,7 @@
     {
       "name": "2025 : des arguments d'un autre type sont un échec de l'outil",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 11, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": ["p"] } } },
       "status": 200,
@@ -739,7 +739,7 @@
     {
       "name": "2025 : un refus de l'outil est un résultat isError, pas une erreur JSON-RPC",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 13, "method": "tools/call", "params": { "name": "fetch", "arguments": { "id": "0193a1b2-0000-7000-8000-000000000009" } } },
       "status": 200,
@@ -751,7 +751,7 @@
     {
       "name": "2025 : les en-têtes Mcp-Method et Mcp-Name ne sont pas jugés",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25", "Mcp-Method": "autre/chose", "Mcp-Name": "autre" },
       "body": { "jsonrpc": "2.0", "id": 12, "method": "tools/call", "params": { "name": "workspace_info" } },
       "status": 200,
@@ -761,7 +761,7 @@
     {
       "name": "2025 : une requête sans id n'est jamais faite",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "method": "tools/call", "params": { "name": "workspace_info" } },
       "status": 400,
@@ -771,7 +771,7 @@
     {
       "name": "2025 : un lot JSON-RPC",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": [{ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }, { "jsonrpc": "2.0", "id": 2, "method": "resources/list" }],
       "status": 400,
@@ -780,7 +780,7 @@
     {
       "name": "2025 : un JSON illisible",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "raw": "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"",
       "status": 400,
@@ -789,7 +789,7 @@
     {
       "name": "2026 : une notification sans _meta est acceptée sans effet",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "notifications/cancelled" },
       "body": { "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 3 } },
       "status": 202,
@@ -798,7 +798,7 @@
     {
       "name": "2026 : un id numérique qui n'est pas entier",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1.5, "method": "tools/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 400,
@@ -807,7 +807,7 @@
     {
       "name": "2026 : resources/templates/list rend une liste vide",
       "era": "2026-07-28",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "resources/templates/list" },
       "body": { "jsonrpc": "2.0", "id": 23, "method": "resources/templates/list", "params": { "_meta": { "io.modelcontextprotocol/protocolVersion": "2026-07-28", "io.modelcontextprotocol/clientCapabilities": {} } } },
       "status": 200,
@@ -817,7 +817,7 @@
     {
       "name": "2025 : resources/templates/list rend une liste vide",
       "era": "2025-11-25",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25" },
       "body": { "jsonrpc": "2.0", "id": 14, "method": "resources/templates/list" },
       "status": 200,
@@ -827,7 +827,7 @@
     {
       "name": "aucune : une requête sans version ni en-tête échoue à la validation des en-têtes",
       "era": "aucune",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
       "status": 400,
       "expect": { "id": 1, "error": { "code": -32020, "message": "<any>" } },
@@ -836,7 +836,7 @@
     {
       "name": "aucune : un MCP-Protocol-Version répété, sans _meta",
       "era": "aucune",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": ["2025-11-25", "2025-11-25"] },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
       "status": 400,
@@ -845,7 +845,7 @@
     {
       "name": "aucune : un MCP-Protocol-Version aux caractères non permis, sans _meta",
       "era": "aucune",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-11-25\u0001" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
       "status": 400,
@@ -854,7 +854,7 @@
     {
       "name": "aucune : l'en-tête d'une version non servie, sans _meta",
       "era": "aucune",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2025-06-18" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
       "status": 400,
@@ -863,7 +863,7 @@
     {
       "name": "aucune : un MCP-Protocol-Version qui n'a pas la forme d'une version, sans _meta",
       "era": "aucune",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "latest" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
       "status": 400,
@@ -872,7 +872,7 @@
     {
       "name": "aucune : l'en-tête de la 2026-07-28 sans _meta ne dit pas le corps",
       "era": "aucune",
-      "proven_by": "la spécification seule (M2 et X1 l'éprouvent)",
+      "proven_by": "la spécification seule (rejouée par les tests de M1 ; aucun vrai client)",
       "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
       "body": { "jsonrpc": "2.0", "id": 1, "method": "tools/list" },
       "status": 400,
