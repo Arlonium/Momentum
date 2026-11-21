@@ -413,20 +413,166 @@ fn cold_start_and_memory_with_an_index_of_10000_pages() {
 fn memory_after_500_agent_reads() {
     release_only();
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    const PAGES: usize = 50;
-    const BLOCKS: usize = 2_000;
-    const READS: usize = 500;
-    let dir = tempfile::tempdir().unwrap();
-    let server = Server::start_with_env(
-        &dir.path().join("donnees"),
-        &[
-            ("MEMENTUM_TOKEN_CALLS_PER_MIN", "100000"),
-            ("MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN", "100000"),
-            // Les lignes du lancement et de l'arrêt de chaque acteur, et de `malloc_trim` sous
-            // Linux : la mesure dit combien d'acteurs vivent quand elle lit (défaut D1, R1526).
-            ("RUST_LOG", "info,mementum_sync::actor=debug"),
-        ],
+    const PAGES: usize = AGENT_PAGES;
+    const BLOCKS: usize = AGENT_BLOCKS;
+    const READS: usize = AGENT_READS;
+    let AgentReads {
+        read_in,
+        working,
+        working_actors,
+        unopened,
+        unopened_actors,
+        used,
+        used_actors,
+    } = agent_reads(&[]);
+    println!(
+        "MESURE après {READS} lectures d'agent de pages de {BLOCKS} blocs ({read_in:?}, une \
+         écriture d'agent avant chaque relecture, {PAGES} pages) : 2 s après, les acteurs vivants, \
+         mémoire de travail {:.1} Mo, en propre {} Mo ; 4 s après, les acteurs arrêtés (R1657), \
+         {:.1} Mo, en propre {} Mo ; au repos ({IDLE_CLOSE:?} après), {:.1} Mo, en propre {} Mo",
+        mb(working.rss),
+        own_mb(working),
+        mb(unopened.rss),
+        own_mb(unopened),
+        mb(used.rss),
+        own_mb(used),
     );
+    println!(
+        "MESURE acteurs vivants (lancés moins arrêtés, d'après le journal du serveur) et appels de \
+         malloc_trim (Linux seulement), aux mêmes instants (défaut D1, R1526) : 2 s après {} \
+         acteurs, {} malloc_trim ; 4 s après {} acteurs, {} malloc_trim ; au repos {} acteurs, \
+         {} malloc_trim",
+        working_actors.0,
+        working_actors.1,
+        unopened_actors.0,
+        unopened_actors.1,
+        used_actors.0,
+        used_actors.1,
+    );
+    // Ruling R1659 : la borne n'est affirmée que là où un passage l'a vue tenir (sous Windows, 117
+    // Mo). Sous Linux (glibc, `RssAnon`), la mesure écrit sa ligne `MESURE` sans rien affirmer tant
+    // qu'un passage de la CI ne l'a pas lue : la passe de fin du lot la lit et tranche (la borne,
+    // `malloc_trim` après l'arrêt des acteurs, ou une mesure sans borne).
+    #[cfg(windows)]
+    {
+        if let Some(own) = used.own {
+            assert!(
+                own < IDLE_RSS,
+                "mémoire tenue en propre après {READS} lectures d'agent : {own} octets (budget \
+                 {IDLE_RSS})"
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    println!(
+        "MESURE la mémoire en propre au repos après {READS} lectures d'agent n'est pas encore \
+         jugée sous ce système (Ruling R1659) : {} Mo, budget {:.0} Mo",
+        own_mb(used),
+        mb(IDLE_RSS),
+    );
+}
+
+/// Défaut D1 (Ruling R1547) : la scène de [`memory_after_500_agent_reads`], rejouée sous Linux, le
+/// serveur lancé sous des réglages de la glibc passés par son environnement (la glibc les lit
+/// d'elle-même à son lancement : aucun code du serveur ne change). Après le `malloc_trim` de
+/// R1526, la mémoire en propre au repos vaut 185 Mo sur la CI (R1546), pour un budget de 150 Mo ;
+/// ces sondes disent si moins d'arènes (`MALLOC_ARENA_MAX`), ou un seuil de `mmap` fixe
+/// (`MALLOC_MMAP_THRESHOLD_`, qui éteint le seuil dynamique : les grands blocs vont et viennent
+/// par `mmap` et `munmap`), ramènent le reste sous le budget. Une ligne `MESURE` par réglage,
+/// **sans borne** : la scène de référence reste celle de `memory_after_500_agent_reads`, lancée
+/// au même passage. Quatre scènes, environ six minutes de plus au job `budgets`.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+fn memory_after_500_agent_reads_under_glibc_settings() {
+    release_only();
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    const SETTINGS: [&[(&str, &str)]; 4] = [
+        &[("MALLOC_ARENA_MAX", "2")],
+        &[("MALLOC_ARENA_MAX", "1")],
+        &[("MALLOC_MMAP_THRESHOLD_", "131072")],
+        &[
+            ("MALLOC_ARENA_MAX", "2"),
+            ("MALLOC_MMAP_THRESHOLD_", "131072"),
+        ],
+    ];
+    for settings in SETTINGS {
+        let scene = agent_reads(settings);
+        let named = settings
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        println!(
+            "MESURE réglages de la glibc {named} (défaut D1, R1547), {AGENT_READS} lectures \
+             d'agent ({:?}) : 2 s après, {} acteurs, en propre {} Mo, mémoire de travail {:.1} Mo \
+             ; 4 s après, {} acteurs, en propre {} Mo, mémoire de travail {:.1} Mo ; au repos \
+             ({IDLE_CLOSE:?} après), {} acteurs, {} malloc_trim, en propre {} Mo, mémoire de \
+             travail {:.1} Mo (budget {:.0} Mo, non affirmé)",
+            scene.read_in,
+            scene.working_actors.0,
+            own_mb(scene.working),
+            mb(scene.working.rss),
+            scene.unopened_actors.0,
+            own_mb(scene.unopened),
+            mb(scene.unopened.rss),
+            scene.used_actors.0,
+            scene.used_actors.1,
+            own_mb(scene.used),
+            mb(scene.used.rss),
+            mb(IDLE_RSS),
+        );
+    }
+}
+
+/// Pages, blocs par page et lectures de [`agent_reads`].
+const AGENT_PAGES: usize = 50;
+const AGENT_BLOCKS: usize = 2_000;
+const AGENT_READS: usize = 500;
+
+/// Ce que relève [`agent_reads`] : la durée des lectures, puis la mémoire du serveur et ses
+/// acteurs vivants, avec les `malloc_trim` faits ([`actors_alive`]), 2 s après la dernière
+/// lecture, 4 s après, et au repos.
+struct AgentReads {
+    read_in: Duration,
+    working: Memory,
+    working_actors: (usize, usize),
+    unopened: Memory,
+    unopened_actors: (usize, usize),
+    used: Memory,
+    used_actors: (usize, usize),
+}
+
+/// La scène de [`memory_after_500_agent_reads`] (voir sa documentation), le serveur lancé avec
+/// `vars` en plus des variables de la scène ; sous Linux, la scène vérifie qu'elles sont dans
+/// l'environnement du serveur. Le serveur est tué avant le retour.
+fn agent_reads(vars: &[(&str, &str)]) -> AgentReads {
+    const PAGES: usize = AGENT_PAGES;
+    const BLOCKS: usize = AGENT_BLOCKS;
+    const READS: usize = AGENT_READS;
+    let dir = tempfile::tempdir().unwrap();
+    let mut env = vec![
+        ("MEMENTUM_TOKEN_CALLS_PER_MIN", "100000"),
+        ("MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN", "100000"),
+        // Les lignes du lancement et de l'arrêt de chaque acteur, et de `malloc_trim` sous
+        // Linux : la mesure dit combien d'acteurs vivent quand elle lit (défaut D1, R1526).
+        ("RUST_LOG", "info,mementum_sync::actor=debug"),
+    ];
+    env.extend_from_slice(vars);
+    let server = Server::start_with_env(&dir.path().join("donnees"), &env);
+    if cfg!(target_os = "linux") {
+        let environ = std::fs::read(format!("/proc/{}/environ", server.pid()))
+            .expect("l'environnement du serveur");
+        for (name, value) in vars {
+            let entry = format!("{name}={value}");
+            assert!(
+                environ
+                    .split(|byte| *byte == 0)
+                    .any(|line| line == entry.as_bytes()),
+                "{entry} absent de l'environnement du serveur"
+            );
+        }
+    }
     let password = "un mot de passe assez long";
     let account =
         serde_json::json!({ "email": "alice@exemple.fr", "name": "Alice", "password": password });
@@ -539,52 +685,16 @@ fn memory_after_500_agent_reads() {
     thread::sleep(IDLE_CLOSE + Duration::from_secs(3) - after_reads.elapsed());
     let used = memory_of(server.pid());
     let used_actors = actors_alive(&server);
-    println!(
-        "MESURE après {READS} lectures d'agent de pages de {BLOCKS} blocs ({read_in:?}, une \
-         écriture d'agent avant chaque relecture, {PAGES} pages) : 2 s après, les acteurs vivants, \
-         mémoire de travail {:.1} Mo, en propre {} Mo ; 4 s après, les acteurs arrêtés (R1657), \
-         {:.1} Mo, en propre {} Mo ; au repos ({IDLE_CLOSE:?} après), {:.1} Mo, en propre {} Mo",
-        mb(working.rss),
-        own_mb(working),
-        mb(unopened.rss),
-        own_mb(unopened),
-        mb(used.rss),
-        own_mb(used),
-    );
-    println!(
-        "MESURE acteurs vivants (lancés moins arrêtés, d'après le journal du serveur) et appels de \
-         malloc_trim (Linux seulement), aux mêmes instants (défaut D1, R1526) : 2 s après {} \
-         acteurs, {} malloc_trim ; 4 s après {} acteurs, {} malloc_trim ; au repos {} acteurs, \
-         {} malloc_trim",
-        working_actors.0,
-        working_actors.1,
-        unopened_actors.0,
-        unopened_actors.1,
-        used_actors.0,
-        used_actors.1,
-    );
     server.kill();
-    // Ruling R1659 : la borne n'est affirmée que là où un passage l'a vue tenir (sous Windows, 117
-    // Mo). Sous Linux (glibc, `RssAnon`), la mesure écrit sa ligne `MESURE` sans rien affirmer tant
-    // qu'un passage de la CI ne l'a pas lue : la passe de fin du lot la lit et tranche (la borne,
-    // `malloc_trim` après l'arrêt des acteurs, ou une mesure sans borne).
-    #[cfg(windows)]
-    {
-        if let Some(own) = used.own {
-            assert!(
-                own < IDLE_RSS,
-                "mémoire tenue en propre après {READS} lectures d'agent : {own} octets (budget \
-                 {IDLE_RSS})"
-            );
-        }
+    AgentReads {
+        read_in,
+        working,
+        working_actors,
+        unopened,
+        unopened_actors,
+        used,
+        used_actors,
     }
-    #[cfg(not(windows))]
-    println!(
-        "MESURE la mémoire en propre au repos après {READS} lectures d'agent n'est pas encore \
-         jugée sous ce système (Ruling R1659) : {} Mo, budget {:.0} Mo",
-        own_mb(used),
-        mb(IDLE_RSS),
-    );
 }
 
 /// Les acteurs de page vivants (lancés moins arrêtés) et les appels de `malloc_trim` faits, d'après
