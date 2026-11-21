@@ -835,6 +835,10 @@ struct Actor {
     /// La version `before_agent` en vol (Ruling R1572) : relue puis écrite par une tâche à part ;
     /// une seule à la fois, attendue avant que l'acteur quitte le registre.
     versioning: Option<Versioning>,
+    /// Une connexion de synchro s'est inscrite depuis le lancement de l'acteur (lot 5, Task X2,
+    /// Ruling R1657) : sans elle, l'acteur n'a servi que des demandes (lectures et écritures
+    /// d'agent, routes), et s'arrête après `idle_close_unopened` plutôt qu'`idle_close`.
+    opened: bool,
 }
 
 impl Actor {
@@ -866,6 +870,21 @@ impl Actor {
             compaction: None,
             key,
             versioning: None,
+            opened: false,
+        }
+    }
+
+    /// Le délai sans connexion ni demande au-delà duquel l'acteur s'arrête (lot 5, Task X2,
+    /// Ruling R1657) : `idle_close_unopened` pour une page qu'aucune connexion n'a ouverte depuis
+    /// le lancement de l'acteur (un agent ouvre une page par appel, et chacune garde son document
+    /// en mémoire tant que l'acteur vit, R1645), sauf si sa tranche demande une version de fin :
+    /// l'arrêt la couperait, et une version par écriture espacée de quelques secondes viderait
+    /// l'historique ; `idle_close` sinon.
+    fn idle_close(&self) -> std::time::Duration {
+        if self.opened || self.slice.closes() {
+            self.cfg.idle_close
+        } else {
+            self.cfg.idle_close_unopened
         }
     }
 
@@ -879,7 +898,7 @@ impl Actor {
     async fn serve(mut self, mut rx: UnboundedReceiver<Command>) {
         let stop = loop {
             let next = if self.conns.is_empty() {
-                match tokio::time::timeout(self.cfg.idle_close, rx.recv()).await {
+                match tokio::time::timeout(self.idle_close(), rx.recv()).await {
                     Ok(next) => next,
                     Err(_) => break Stop::Idle,
                 }
@@ -1048,6 +1067,7 @@ impl Actor {
         };
         let conn = self.next_conn;
         self.next_conn += 1;
+        self.opened = true;
         self.conns.insert(conn, Conn::new(writable, actor, name));
         let mut hello = vec![protocol::sync_step1(&self.page.state_vector())];
         hello.extend(self.awareness_state());

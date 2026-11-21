@@ -1404,3 +1404,98 @@ async fn a_destructive_edit_that_changes_nothing_cuts_no_version() {
     assert_eq!(edited.revision, read.revision);
     assert_eq!(f.store.load_doc(f.page).await.unwrap(), journal);
 }
+
+/// Avance l'horloge arrêtée de `by`, puis laisse 200 ms de temps réel à l'acteur pour traiter ses
+/// délais échus ; rend s'il vit encore.
+async fn alive_after(f: &Fixture, by: Duration) -> bool {
+    tokio::time::advance(by).await;
+    let settle = std::time::Instant::now() + Duration::from_millis(200);
+    while std::time::Instant::now() < settle {
+        tokio::task::yield_now().await;
+    }
+    f.hub.live_pages().await.contains(&f.page)
+}
+
+/// Attend, en temps réel, que l'acteur de la page soit arrêté.
+async fn stopped(f: &Fixture) {
+    until("l'acteur de la page ne s'arrête pas", async || {
+        !f.hub.live_pages().await.contains(&f.page)
+    })
+    .await;
+}
+
+/// Lot 5, Task X2 (Ruling R1657, la voie (b) de R1645) : l'acteur d'une page qu'aucune connexion
+/// n'a ouverte, lancé par une lecture d'agent seule, s'arrête `idle_close_unopened` après la
+/// dernière demande, pas `idle_close` : un agent ouvre une page par appel, et chacune garde son
+/// document en mémoire tant que son acteur vit.
+#[tokio::test]
+async fn an_actor_no_connection_opened_stops_after_the_short_delay() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    actor_stops(&f).await;
+    f.hub.read_page(f.page).await.unwrap();
+    let short = f.hub.config().idle_close_unopened;
+    assert!(short < f.hub.config().idle_close);
+    assert!(
+        alive_after(&f, short - Duration::from_millis(10)).await,
+        "l'acteur s'est arrêté avant le délai court"
+    );
+    tokio::time::advance(Duration::from_millis(20)).await;
+    stopped(&f).await;
+    assert!(versions(&f).await.is_empty(), "une version à l'arrêt");
+}
+
+/// L'acteur d'une page qu'une connexion a ouverte garde `idle_close` après son départ (les onglets
+/// qui reviennent ne rechargent pas la page) : vivant au-delà du délai court, arrêté au-delà
+/// d'`idle_close`.
+#[tokio::test]
+async fn an_actor_a_connection_opened_keeps_the_long_delay() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    actor_stops(&f).await;
+    let reader = Client::connect_synced(&f.url_for(ConnInfo {
+        can_write: false,
+        ..writing_conn()
+    }))
+    .await;
+    drop(reader);
+    until("la connexion n'est pas partie", async || {
+        f.hub.writers(f.page).await == 0
+    })
+    .await;
+    let (short, long) = (
+        f.hub.config().idle_close_unopened,
+        f.hub.config().idle_close,
+    );
+    assert!(
+        alive_after(&f, short + Duration::from_secs(1)).await,
+        "l'acteur d'une page ouverte par une connexion s'est arrêté au délai court"
+    );
+    tokio::time::advance(long).await;
+    stopped(&f).await;
+}
+
+/// Une page qu'aucune connexion n'a ouverte, mais dont la tranche demande une version de fin (une
+/// écriture qui n'est pas d'un jeton, ici celle du serveur) : l'acteur garde `idle_close`, et ne
+/// coupe sa version de fin qu'une fois, à son arrêt. Sans cela, une écriture toutes les quelques
+/// secondes couperait une version chacune.
+#[tokio::test]
+async fn an_actor_whose_slice_closes_keeps_the_long_delay() {
+    let _clock = StoppedClock::start();
+    let f = Fixture::new(config()).await;
+    actor_stops(&f).await;
+    f.write_mmd("Écrit par le serveur\n").await;
+    let (short, long) = (
+        f.hub.config().idle_close_unopened,
+        f.hub.config().idle_close,
+    );
+    assert!(
+        alive_after(&f, short + Duration::from_secs(1)).await,
+        "l'acteur s'est arrêté au délai court avec une version de fin à couper"
+    );
+    tokio::time::advance(long).await;
+    stopped(&f).await;
+    let cut = versions(&f).await;
+    assert_eq!(cut.len(), 1, "{cut:?}");
+    assert_eq!(cut[0].reason, VersionReason::Closing);
+}

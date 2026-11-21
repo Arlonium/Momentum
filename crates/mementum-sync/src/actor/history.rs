@@ -183,7 +183,7 @@ impl Slice {
     /// Ruling R1234, règle 3 : une tranche écrite par des jetons seuls ne coupe pas de version
     /// `closing`. Elle reste au journal, et la `periodic` qui suit d'un intervalle sa première
     /// écriture la garde : un agent seul coupe au plus une version par intervalle.
-    fn closes(&self) -> bool {
+    pub(super) fn closes(&self) -> bool {
         self.since.is_some() && self.others
     }
 

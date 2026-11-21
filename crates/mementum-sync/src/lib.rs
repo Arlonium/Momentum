@@ -209,6 +209,11 @@ pub struct SyncConfig {
     pub compact_after_deletions: u64,
     /// L'acteur d'une page s'arrête après ce délai sans connexion ni demande.
     pub idle_close: Duration,
+    /// L'acteur d'une page qu'aucune connexion de synchro n'a ouverte depuis son lancement (il
+    /// n'a servi que des demandes : lectures et écritures d'agent, routes) s'arrête plus tôt,
+    /// après ce délai sans demande, si sa tranche ne demande pas de version de fin (lot 5, Task
+    /// X2, Ruling R1657, [`IDLE_CLOSE_UNOPENED`]) ; sinon après `idle_close`.
+    pub idle_close_unopened: Duration,
     /// Taille maximale d'un message reçu d'un client, contrôlée avant tout
     /// décodage : au-delà, la connexion est fermée (Ruling R27).
     pub max_message_bytes: usize,
@@ -233,6 +238,13 @@ pub struct SyncConfig {
     /// budget de `PUT /mmd` (Ruling R368).
     pub agent_write_budget: Duration,
 }
+
+/// Délai par défaut de [`SyncConfig::idle_close_unopened`] : 3 s. Un agent ouvre une page par
+/// appel, et l'acteur garde la page en mémoire, environ 4,5 Ko par bloc (Ruling R1645) : au débit
+/// d'un jeton (deux appels par seconde), il tient ainsi six pages ouvertes au plus, au lieu d'une
+/// soixantaine pendant les 30 s d'`idle_close`. Plus court, deux appels d'un agent sur une même
+/// page relanceraient l'acteur (un chargement de la page) entre deux tours de sa boucle.
+pub const IDLE_CLOSE_UNOPENED: Duration = Duration::from_secs(3);
 
 /// Le budget par défaut d'une écriture d'agent ([`SyncConfig::agent_write_budget`]).
 pub const AGENT_WRITE_BUDGET: Duration = Duration::from_secs(8);
@@ -276,6 +288,7 @@ impl Default for SyncConfig {
             snapshot_every: 500,
             compact_after_deletions: 2_000,
             idle_close: Duration::from_secs(30),
+            idle_close_unopened: IDLE_CLOSE_UNOPENED,
             max_message_bytes: 16 << 20,
             max_queue_bytes: 64 << 20,
             keepalive_after: KEEPALIVE_AFTER,
