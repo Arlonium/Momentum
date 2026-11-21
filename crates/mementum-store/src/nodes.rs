@@ -561,6 +561,11 @@ impl Store {
         &self,
         ids: &[Uuid],
     ) -> Result<std::collections::HashMap<Uuid, String>, StoreError> {
+        #[cfg(feature = "test-hooks")]
+        self.titles_asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend_from_slice(ids);
         if ids.is_empty() {
             return Ok(Default::default());
         }
@@ -578,6 +583,42 @@ impl Store {
             .await?
             .iter()
             .map(|r| Ok((parse_uuid(&r.get::<String, _>("id"))?, r.get("title"))))
+            .collect()
+    }
+
+    /// Les nœuds demandés à [`Store::node_titles`] depuis l'ouverture de ce store, dans l'ordre
+    /// des demandes, tous appels confondus. Pour les tests seulement (fonction `test-hooks`,
+    /// Ruling R1201) : une route ne demande le titre que des pages qu'elle a jugées par les
+    /// droits (l'activité d'un jeton, sa liste).
+    #[cfg(feature = "test-hooks")]
+    pub fn titles_asked(&self) -> Vec<Uuid> {
+        self.titles_asked
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// L'espace de chacun de ces nœuds, en une lecture, par id ; un nœud inconnu n'y est pas.
+    /// Rien d'autre n'est lu, pas même le titre : de quoi juger par les droits les pages d'une
+    /// liste avant d'en demander les titres ([`Store::node_titles`]).
+    pub async fn node_spaces(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<std::collections::HashMap<Uuid, Uuid>, StoreError> {
+        if ids.is_empty() {
+            return Ok(Default::default());
+        }
+        sqlx::query("SELECT id, space_id FROM nodes WHERE id IN (SELECT value FROM json_each(?))")
+            .bind(crate::search::json_ids(ids))
+            .fetch_all(&self.pool)
+            .await?
+            .iter()
+            .map(|r| {
+                Ok((
+                    parse_uuid(&r.get::<String, _>("id"))?,
+                    parse_uuid(&r.get::<String, _>("space_id"))?,
+                ))
+            })
             .collect()
     }
 

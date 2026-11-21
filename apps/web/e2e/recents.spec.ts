@@ -302,7 +302,7 @@ test("recents_of_an_account_whose_session_ended_elsewhere_go_when_another_enters
   const changed = await api.post("/api/v1/auth/password", {
     data: { current: account.password, new: `${account.password}-neuf` },
   });
-  expect(changed.status(), await changed.text()).toBe(204);
+  expect(changed.status(), await changed.text()).toBe(200);
 
   // Un autre compte se connecte dans ce navigateur : les récents du premier n'y restent pas.
   const other = await signUpAccount(`Olga ${unique()}`);

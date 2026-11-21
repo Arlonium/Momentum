@@ -195,7 +195,7 @@ async fn every_closed_route_refuses_a_live_token() {
     t.calls.flush(&t.store).await;
     let calls = t
         .store
-        .calls_of(team.olga.id, tokens[0].id, None, 100, now())
+        .calls_of(team.olga.id, tokens[0].id, None, None, 100, now())
         .await
         .unwrap();
     assert!(calls.is_empty(), "{calls:?}");
@@ -1027,7 +1027,7 @@ async fn a_token_over_its_rate_is_refused_and_only_counted() {
     t.calls.flush(&t.store).await;
     let calls = t
         .store
-        .calls_of(mona.id, token_id, None, 50, now())
+        .calls_of(mona.id, token_id, None, None, 50, now())
         .await
         .unwrap();
     let lines: Vec<(&str, Option<Uuid>, &str)> = calls
@@ -1399,7 +1399,7 @@ async fn a_token_write_whose_client_left_leaves_a_line() {
     t.calls.flush(&t.store).await;
     let calls = t
         .store
-        .calls_of(mona.id, token_id, None, 50, now())
+        .calls_of(mona.id, token_id, None, None, 50, now())
         .await
         .unwrap();
     let lines: Vec<(&str, &str, Option<&str>)> = calls

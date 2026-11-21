@@ -412,6 +412,7 @@ async fn password_is_only_changed_from_the_verified_hash() {
             .change_password(alice.id, &verified, "premier-changement", [4; 32], expires)
             .await
             .unwrap()
+            .is_some()
     );
     assert_eq!(
         password_hash(store, alice.id).await.as_deref(),
@@ -434,6 +435,7 @@ async fn password_is_only_changed_from_the_verified_hash() {
             .change_password(alice.id, &verified, "second-changement", [5; 32], expires)
             .await
             .unwrap()
+            .is_some()
     );
     assert_eq!(
         password_hash(store, alice.id).await.as_deref(),
@@ -447,6 +449,7 @@ async fn password_is_only_changed_from_the_verified_hash() {
             .change_password(Uuid::now_v7(), &verified, "x", [6; 32], expires)
             .await
             .unwrap()
+            .is_some()
     );
     // Le hachage de Bob, le même texte que celui d'Alice avant, n'a pas bougé.
     assert_eq!(

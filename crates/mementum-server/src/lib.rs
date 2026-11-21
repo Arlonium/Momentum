@@ -9,7 +9,7 @@
 //! | `POST /api/v1/auth/signup` | non | `201`, [`Me`], cookie de session (celle que portait déjà le navigateur est fermée, avec les connexions de synchro de son compte, comme à la connexion, Ruling R90 ; une inscription refusée ne ferme rien) ; le premier compte est toujours permis ; `403 signup_closed` ; `404 invalid_invitation` ; `409 email_taken` ; `422 invalid_email`, `invalid_name`, `invalid_password` |
 //! | `POST /api/v1/auth/login` | non | [`Me`], cookie de session (celle que portait déjà le navigateur est fermée, avec les connexions de synchro de son compte, Ruling R90) ; `401 invalid_credentials` (aussi quand le mot de passe du compte change pendant sa vérification : aucune session n'est ouverte, Ruling R120) ; `429 too_many_attempts` (avec `Retry-After`) |
 //! | `POST /api/v1/auth/logout` | non | `204`, session supprimée, cookie effacé, connexions de synchro du compte fermées (Ruling R73) ; sans session : `204` aussi |
-//! | `POST /api/v1/auth/password` | oui | `204` : toutes les sessions du compte sont supprimées et ses connexions de synchro fermées ; la demande repart avec une session neuve (cookie de la réponse) ; `401 invalid_credentials` (mot de passe actuel faux, ou remplacé pendant sa vérification : rien n'est changé, Ruling R120) ; `422 invalid_password` ; `429 too_many_attempts` (avec `Retry-After` ; frein à part de celui de la connexion, Ruling R76) |
+//! | `POST /api/v1/auth/password` | oui | `200`, `PasswordChanged` (`tokensRevoked` : les jetons d'API vivants que le changement a révoqués, Ruling R1221) : toutes les sessions du compte sont supprimées, tous ses jetons d'API révoqués, et ses connexions de synchro fermées ; la demande repart avec une session neuve (cookie de la réponse) ; `401 invalid_credentials` (mot de passe actuel faux, ou remplacé pendant sa vérification : rien n'est changé, Ruling R120) ; `422 invalid_password` ; `429 too_many_attempts` (avec `Retry-After` ; frein à part de celui de la connexion, Ruling R76) |
 //! | `GET /api/v1/me` | oui | [`Me`] : le compte et ses espaces |
 //! | `POST /api/v1/spaces` | oui | `201`, `SpaceInfo` : l'espace créé, dont le compte est `owner` ; `422 invalid_name` |
 //! | `PATCH /api/v1/spaces/{id}` | `admin` | `SpaceInfo` ; `422 invalid_name` |
@@ -315,7 +315,7 @@ use mementum_store::Store;
 use mementum_sync::{Hub, SyncConfig};
 use tokio::net::TcpListener;
 
-pub use auth::set_password;
+pub use auth::{PasswordSet, set_password};
 pub use config::Config;
 pub use duplications::{DUPLICATION_BUDGET, DUPLICATION_WINDOW};
 pub use error::ApiError;

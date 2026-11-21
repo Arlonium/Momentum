@@ -271,7 +271,7 @@ async fn the_password_change_checks_the_named_account_and_the_other_session_rout
             &[alice.id.to_string()],
         ))
         .await;
-    reply.assert_status(StatusCode::NO_CONTENT);
+    reply.assert_status(StatusCode::OK);
 
     // La connexion et l'inscription ouvrent une session, la déconnexion ferme celle du
     // navigateur : un en-tête qui nomme un autre compte n'y change rien.

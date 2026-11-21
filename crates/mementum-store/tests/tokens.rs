@@ -486,13 +486,20 @@ async fn dead_tokens_are_kept_ninety_days_and_fifty_at_most() {
     assert_eq!(names(T0 + DEAD_TOKEN_KEPT_MS).await, ["récent"]);
     assert!(matches!(
         f.store
-            .calls_of(alice.id, old.id, None, 10, T0 + DEAD_TOKEN_KEPT_MS)
+            .calls_of(alice.id, old.id, None, None, 10, T0 + DEAD_TOKEN_KEPT_MS)
             .await,
         Err(StoreError::NotFound)
     ));
     assert_eq!(
         f.store
-            .calls_of(alice.id, old.id, None, 10, T0 + DEAD_TOKEN_KEPT_MS - 1)
+            .calls_of(
+                alice.id,
+                old.id,
+                None,
+                None,
+                10,
+                T0 + DEAD_TOKEN_KEPT_MS - 1
+            )
             .await
             .unwrap()
             .len(),
@@ -642,6 +649,7 @@ async fn changing_the_password_revokes_every_token_in_the_same_transaction() {
             .change_password(alice.id, "pas-un-hachage", "neuf", [8; 32], far)
             .await
             .unwrap()
+            .is_some()
     );
     for hash in &hashes {
         assert_eq!(f.store.token_by_hash(*hash, T0).await.unwrap(), None);
@@ -780,7 +788,7 @@ async fn refused_calls_never_push_out_a_successful_one() {
     // Lu du plus récent au plus ancien, par pages.
     let first = f
         .store
-        .calls_of(alice.id, made.id, None, 3, T0)
+        .calls_of(alice.id, made.id, None, None, 3, T0)
         .await
         .unwrap();
     let ats: Vec<i64> = first.iter().map(|row| row.call.at).collect();
@@ -788,7 +796,7 @@ async fn refused_calls_never_push_out_a_successful_one() {
     assert_eq!(first[0].call, more[9]);
     let next = f
         .store
-        .calls_of(alice.id, made.id, Some(first[2].id), 2, T0)
+        .calls_of(alice.id, made.id, Some(first[2].id), None, 2, T0)
         .await
         .unwrap();
     let ats: Vec<i64> = next.iter().map(|row| row.call.at).collect();
@@ -796,7 +804,7 @@ async fn refused_calls_never_push_out_a_successful_one() {
     // Le journal d'un jeton d'un autre compte ne se lit pas.
     let bob = account(&f.store, "bob").await;
     assert!(matches!(
-        f.store.calls_of(bob.id, made.id, None, 3, T0).await,
+        f.store.calls_of(bob.id, made.id, None, None, 3, T0).await,
         Err(StoreError::NotFound)
     ));
 }
@@ -1035,6 +1043,7 @@ async fn changing_the_password_purges_the_dead_tokens() {
             .change_password(alice.id, "pas-un-hachage", "neuf", [8; 32], i64::MAX)
             .await
             .unwrap()
+            .is_some()
     );
     assert_eq!(int(&f.db, "SELECT COUNT(*) FROM api_tokens").await, 0);
     assert_eq!(int(&f.db, "SELECT COUNT(*) FROM token_calls").await, 0);
@@ -1143,4 +1152,187 @@ async fn tokens_are_listed_living_first_and_newest_first() {
         .map(|t| t.name)
         .collect();
     assert_eq!(names, ["c", "b", "a", "d"]);
+}
+
+// ---------------------------------------------------------------------------
+// Ce que les routes des jetons demandent au store (Task S6).
+
+/// Une création vérifiée (le mot de passe redemandé à la création, décision L2) n'écrit que si le
+/// hachage du compte est encore celui que la route vient de vérifier (Ruling R120) : un changement
+/// de mot de passe passé entre la vérification et l'écriture la laisse sans effet, sans rien
+/// écrire ; vérifiée contre le hachage courant, elle crée ; un compte sans mot de passe n'en crée
+/// aucun.
+#[tokio::test]
+async fn a_token_is_created_only_while_the_verified_password_holds() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let first = token(alice.id, "un", TokenScope::All, T0);
+    let made = f
+        .store
+        .create_token_verified(first, "pas-un-hachage")
+        .await
+        .unwrap();
+    assert_eq!(made.map(|t| t.name).as_deref(), Some("un"));
+
+    // Le mot de passe change pendant qu'une création vérifiée contre l'ancien attend.
+    f.store.set_password(alice.id, "neuf").await.unwrap();
+    let stale = token(alice.id, "deux", TokenScope::All, T0);
+    let stale_hash = stale.hash;
+    assert_eq!(
+        f.store
+            .create_token_verified(stale, "pas-un-hachage")
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(f.store.token_by_hash(stale_hash, T0).await.unwrap(), None);
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM api_tokens").await, 1);
+
+    // Vérifiée contre le hachage courant : elle crée.
+    let current = token(alice.id, "trois", TokenScope::All, T0);
+    let current_hash = current.hash;
+    assert!(
+        f.store
+            .create_token_verified(current, "neuf")
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        f.store
+            .token_by_hash(current_hash, T0)
+            .await
+            .unwrap()
+            .is_some()
+    );
+
+    // Un compte sans mot de passe : aucun hachage vérifié ne vaut.
+    exec_sql(
+        &f.db,
+        &format!(
+            "UPDATE users SET password_hash = NULL WHERE id = '{}'",
+            alice.id
+        ),
+    )
+    .await;
+    let none = token(alice.id, "quatre", TokenScope::All, T0);
+    assert_eq!(
+        f.store.create_token_verified(none, "neuf").await.unwrap(),
+        None
+    );
+    assert_eq!(int(&f.db, "SELECT COUNT(*) FROM api_tokens").await, 2);
+}
+
+/// Le journal se lit par issue (l'écran « Activité », Task C2) : les seules lignes de l'issue
+/// demandée, de la plus récente à la plus ancienne, avant le curseur donné ; sans issue, toutes.
+#[tokio::test]
+async fn the_journal_is_read_by_outcome() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    let made = f
+        .store
+        .create_token(token(alice.id, "un", TokenScope::All, T0))
+        .await
+        .unwrap();
+    let outcomes = [
+        CallOutcome::Ok,
+        CallOutcome::Refused,
+        CallOutcome::Error,
+        CallOutcome::Ok,
+        CallOutcome::Refused,
+    ];
+    let calls: Vec<Call> = outcomes
+        .iter()
+        .enumerate()
+        .map(|(i, &outcome)| call(made.id, T0 + 1 + i as i64, outcome))
+        .collect();
+    f.store.append_calls(&calls, &[]).await.unwrap();
+    let read = |before: Option<i64>, outcome: Option<CallOutcome>, limit: usize| {
+        let store = f.store.clone();
+        async move {
+            store
+                .calls_of(alice.id, made.id, before, outcome, limit, T0)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|row| (row.id, row.call.at))
+                .collect::<Vec<_>>()
+        }
+    };
+    let ats = |rows: &[(i64, i64)]| rows.iter().map(|&(_, at)| at).collect::<Vec<_>>();
+    assert_eq!(
+        ats(&read(None, None, 10).await),
+        [T0 + 5, T0 + 4, T0 + 3, T0 + 2, T0 + 1]
+    );
+    let ok = read(None, Some(CallOutcome::Ok), 10).await;
+    assert_eq!(ats(&ok), [T0 + 4, T0 + 1]);
+    assert_eq!(
+        ats(&read(None, Some(CallOutcome::Refused), 10).await),
+        [T0 + 5, T0 + 2]
+    );
+    assert_eq!(
+        ats(&read(None, Some(CallOutcome::Error), 10).await),
+        [T0 + 3]
+    );
+    // Le curseur vaut avec l'issue : avant la plus récente des réussies, la suivante seule.
+    assert_eq!(
+        ats(&read(Some(ok[0].0), Some(CallOutcome::Ok), 1).await),
+        [T0 + 1]
+    );
+    assert_eq!(read(Some(ok[1].0), Some(CallOutcome::Ok), 10).await, []);
+}
+
+/// Un changement de mot de passe dit combien de jetons il a retirés (Task S6 : la route et la
+/// commande le disent) : ceux qui vivaient, pas un jeton déjà révoqué ni un jeton échu, qui
+/// reçoit pourtant sa date de révocation.
+#[tokio::test]
+async fn changing_the_password_counts_the_tokens_that_lived() {
+    let f = fresh().await;
+    let alice = account(&f.store, "alice").await;
+    // L'horloge du changement est celle du système : les jetons naissent à elle, sans quoi la
+    // purge (morts depuis quatre-vingt-dix jours) retirerait l'échu et le révoqué.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for name in ["un", "deux"] {
+        f.store
+            .create_token(token(alice.id, name, TokenScope::All, now))
+            .await
+            .unwrap();
+    }
+    let mut expired = token(alice.id, "échu", TokenScope::All, now - 10);
+    expired.expires_at = Some(now - 1);
+    let expired = f.store.create_token(expired).await.unwrap();
+    let revoked = f
+        .store
+        .create_token(token(alice.id, "révoqué", TokenScope::All, now))
+        .await
+        .unwrap();
+    assert!(
+        f.store
+            .revoke_token(alice.id, revoked.id, now)
+            .await
+            .unwrap()
+    );
+
+    assert_eq!(
+        f.store
+            .change_password(alice.id, "pas-un-hachage", "neuf", [8; 32], i64::MAX)
+            .await
+            .unwrap(),
+        Some(2)
+    );
+    let tokens = f.store.tokens_of(alice.id, now).await.unwrap();
+    assert_eq!(tokens.len(), 4, "{tokens:?}");
+    assert!(tokens.iter().all(|t| t.revoked_at.is_some()), "{tokens:?}");
+    assert!(tokens.iter().any(|t| t.id == expired.id));
+
+    // La commande : plus rien de vivant, puis un jeton neuf.
+    assert_eq!(f.store.set_password(alice.id, "encore").await.unwrap(), 0);
+    f.store
+        .create_token(token(alice.id, "trois", TokenScope::All, now))
+        .await
+        .unwrap();
+    assert_eq!(f.store.set_password(alice.id, "toujours").await.unwrap(), 1);
 }

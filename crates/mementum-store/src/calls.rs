@@ -211,14 +211,16 @@ impl Store {
 
     /// Le journal du jeton `token` du compte `user`, du plus récent au plus ancien, au plus
     /// `limit` lignes, avant la ligne `before` (son `id` ; `None` : depuis la plus récente), lu
-    /// en une transaction. `NotFound` pour un jeton inconnu, d'un autre compte, ou qui ne se lit
-    /// plus à `now` (mort depuis [`crate::DEAD_TOKEN_KEPT_MS`] : son journal non plus) : la même
-    /// réponse.
+    /// en une transaction ; avec `outcome`, les seules lignes de cette issue (l'index
+    /// `token_calls_by_token` les rend alors dans l'ordre, sans tri). `NotFound` pour un jeton
+    /// inconnu, d'un autre compte, ou qui ne se lit plus à `now` (mort depuis
+    /// [`crate::DEAD_TOKEN_KEPT_MS`] : son journal non plus) : la même réponse.
     pub async fn calls_of(
         &self,
         user: Uuid,
         token: Uuid,
         before: Option<i64>,
+        outcome: Option<CallOutcome>,
         limit: usize,
         now: i64,
     ) -> Result<Vec<CallRow>, StoreError> {
@@ -226,16 +228,29 @@ impl Store {
         if !shown_to(&mut *tx, user, token, now).await? {
             return Err(StoreError::NotFound);
         }
-        let rows = sqlx::query(
-            "SELECT id, at, surface, tool, space_id, node_id, outcome, code, revision_before, \
-                 revision_after, blocks_touched \
-             FROM token_calls WHERE token_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
-        )
-        .bind(token.to_string())
-        .bind(before.unwrap_or(i64::MAX))
-        .bind(i64::try_from(limit).unwrap_or(i64::MAX))
-        .fetch_all(&mut *tx)
-        .await?;
+        // Deux requêtes statiques plutôt qu'un `?4 IS NULL OR outcome = ?4`, que l'index ne
+        // servirait pas.
+        let sql = match outcome {
+            None => {
+                "SELECT id, at, surface, tool, space_id, node_id, outcome, code, revision_before, \
+                     revision_after, blocks_touched \
+                 FROM token_calls WHERE token_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3"
+            }
+            Some(_) => {
+                "SELECT id, at, surface, tool, space_id, node_id, outcome, code, revision_before, \
+                     revision_after, blocks_touched \
+                 FROM token_calls WHERE token_id = ?1 AND outcome = ?4 AND id < ?2 \
+                 ORDER BY id DESC LIMIT ?3"
+            }
+        };
+        let mut query = sqlx::query(sql)
+            .bind(token.to_string())
+            .bind(before.unwrap_or(i64::MAX))
+            .bind(i64::try_from(limit).unwrap_or(i64::MAX));
+        if let Some(outcome) = outcome {
+            query = query.bind(outcome.as_str());
+        }
+        let rows = query.fetch_all(&mut *tx).await?;
         tx.commit().await?;
         rows.iter()
             .map(|r| {

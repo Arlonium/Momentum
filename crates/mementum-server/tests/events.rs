@@ -609,7 +609,7 @@ async fn events_stop_when_the_session_ends() {
         .browser
         .change_password(PASSWORD, "un-autre-mot-de-passe")
         .await
-        .assert_status(StatusCode::NO_CONTENT);
+        .assert_status(StatusCode::OK);
     team.olga.create(in_team(&team, "Après eux")).await;
     let last = lsn(&team).await;
     assert!(
@@ -645,7 +645,7 @@ async fn events_stop_when_the_session_ends() {
         .browser
         .change_password(PASSWORD, "un-autre-mot-de-passe")
         .await
-        .assert_status(StatusCode::NO_CONTENT);
+        .assert_status(StatusCode::OK);
     for (who, channel) in [("déconnexion", &mona), ("mot de passe changé", &tom)] {
         assert!(
             channel.wait_until(Channel::is_closed).await,

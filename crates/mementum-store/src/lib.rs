@@ -299,6 +299,9 @@ pub struct Store {
     /// (`Store::backlink_excerpts_asked`).
     #[cfg(feature = "test-hooks")]
     excerpts_asked: Arc<std::sync::atomic::AtomicUsize>,
+    /// Les nœuds dont un titre a été demandé, pour les tests (`Store::titles_asked`).
+    #[cfg(feature = "test-hooks")]
+    titles_asked: Arc<std::sync::Mutex<Vec<Uuid>>>,
 }
 
 impl Store {
@@ -370,6 +373,8 @@ impl Store {
             index_waits: Arc::default(),
             #[cfg(feature = "test-hooks")]
             excerpts_asked: Arc::default(),
+            #[cfg(feature = "test-hooks")]
+            titles_asked: Arc::default(),
         })
     }
 

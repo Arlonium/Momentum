@@ -1045,15 +1045,26 @@ fn make_room(unknown: &mut HashMap<[u8; 32], Window>, now: i64) {
     }
 }
 
+/// Ce que [`set_password`] a changé.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PasswordSet {
+    /// L'adresse du compte, telle que la base la garde.
+    pub email: String,
+    /// Ses jetons d'API qui vivaient, révoqués dans la transaction du changement.
+    pub tokens_revoked: u64,
+}
+
 /// `mementum user set-password` : donne un nouveau mot de passe au compte de
-/// cette adresse et ferme toutes ses sessions. C'est l'issue d'un mot de
-/// passe oublié, faute de SMTP (Ruling R47) ; qui peut lancer la commande a
-/// déjà accès au dossier des données.
+/// cette adresse, ferme toutes ses sessions et révoque tous ses jetons d'API
+/// (Ruling R1221). C'est l'issue d'un mot de passe oublié, faute de SMTP
+/// (Ruling R47) ; qui peut lancer la commande a déjà accès au dossier des
+/// données.
 ///
 /// La base est celle du dossier des données, ouverte comme le fait le
 /// serveur : la commande peut tourner pendant qu'il tourne. Rien n'est créé
 /// si la base n'existe pas. Le mot de passe n'est ni affiché ni journalisé.
-/// Rend l'adresse du compte, telle que la base la garde.
+/// Rend l'adresse du compte, telle que la base la garde, et le nombre de ses
+/// jetons d'API vivants que le changement a révoqués (Ruling R1221).
 ///
 /// Ce qu'elle ne fait pas : fermer les connexions de synchro que le compte a
 /// déjà ouvertes sur un serveur qui tourne (c'est un autre processus ; la
@@ -1082,7 +1093,7 @@ pub async fn set_password(
     email: &str,
     password: &str,
     on_backup: impl FnOnce(&Backup),
-) -> anyhow::Result<String> {
+) -> anyhow::Result<PasswordSet> {
     // Avant la longueur : une entrée en UTF-16 double le nombre de caractères,
     // et c'est cette raison-ci qu'il faut dire.
     if let Some((index, c)) = password.chars().enumerate().find(|(_, c)| c.is_control()) {
@@ -1121,11 +1132,14 @@ pub async fn set_password(
             .context("lecture du compte")?
             .with_context(|| format!("aucun compte pour l'adresse {}", normalize_email(email)))?;
         let hash = hash_password(password.to_string()).await?;
-        store
+        let tokens_revoked = store
             .set_password(user.id, &hash)
             .await
             .context("écriture du mot de passe")?;
-        Ok(user.email)
+        Ok(PasswordSet {
+            email: user.email,
+            tokens_revoked,
+        })
     }
     .await;
     store.close().await;

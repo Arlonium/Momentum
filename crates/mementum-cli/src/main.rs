@@ -193,15 +193,18 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
         } => {
             let data_dir = config::data_dir(data_dir);
             let password = read_password()?;
-            let account =
-                mementum_server::set_password(&data_dir, &email, &password, announce_backup)
-                    .await?;
+            let set = mementum_server::set_password(&data_dir, &email, &password, announce_backup)
+                .await?;
             // La longueur, jamais le mot de passe : de quoi voir qu'une ligne
-            // tronquée ou un caractère en trop s'est glissé dans la saisie.
+            // tronquée ou un caractère en trop s'est glissé dans la saisie. Les
+            // jetons d'API révoqués, comptés (Ruling R1221) : ceux qu'un agent
+            // portait ne valent plus.
             println!(
-                "mot de passe de {} caractères enregistré pour {account} ; toutes ses sessions \
-                 sont fermées",
-                password.chars().count()
+                "mot de passe de {} caractères enregistré pour {} ; toutes ses sessions sont \
+                 fermées, et {}",
+                password.chars().count(),
+                set.email,
+                revoked_tokens(set.tokens_revoked)
             );
             Ok(())
         }
@@ -301,6 +304,18 @@ fn agreed(count: u64, one: &str, many: &str) -> String {
     format!("{count} {}", if count <= 1 { one } else { many })
 }
 
+/// Les jetons d'API qu'un changement de mot de passe a révoqués (Ruling R1221), accordés au
+/// nombre.
+fn revoked_tokens(count: u64) -> String {
+    match count {
+        0 => "aucun jeton d'API n'était à révoquer".to_string(),
+        _ => format!(
+            "{} : un agent qui s'en servait demande un jeton neuf",
+            agreed(count, "jeton d'API révoqué", "jetons d'API révoqués")
+        ),
+    }
+}
+
 /// La commande vient de migrer la base : dire où est celle d'avant, sur la sortie d'erreur,
 /// quel que soit le niveau des journaux.
 fn announce_backup(backup: &Backup) {
@@ -377,8 +392,23 @@ fn init_tracing() {
 mod tests {
     use std::fmt;
 
-    use super::{report, summary};
+    use super::{report, revoked_tokens, summary};
     use crate::reindex::Report;
+
+    /// `user set-password` dit combien de jetons d'API il a révoqués (Task S6, Ruling R1221),
+    /// accordé au nombre.
+    #[test]
+    fn revoked_tokens_agree_with_their_count() {
+        assert_eq!(revoked_tokens(0), "aucun jeton d'API n'était à révoquer");
+        assert_eq!(
+            revoked_tokens(1),
+            "1 jeton d'API révoqué : un agent qui s'en servait demande un jeton neuf"
+        );
+        assert_eq!(
+            revoked_tokens(3),
+            "3 jetons d'API révoqués : un agent qui s'en servait demande un jeton neuf"
+        );
+    }
 
     fn done(pages: Option<(u64, u64)>, entries: u64, commits: u64) -> String {
         summary(

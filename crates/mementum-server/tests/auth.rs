@@ -859,8 +859,9 @@ async fn change_password_kills_other_sessions() {
     assert_eq!(laptop.session().as_deref(), Some(before.as_str()));
 
     let reply = laptop.change_password(PASSWORD, NEW_PASSWORD).await;
-    reply.assert_status(StatusCode::NO_CONTENT);
-    assert!(reply.body.is_empty());
+    reply.assert_status(StatusCode::OK);
+    // Le corps ne dit que le nombre de jetons d'API révoqués (Task S6) : ici, aucun.
+    assert_eq!(reply.json(), serde_json::json!({ "tokensRevoked": 0 }));
 
     // La session qui a changé le mot de passe continue ; les autres sont
     // supprimées, comme le cookie d'avant le changement.
@@ -1099,7 +1100,7 @@ async fn secrets_never_leave() {
     reply.assert_error(StatusCode::UNAUTHORIZED, "invalid_credentials");
     replies.push(reply);
     let reply = laptop.change_password(PASSWORD, NEW_PASSWORD).await;
-    reply.assert_status(StatusCode::NO_CONTENT);
+    reply.assert_status(StatusCode::OK);
     tokens.push(laptop.session().unwrap());
     replies.push(reply);
     replies.push(laptop.me().await);
@@ -1618,7 +1619,7 @@ async fn password_change_has_its_own_throttle() {
     alice
         .change_password(PASSWORD, NEW_PASSWORD)
         .await
-        .assert_status(StatusCode::NO_CONTENT);
+        .assert_status(StatusCode::OK);
     assert_eq!(alice.me().await.status, StatusCode::OK);
 
     // Dix mots de passe actuels faux avec la session de Bob : le changement
@@ -1719,7 +1720,7 @@ async fn auth_responses_are_never_cached() {
     );
     no_store(
         &alice.change_password(PASSWORD, NEW_PASSWORD).await,
-        StatusCode::NO_CONTENT,
+        StatusCode::OK,
         "changement de mot de passe",
     );
     no_store(
@@ -2120,7 +2121,7 @@ async fn password_change_verified_before_another_one_changes_nothing() {
 }
 
 /// Le test de charge de la relecture de sécurité : 150 connexions avec l'ancien mot de passe,
-/// une toutes les deux millisecondes, pendant qu'Alice change le sien. Après le `204`, aucune
+/// une toutes les deux millisecondes, pendant qu'Alice change le sien. Après le `200`, aucune
 /// des sessions que ces connexions ont reçues ne vaut encore : celles d'avant le changement
 /// sont supprimées par lui, et celles qui étaient en vol ne naissent pas.
 ///
@@ -2162,10 +2163,10 @@ async fn logins_in_flight_never_survive_a_password_change() {
     alice
         .change_password(PASSWORD, NEW_PASSWORD)
         .await
-        .assert_status(StatusCode::NO_CONTENT);
+        .assert_status(StatusCode::OK);
     let outcomes = logins.join_all().await;
 
-    // Le `204` est reçu, et toutes les connexions ont répondu.
+    // Le `200` est reçu, et toutes les connexions ont répondu.
     let opened: Vec<&String> = outcomes
         .iter()
         .filter_map(|(_, session)| session.as_ref())

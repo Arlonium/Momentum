@@ -298,18 +298,29 @@ pub(crate) async fn shown_to<'e>(
 }
 
 /// Révoque, dans la transaction, tous les jetons du compte qui ne le sont pas encore, à `now`, puis
-/// retire ceux qu'il ne garde plus : le changement de mot de passe (Ruling R1221).
+/// retire ceux qu'il ne garde plus : le changement de mot de passe (Ruling R1221). Rend le nombre
+/// de jetons qui vivaient à `now` (un jeton échu reçoit aussi sa date de révocation, sans compter :
+/// il ne valait déjà plus rien).
 pub(crate) async fn revoke_all_tokens(
     tx: &mut Transaction<'_, Sqlite>,
     user_id: &str,
     now: i64,
-) -> Result<(), StoreError> {
+) -> Result<u64, StoreError> {
+    let live: i64 = sqlx::query_scalar(concat!(
+        "SELECT COUNT(*) FROM api_tokens WHERE user_id = ?1 AND ",
+        live!()
+    ))
+    .bind(user_id)
+    .bind(now)
+    .fetch_one(&mut **tx)
+    .await?;
     sqlx::query("UPDATE api_tokens SET revoked_at = ?2 WHERE user_id = ?1 AND revoked_at IS NULL")
         .bind(user_id)
         .bind(now)
         .execute(&mut **tx)
         .await?;
-    purge_dead_tokens(tx, user_id, now).await
+    purge_dead_tokens(tx, user_id, now).await?;
+    Ok(u64::try_from(live).unwrap_or(0))
 }
 
 impl Store {
@@ -321,7 +332,39 @@ impl Store {
     /// n'écrit rien. Les pages d'une portée sont gardées une fois chacune ; aucune, ou plus de
     /// [`MAX_TOKEN_PAGES`], est une erreur de l'appelant (la route le dit avant). `NotFound` aussi
     /// pour un compte inconnu.
+    ///
+    /// Sans condition sur le mot de passe : les tests, et toute création qui n'en vérifie aucun.
+    /// La route des jetons, qui vient de vérifier le mot de passe du compte, passe par
+    /// [`Store::create_token_verified`].
     pub async fn create_token(&self, token: NewToken) -> Result<TokenRow, StoreError> {
+        // Sans hachage vérifié, la création n'a pas de condition de plus : jamais `None`.
+        self.insert_token(token, None)
+            .await?
+            .ok_or(StoreError::NotFound)
+    }
+
+    /// Comme [`Store::create_token`], si le hachage du mot de passe du compte est encore
+    /// `verified` : `None`, sans rien écrire, s'il ne l'est plus (ou si le compte n'en a pas, ou
+    /// n'existe pas). La condition est jugée dans la transaction qui écrit, avant tout le reste.
+    ///
+    /// Ruling R120 : `verified` est le hachage contre lequel l'appelant vient de vérifier le mot
+    /// de passe redemandé à la création (décision L2). Entre cette vérification (un calcul
+    /// Argon2) et l'écriture, un changement de mot de passe peut passer, qui révoque tous les
+    /// jetons du compte (Ruling R1221) : une demande vérifiée contre l'ancien mot de passe ne
+    /// doit pas créer, après lui, un jeton que ce changement n'a pas pu révoquer.
+    pub async fn create_token_verified(
+        &self,
+        token: NewToken,
+        verified: &str,
+    ) -> Result<Option<TokenRow>, StoreError> {
+        self.insert_token(token, Some(verified)).await
+    }
+
+    async fn insert_token(
+        &self,
+        token: NewToken,
+        verified: Option<&str>,
+    ) -> Result<Option<TokenRow>, StoreError> {
         let (scope, space) = token.scope.parts();
         let pages: Vec<Uuid> = match &token.scope {
             TokenScope::Pages { pages, .. } => {
@@ -336,6 +379,16 @@ impl Store {
         let (id, user) = (Uuid::now_v7(), token.user_id.to_string());
         let space_text = space.map(|s| s.to_string());
         let mut tx = self.write().await?;
+        if let Some(verified) = verified {
+            let holds = sqlx::query("SELECT 1 FROM users WHERE id = ? AND password_hash IS ?")
+                .bind(&user)
+                .bind(verified)
+                .fetch_optional(&mut **tx)
+                .await?;
+            if holds.is_none() {
+                return Ok(None);
+            }
+        }
         let live: i64 = sqlx::query_scalar(concat!(
             "SELECT COUNT(*) FROM api_tokens WHERE user_id = ?1 AND ",
             live!()
@@ -407,7 +460,7 @@ impl Store {
             TokenScope::Pages { space, .. } => TokenScope::Pages { space, pages },
             other => other,
         };
-        Ok(TokenRow {
+        Ok(Some(TokenRow {
             id,
             user_id: token.user_id,
             name: token.name,
@@ -422,7 +475,7 @@ impl Store {
             busy_count: 0,
             busy_last_at: None,
             calls_purged: 0,
-        })
+        }))
     }
 
     /// Le jeton vivant à `now` de ce hachage, avec son compte et les pages qui lui restent, lus en

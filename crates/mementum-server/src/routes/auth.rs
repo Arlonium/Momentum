@@ -60,7 +60,9 @@ use uuid::Uuid;
 use crate::auth::{self, AuthUser, Guarded, SESSION_TTL_MS};
 use crate::error::{ApiError, internal};
 use crate::routes::invitations;
-use crate::types::{ChangePassword, ErrorCode, LogIn, Me, SignUp, SignupMode, SpaceInfo, UserInfo};
+use crate::types::{
+    ChangePassword, ErrorCode, LogIn, Me, PasswordChanged, SignUp, SignupMode, SpaceInfo, UserInfo,
+};
 use crate::{AppState, now_ms, to_completion};
 
 /// `POST /api/v1/auth/signup` : `201` et le compte, session ouverte. Comme à
@@ -347,11 +349,13 @@ async fn log_out(state: AppState, headers: HeaderMap) -> Result<Response, ApiErr
         .into_response())
 }
 
-/// `POST /api/v1/auth/password` : `204`. Toutes les sessions du compte sont
-/// supprimées, et celle qui a fait la demande repart avec un jeton neuf (le
-/// cookie de la réponse). Un mot de passe actuel faux, ou un compte qui n'en
-/// a pas : `401 invalid_credentials`. Ces refus ont leur propre frein, à part
-/// de celui de la connexion (Ruling R76) : `429 too_many_attempts`.
+/// `POST /api/v1/auth/password` : `200`, [`PasswordChanged`]. Toutes les
+/// sessions du compte sont supprimées, tous ses jetons d'API révoqués (Ruling
+/// R1221 ; la réponse dit combien vivaient), et celle qui a fait la demande
+/// repart avec un jeton neuf (le cookie de la réponse). Un mot de passe actuel
+/// faux, ou un compte qui n'en a pas : `401 invalid_credentials`. Ces refus
+/// ont leur propre frein, à part de celui de la connexion (Ruling R76) : `429
+/// too_many_attempts`.
 ///
 /// Les connexions de synchro du compte sont fermées avec ses sessions
 /// (Ruling R73) : qui change son mot de passe pour chasser un intrus ferme
@@ -406,7 +410,7 @@ async fn new_password(
         // vérifié (Ruling R120) ; les sessions du compte sont supprimées et la
         // sienne ouverte dans la même transaction.
         let (token, session) = auth::new_token();
-        let changed = writer
+        let Some(revoked) = writer
             .store
             .change_password(
                 user_id,
@@ -416,18 +420,22 @@ async fn new_password(
                 now_ms() + SESSION_TTL_MS,
             )
             .await
-            .map_err(internal)?;
-        if !changed {
+            .map_err(internal)?
+        else {
             return Ok(None);
-        }
-        tracing::info!(%user_id, "mot de passe changé : autres sessions fermées");
+        };
+        tracing::info!(
+            %user_id,
+            tokens_revoked = revoked,
+            "mot de passe changé : autres sessions fermées, jetons d'API révoqués"
+        );
         // Les sessions du compte n'existent plus : ses connexions de synchro
         // ne leur survivent pas.
         writer.hub.kick_user(user_id).await;
-        Ok(Some(token))
+        Ok(Some((token, revoked)))
     })
     .await?;
-    let Some(token) = changed else {
+    let Some((token, revoked)) = changed else {
         // Un autre changement est passé entre la vérification et l'écriture :
         // le mot de passe vérifié n'est plus l'actuel. La réponse d'un mot de
         // passe actuel faux, et la tentative reste comptée comme un échec.
@@ -439,8 +447,11 @@ async fn new_password(
     };
     state.logins.succeeded(Guarded::PasswordChange, &user.email);
     Ok((
-        StatusCode::NO_CONTENT,
+        StatusCode::OK,
         [(header::SET_COOKIE, auth::session_cookie(&token, secure))],
+        Json(PasswordChanged {
+            tokens_revoked: revoked,
+        }),
     )
         .into_response())
 }
@@ -478,7 +489,12 @@ fn no_store(result: Result<Response, ApiError>) -> Response {
 /// Le premier refus d'une fenêtre est journalisé, sans l'adresse : en
 /// avertissement pour un compte, au niveau `debug` sinon (des adresses
 /// inventées ne remplissent pas le journal).
-fn attempt(state: &AppState, what: Guarded, email: &str, account: Option<Uuid>) -> Result<(), u64> {
+pub(crate) fn attempt(
+    state: &AppState,
+    what: Guarded,
+    email: &str,
+    account: Option<Uuid>,
+) -> Result<(), u64> {
     let Err(throttled) = state
         .logins
         .attempt(what, email, account.is_some(), now_ms())
@@ -524,7 +540,7 @@ async fn close_session(state: &AppState, session: Option<[u8; 32]>) -> Result<()
 
 /// Le refus d'un mot de passe actuel faux : le code de la connexion, mais pas
 /// son message. Ici, personne n'a tapé d'adresse.
-fn wrong_current_password() -> ApiError {
+pub(crate) fn wrong_current_password() -> ApiError {
     ApiError::new(
         StatusCode::UNAUTHORIZED,
         ErrorCode::InvalidCredentials,

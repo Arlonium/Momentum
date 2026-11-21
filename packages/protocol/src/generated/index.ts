@@ -31,6 +31,7 @@ export type { NewComment } from "./NewComment";
 export type { NewThread } from "./NewThread";
 export type { PageAccess } from "./PageAccess";
 export type { PageNode } from "./PageNode";
+export type { PasswordChanged } from "./PasswordChanged";
 export type { PendingInvitation } from "./PendingInvitation";
 export type { Reaction } from "./Reaction";
 export type { ResolveThread } from "./ResolveThread";

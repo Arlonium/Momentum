@@ -829,6 +829,15 @@ pub struct Version {
     pub authors: Vec<Author>,
 }
 
+/// Réponse de `POST /api/v1/auth/password` : combien de jetons d'API vivants le changement a
+/// révoqués, dans sa transaction (Ruling R1221).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordChanged {
+    #[ts(type = "number")]
+    pub tokens_revoked: u64,
+}
+
 /// Code d'une erreur de l'API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -1072,6 +1081,7 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<NewThread>(&cfg),
         file::<PageAccess>(&cfg),
         file::<PageNode>(&cfg),
+        file::<PasswordChanged>(&cfg),
         file::<PendingInvitation>(&cfg),
         file::<Reaction>(&cfg),
         file::<ResolveThread>(&cfg),

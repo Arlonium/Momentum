@@ -510,7 +510,7 @@ async fn logout_and_password_change_close_the_account_connections() {
         .browser
         .change_password(PASSWORD, "un-autre-mot-de-passe-de-test")
         .await
-        .assert_status(StatusCode::NO_CONTENT);
+        .assert_status(StatusCode::OK);
     types_unheard(&first, " trop tard");
     assert!(closed(&first).await, "encore ouverte : la première page");
     assert!(closed(&second).await, "encore ouverte : la seconde page");
