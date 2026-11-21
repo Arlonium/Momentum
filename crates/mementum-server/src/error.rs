@@ -717,9 +717,10 @@ impl ApiError {
         let mut error = ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             ErrorCode::TokenBusy,
+            // Les appels comme les octets de corps (défaut O12 de la relecture finale).
             format!(
-                "trop d'appels par jeton dans la dernière minute pour ce compte : réessaie dans \
-                 {retry_after} s ; rien n'a été fait"
+                "trop d'appels, ou de corps trop lourds, par jeton dans la dernière minute pour \
+                 ce compte : réessaie dans {retry_after} s ; rien n'a été fait"
             ),
         );
         error.retry_after = Some(retry_after);
