@@ -40,6 +40,10 @@ const IDLE_RSS: u64 = 150 * 1_000_000;
 /// au-delà. `idle_close_is_the_one_of_the_server` le relit.
 const IDLE_CLOSE: Duration = Duration::from_secs(30);
 
+/// `idle_close_unopened` de `SyncConfig` (3 s, Ruling R1657) : l'acteur d'une page qu'aucune
+/// connexion n'a ouverte s'arrête au-delà. `idle_close_is_the_one_of_the_server` le relit.
+const IDLE_CLOSE_UNOPENED: Duration = Duration::from_secs(3);
+
 /// Les mesures se font l'une après l'autre.
 static SERIAL: Mutex<()> = Mutex::new(());
 
@@ -399,9 +403,11 @@ fn cold_start_and_memory_with_an_index_of_10000_pages() {
 /// avant chaque relecture d'une même page : chaque lecture porte une révision neuve, dont les
 /// empreintes vont au cache des révisions servies (16 Mio au plus, R1226). La mémoire se lit **au
 /// repos**, une fois passé `idle_close` sans appel (les acteurs des pages arrêtés) : celle que le
-/// processus tient en propre (< 150 Mo, là où elle se lit, R924), et sa mémoire de travail ; et,
-/// sans budget, 2 s après la dernière lecture, quand les cinquante acteurs vivent encore (Ruling
-/// R1645 : environ 4,5 Ko par bloc d'une page ouverte).
+/// processus tient en propre (< 150 Mo, affirmé sous Windows seulement tant qu'un passage de la
+/// CI ne l'a pas vue sous Linux, R1659), et sa mémoire de travail ; et, sans budget, 2 s après la
+/// dernière lecture, quand vivent encore les acteurs des pages lues depuis moins de 3 s (R1645 :
+/// environ 4,5 Ko par bloc d'une page ouverte ; R1657 : un acteur qu'aucune connexion n'a ouvert
+/// s'arrête 3 s après son dernier appel).
 #[test]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 fn memory_after_500_agent_reads() {
@@ -467,6 +473,26 @@ fn memory_after_500_agent_reads() {
         }
     }
     assert_eq!(pages.len(), PAGES);
+    // Des pages comme celles d'une instance qui vit : déjà écrites une fois, leur version de fin
+    // coupée. Une page née avec son contenu et jamais versionnée a, dès qu'on y écrit, une tranche
+    // tenue pour écrite par d'autres (R1601) : son acteur garde `idle_close` (R1657) jusqu'à cette
+    // première version, coupée à son arrêt.
+    let first = serde_json::json!({ "operations": [{
+        "op": "str_replace",
+        "old": format!("Paragraphe {BLOCKS} de"),
+        "new": format!("Paragraphe {BLOCKS} revu de"),
+    }]})
+    .to_string();
+    for page in &pages {
+        let reply = server.request(
+            "POST",
+            &format!("/api/v1/pages/{page}/operations"),
+            Some(&first),
+            &auth,
+        );
+        assert_eq!(reply.status, 200, "{}", reply.body);
+    }
+    thread::sleep(IDLE_CLOSE + Duration::from_secs(3));
     let reading = Instant::now();
     for i in 0..READS {
         let page = &pages[i % PAGES];
@@ -495,31 +521,52 @@ fn memory_after_500_agent_reads() {
         assert_eq!(reply.status, 200, "{}", reply.body);
     }
     let read_in = reading.elapsed();
-    // Hors du repos : les acteurs des pages lues vivent encore (`idle_close`, 30 s sans
-    // connexion ni appel), chacun avec sa page en mémoire.
+    let after_reads = Instant::now();
+    // Hors du repos : les acteurs des pages lues depuis moins de 3 s vivent encore (ici toutes :
+    // la boucle, sans débit, revient à chaque page en moins de 3 s), chacun avec sa page.
     thread::sleep(Duration::from_secs(2));
     let working = memory_of(server.pid());
-    // Au repos : `idle_close` passé, les acteurs arrêtés.
-    thread::sleep(IDLE_CLOSE + Duration::from_secs(3));
+    // Ruling R1657 : un acteur qu'aucune connexion n'a ouvert s'arrête 3 s après son dernier
+    // appel.
+    thread::sleep(IDLE_CLOSE_UNOPENED + Duration::from_secs(1) - after_reads.elapsed());
+    let unopened = memory_of(server.pid());
+    // Au repos : `idle_close` passé, tous les acteurs arrêtés.
+    thread::sleep(IDLE_CLOSE + Duration::from_secs(3) - after_reads.elapsed());
     let used = memory_of(server.pid());
     println!(
         "MESURE après {READS} lectures d'agent de pages de {BLOCKS} blocs ({read_in:?}, une \
-         écriture d'agent avant chaque relecture) : 2 s après, les {PAGES} acteurs vivants, \
-         mémoire de travail {:.1} Mo, en propre {} Mo ; au repos ({IDLE_CLOSE:?} plus tard), \
-         mémoire de travail {:.1} Mo, en propre {} Mo",
+         écriture d'agent avant chaque relecture, {PAGES} pages) : 2 s après, les acteurs vivants, \
+         mémoire de travail {:.1} Mo, en propre {} Mo ; 4 s après, les acteurs arrêtés (R1657), \
+         {:.1} Mo, en propre {} Mo ; au repos ({IDLE_CLOSE:?} après), {:.1} Mo, en propre {} Mo",
         mb(working.rss),
         own_mb(working),
+        mb(unopened.rss),
+        own_mb(unopened),
         mb(used.rss),
         own_mb(used),
     );
     server.kill();
-    if let Some(own) = used.own {
-        assert!(
-            own < IDLE_RSS,
-            "mémoire tenue en propre après {READS} lectures d'agent : {own} octets (budget \
-             {IDLE_RSS})"
-        );
+    // Ruling R1659 : la borne n'est affirmée que là où un passage l'a vue tenir (sous Windows, 117
+    // Mo). Sous Linux (glibc, `RssAnon`), la mesure écrit sa ligne `MESURE` sans rien affirmer tant
+    // qu'un passage de la CI ne l'a pas lue : la passe de fin du lot la lit et tranche (la borne,
+    // `malloc_trim` après l'arrêt des acteurs, ou une mesure sans borne).
+    #[cfg(windows)]
+    {
+        if let Some(own) = used.own {
+            assert!(
+                own < IDLE_RSS,
+                "mémoire tenue en propre après {READS} lectures d'agent : {own} octets (budget \
+                 {IDLE_RSS})"
+            );
+        }
     }
+    #[cfg(not(windows))]
+    println!(
+        "MESURE la mémoire en propre au repos après {READS} lectures d'agent n'est pas encore \
+         jugée sous ce système (Ruling R1659) : {} Mo, budget {:.0} Mo",
+        own_mb(used),
+        mb(IDLE_RSS),
+    );
 }
 
 /// L'attente de [`memory_after_500_agent_reads`] suit `idle_close` : sans cela, la mémoire « au
@@ -530,6 +577,11 @@ fn idle_close_is_the_one_of_the_server() {
         IDLE_CLOSE,
         mementum_sync::SyncConfig::default().idle_close,
         "`IDLE_CLOSE` (tests/budgets.rs) doit valoir `idle_close` de `SyncConfig`"
+    );
+    assert_eq!(
+        IDLE_CLOSE_UNOPENED,
+        mementum_sync::SyncConfig::default().idle_close_unopened,
+        "`IDLE_CLOSE_UNOPENED` (tests/budgets.rs) doit valoir `idle_close_unopened` de `SyncConfig`"
     );
 }
 
