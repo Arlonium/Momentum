@@ -1489,7 +1489,14 @@ async fn an_actor_a_connection_opened_keeps_the_long_delay() {
         alive_after(&f, short + Duration::from_secs(1)).await,
         "l'acteur d'une page ouverte par une connexion s'est arrêté au délai court"
     );
-    stops_within(&f, long, "l'acteur ne s'arrête pas après `idle_close`").await;
+    // `idle_close` compté depuis la dernière demande que l'acteur a traitée : sur un coureur lent,
+    // il traite le départ de la connexion après l'avance de `alive_after` ; deux secondes de marge.
+    stops_within(
+        &f,
+        long + Duration::from_secs(2),
+        "l'acteur ne s'arrête pas après `idle_close`",
+    )
+    .await;
 }
 
 /// Une page qu'aucune connexion n'a ouverte, mais dont la tranche demande une version de fin (une
@@ -1510,7 +1517,14 @@ async fn an_actor_whose_slice_closes_keeps_the_long_delay() {
         alive_after(&f, short + Duration::from_secs(1)).await,
         "l'acteur s'est arrêté au délai court avec une version de fin à couper"
     );
-    stops_within(&f, long, "l'acteur ne s'arrête pas après `idle_close`").await;
+    // `idle_close` compté depuis la dernière demande que l'acteur a traitée : sur un coureur lent,
+    // il traite le départ de la connexion après l'avance de `alive_after` ; deux secondes de marge.
+    stops_within(
+        &f,
+        long + Duration::from_secs(2),
+        "l'acteur ne s'arrête pas après `idle_close`",
+    )
+    .await;
     let cut = versions(&f).await;
     assert_eq!(cut.len(), 1, "{cut:?}");
     assert_eq!(cut[0].reason, VersionReason::Closing);
