@@ -240,6 +240,7 @@ test("an_mcp_message_that_is_not_a_tool_call_is_told_in_words", async () => {
   await rendered([token("a")]);
   vi.mocked(tokenCalls).mockResolvedValueOnce(
     answer([
+      call(9, { surface: "mcp", tool: "ping" }),
       call(8, { surface: "mcp", tool: "server/discover" }),
       call(7, { surface: "mcp", tool: "tools/list" }),
       call(6, { surface: "mcp", tool: "resources/list" }),
@@ -251,11 +252,13 @@ test("an_mcp_message_that_is_not_a_tool_call_is_told_in_words", async () => {
     ]),
   );
   await click(toggleOf("a"));
-  await until(host, () => shownCalls("a").length === 8, "l'activité");
+  await until(host, () => shownCalls("a").length === 9, "l'activité");
   const activity = activityOf("a")!;
   const tool = (id: number) =>
     activity.querySelector<HTMLElement>(`li[data-call-id="${id}"] .mm-token-call-tool`)!.textContent;
-  expect([8, 7, 6, 5, 4, 3, 2, 1].map(tool)).toEqual([
+  // `ping` n'ouvre pas une connexion : un échange (R1691).
+  expect([9, 8, 7, 6, 5, 4, 3, 2, 1].map(tool)).toEqual([
+    "Échange de l'agent",
     "Connexion de l'agent",
     "Connexion de l'agent",
     "Connexion de l'agent",

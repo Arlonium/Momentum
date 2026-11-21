@@ -65,11 +65,16 @@ const CONNECTION_METHODS = new Set([
   "server/discover",
   "initialize",
   "notifications/initialized",
-  "ping",
   "tools/list",
   "resources/list",
   "resources/templates/list",
 ]);
+
+/**
+ * Les autres messages MCP qui ne sont pas un appel d'outil : `ping`, qui n'ouvre rien (R1691), et
+ * une ligne écrite avant que le serveur dise la méthode, ou d'un message qu'il n'a pas lu.
+ */
+const EXCHANGES = new Set(["ping", "POST /mcp", "POST /mcp/readonly"]);
 
 /**
  * Ce que l'écran dit de l'outil d'un appel (recette du lot 5, E2, R1551) : un outil MCP par son nom,
@@ -80,7 +85,7 @@ function toolLabel(call: TokenCall): string {
   if (call.surface !== "mcp") return call.tool;
   if (CONNECTION_METHODS.has(call.tool)) return "Connexion de l'agent";
   if (call.tool === "resources/read") return "Lecture de la spécification";
-  if (call.tool === "POST /mcp" || call.tool === "POST /mcp/readonly") return "Échange de l'agent";
+  if (EXCHANGES.has(call.tool)) return "Échange de l'agent";
   return call.tool;
 }
 
