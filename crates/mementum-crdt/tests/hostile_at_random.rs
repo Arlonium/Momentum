@@ -1864,6 +1864,29 @@ mod known_limits {
     /// intègre dans l'ordre des horloges. Aucun client n'écrit de trou depuis R131 (R786), et deux
     /// éléments d'un client de même origine et de même origine droite ne s'écrivent pas : le
     /// second voit le premier.
+    /// Passe de fin du lot 5 (défaut D3 de son compte rendu, à trier par la correction groupée :
+    /// limite ou défaut de la relecture d'une entrée) : graine 27811 de la voie du journal, trouvée
+    /// par l'essai large depuis que le serveur y écrit par différence (R1299), réduite à neuf
+    /// lignes. Trois écritures du serveur (des clients `SERVER_CLIENT + 1`, `+ 3` et `+ 8`, chacune
+    /// retirant la précédente), entre des entrées hostiles relues, dont la dernière place des
+    /// éléments contre ce que la dernière écriture du serveur a posé : l'instantané pris après elle,
+    /// relu, n'est pas la page vivante. La même trace donne le même écart avec le code de la
+    /// clôture du lot 4 (`5d10757`) : ce n'est pas l'écriture par différence qui le crée (rejouer
+    /// une trace ne mène que `apply_update`), mais la relecture d'une entrée hostile qui suit une
+    /// écriture du serveur ; la voie des clients, garde comprise, ne montre rien sur la même trace.
+    /// Une entrée d'avant les gardes du lot 3 ne suit une écriture du serveur que dans un journal
+    /// d'une instance des lots 1 à 3 où un `PUT /mmd` a précédé une telle entrée.
+    #[test]
+    fn a_hostile_entry_after_server_writes_reads_otherwise_from_a_snapshot() {
+        let finding = replay_apart("min-j27811", true).expect_err(
+            "la limite est levée : l'instantané d'après l'entrée hostile relit la page vivante",
+        );
+        assert!(
+            finding.contains("ne relisent pas la page vivante"),
+            "un autre écart que celui de la graine 27811 : {finding}"
+        );
+    }
+
     #[test]
     fn a_hole_filled_by_a_hostile_entry_reads_otherwise_from_the_state() {
         let journal = entries("min-j41449");
