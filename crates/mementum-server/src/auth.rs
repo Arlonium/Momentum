@@ -489,7 +489,8 @@ fn announced_body(headers: &HeaderMap) -> u64 {
 
 /// La porte des jetons d'API (lot 5, Rulings R1214, R1215, R1222, R1241, R1244), posée sur chaque
 /// route déclarée (`route_layer`), donc après la couche de `guard.rs` (`403 bad_origin` d'une
-/// écriture). Une requête sans `Bearer mmt_…` passe telle quelle. Avec un jeton, dans l'ordre :
+/// écriture). Une requête sans `Bearer mmt_…` passe telle quelle. Avec un jeton, ou un
+/// `Authorization` qui ne se lit pas, dans l'ordre :
 /// `403 bad_origin` pour une `Origin` d'un autre site, même sur un `GET` ; `401 invalid_token`
 /// pour un jeton qui n'est pas vivant (la session n'est jamais regardée) ; `403
 /// token_not_allowed` hors de [`TOKEN_ROUTES`] ; `429 token_busy` au-delà du débit du jeton ou de
@@ -504,11 +505,11 @@ pub(crate) async fn token_gate(
     next: Next,
 ) -> Response {
     let path = matched.as_ref().map(MatchedPath::as_str).unwrap_or("");
-    let text = match bearer(request.headers(), path) {
-        Bearer::Absent => return next.run(request).await,
-        Bearer::Invalid => return ApiError::invalid_token().into_response(),
-        Bearer::Token(text) => text.to_string(),
-    };
+    let found = bearer(request.headers(), path);
+    if found == Bearer::Absent {
+        return next.run(request).await;
+    }
+    // L'`Origin` d'abord, que l'en-tête porte un jeton ou ne se lise pas (Ruling R1341).
     if !crate::guard::origin_allowed(
         crate::guard::request_origin(request.headers()),
         crate::guard::request_host(request.headers(), request.uri()),
@@ -516,6 +517,10 @@ pub(crate) async fn token_gate(
     ) {
         return crate::guard::bad_origin().into_response();
     }
+    let text = match found {
+        Bearer::Token(text) => text.to_string(),
+        Bearer::Absent | Bearer::Invalid => return ApiError::invalid_token().into_response(),
+    };
     let now = now_ms();
     let (token, user) = match live_token(&state, &text, now).await {
         Ok(Some(found)) => found,
@@ -547,6 +552,25 @@ pub(crate) async fn token_gate(
     };
     request.extensions_mut().insert(TokenCaller(caller));
     let (space_id, node_id) = path_ids(path, params.ok().as_ref());
+    // La ligne est bâtie avant la route : si le client coupe pendant qu'elle travaille (une
+    // écriture menée au bout par `to_completion`), la garde l'écrit en partant, `client_gone`
+    // (Ruling R1355).
+    let pending = PendingCall {
+        calls: Arc::clone(&state.calls),
+        call: Some(Call {
+            token_id: token.id,
+            at: now,
+            surface: CallSurface::Rest,
+            tool,
+            space_id,
+            node_id,
+            outcome: CallOutcome::Error,
+            code: Some(CLIENT_GONE.to_string()),
+            revision_before: None,
+            revision_after: None,
+            blocks_touched: None,
+        }),
+    };
     let response = next.run(request).await;
     let details = response
         .extensions()
@@ -566,20 +590,52 @@ pub(crate) async fn token_gate(
         .get::<ErrorCode>()
         .and_then(|code| serde_json::to_value(code).ok())
         .and_then(|code| code.as_str().map(str::to_string));
-    state.calls.record(Call {
-        token_id: token.id,
-        at: now,
-        surface: details.surface.unwrap_or(CallSurface::Rest),
-        tool: details.tool.unwrap_or(tool),
-        space_id: details.space_id.or(space_id),
-        node_id: details.node_id.or(node_id),
-        outcome: details.outcome.unwrap_or(outcome),
-        code: details.code.or(code),
-        revision_before: details.revision_before,
-        revision_after: details.revision_after,
-        blocks_touched: details.blocks_touched,
+    pending.settle(|call| {
+        if let Some(surface) = details.surface {
+            call.surface = surface;
+        }
+        if let Some(tool) = details.tool {
+            call.tool = tool;
+        }
+        call.space_id = details.space_id.or(call.space_id);
+        call.node_id = details.node_id.or(call.node_id);
+        call.outcome = details.outcome.unwrap_or(outcome);
+        call.code = details.code.or(code);
+        call.revision_before = details.revision_before;
+        call.revision_after = details.revision_after;
+        call.blocks_touched = details.blocks_touched;
     });
     response
+}
+
+/// Le code d'un appel par jeton dont le client est parti avant la réponse : la route a pu aller au
+/// bout (une écriture menée par `to_completion`), son issue n'est pas connue de la porte.
+pub const CLIENT_GONE: &str = "client_gone";
+
+/// La ligne du journal d'activité d'un appel admis, en attente de son issue : écrite par
+/// [`PendingCall::settle`] avec la réponse, ou, si l'appel est abandonné avant elle (le client a
+/// coupé), par `Drop`, avec l'issue `error` et le code [`CLIENT_GONE`] (Ruling R1355).
+struct PendingCall {
+    calls: Arc<crate::agent::calls::Calls>,
+    call: Option<Call>,
+}
+
+impl PendingCall {
+    /// L'issue connue : la ligne, complétée par `complete`, est écrite, et la garde désarmée.
+    fn settle(mut self, complete: impl FnOnce(&mut Call)) {
+        if let Some(mut call) = self.call.take() {
+            complete(&mut call);
+            self.calls.record(call);
+        }
+    }
+}
+
+impl Drop for PendingCall {
+    fn drop(&mut self) {
+        if let Some(call) = self.call.take() {
+            self.calls.record(call);
+        }
+    }
 }
 
 /// Le jeton vivant de ce texte (sans le préfixe), et son compte ; `None` pour un texte qui n'est
