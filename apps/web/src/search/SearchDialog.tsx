@@ -258,7 +258,8 @@ export function SearchDialog({ space, nodes, query, onQuery, onClose, before, ca
   const said: string[] = [];
   if (searching && search.pending) said.push("Recherche…");
   else if (searching && search.error === null) {
-    if (rows.length === 0) said.push("Aucun résultat.");
+    // L'index en retard, une réponse vide n'est pas sûre : elle se dit pour l'instant (recette B10).
+    if (rows.length === 0) said.push(search.indexing ? "Aucun résultat pour l'instant." : "Aucun résultat.");
     if (search.indexing) said.push("L'indexation est en cours : des pages peuvent manquer.");
   }
 

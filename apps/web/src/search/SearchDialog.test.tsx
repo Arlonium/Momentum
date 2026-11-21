@@ -645,11 +645,11 @@ test("the_states_are_said_under_the_list", async () => {
   expect(said()).toBe("Recherche…");
   await answer(found([]));
   expect(said()).toBe("Aucun résultat.");
-  // L'index en retard : une réponse vide n'est pas sûre.
+  // L'index en retard : une réponse vide n'est pas sûre, et la fenêtre le dit (recette B10).
   await type("zèbres");
   await debounced();
   await answer(found([], { indexing: true }));
-  expect(said()).toBe("Aucun résultat. | L'indexation est en cours : des pages peuvent manquer.");
+  expect(said()).toBe("Aucun résultat pour l'instant. | L'indexation est en cours : des pages peuvent manquer.");
   // Avec des résultats aussi.
   await type("zèbre rayé");
   await debounced();
