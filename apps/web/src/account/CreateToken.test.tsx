@@ -7,9 +7,9 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError, createToken, getTree } from "../api";
 import { publishPages } from "../space/pageDirectory";
-import "../test/hooks";
+import { deferred } from "../test/hooks";
 import { page, space } from "../test/pages";
-import { CreateToken } from "./CreateToken";
+import { CreateToken, type TokenDraft } from "./CreateToken";
 
 vi.mock("../api", async (original) => ({
   ...(await original<typeof import("../api")>()),
@@ -65,14 +65,14 @@ afterEach(async () => {
   publishPages(null, null);
 });
 
-async function opened(current: SpaceInfo | null = pro) {
+async function opened(current: SpaceInfo | null = pro, draft: TokenDraft | null = null) {
   await act(async () =>
     root.render(
       <CreateToken
         spaces={[pro, perso]}
         current={current}
         email="alice@exemple.fr"
-        draft={null}
+        draft={draft}
         onDraft={() => {}}
         onChanged={onChanged}
         onClose={onClose}
@@ -212,4 +212,111 @@ test("a_refusal_is_said_as_the_server_says_it", async () => {
   expect(alerts()).toEqual(["vingt jetons vivants au plus : révoque-en un"]);
   // Le formulaire reste, rempli : rien n'est à retaper.
   expect(field("Nom du jeton").value).toBe("Claude Code");
+});
+
+test("escape_and_cancel_wait_for_the_creation_in_flight", async () => {
+  // La réponse de la création doit trouver la fenêtre pour montrer le jeton : pendant qu'elle est en
+  // route, Échap et « Annuler » n'y font rien (R1461).
+  await opened();
+  const answer = deferred<{ token: string; info: TokenInfo }>();
+  vi.mocked(createToken).mockReturnValue(answer.promise);
+  await fillAndSubmit();
+  const escape = new Event("cancel", { cancelable: true });
+  await act(async () => {
+    dialog().dispatchEvent(escape);
+  });
+  expect(escape.defaultPrevented).toBe(true);
+  await click(buttonNamed("Annuler")!);
+  expect(onClose).not.toHaveBeenCalled();
+  await act(async () => answer.resolve({ token: TOKEN, info: info() }));
+  expect(field("Jeton d'API").value).toBe(TOKEN);
+  expect(onClose).not.toHaveBeenCalled();
+});
+
+test("the_level_says_its_hint_apart_from_its_name", async () => {
+  await opened();
+  // Le nom d'un niveau est son libellé ; sa précision le décrit, à part.
+  for (const input of radios("level")) {
+    const name = document.getElementById(input.getAttribute("aria-labelledby")!)?.textContent;
+    const hint = document.getElementById(input.getAttribute("aria-describedby")!)?.textContent;
+    expect(name).toBe(input.value === "read" ? "Lecture" : "Modification");
+    expect(hint).toMatch(/^Il /);
+  }
+});
+
+test("the_page_list_says_why_it_is_empty_and_enter_does_not_send", async () => {
+  // L'arbre d'un autre espace : il n'est pas lu pour celui-ci.
+  publishPages("autre", [page("x", { spaceId: "autre", title: "Ailleurs" })]);
+  await opened();
+  await click(radios("scope").find((input) => input.value === "pages")!);
+  expect(dialog().textContent).toContain("ne sont pas encore lues");
+  expect(dialog().textContent).not.toContain("Aucune page de l'arbre ne porte ce titre.");
+  await act(async () => root.unmount());
+  root = createRoot(host);
+
+  // L'arbre de cet espace, sans page : il le dit ; une recherche sans réponse dit la sienne.
+  publishPages("pro", [page("a", { spaceId: "pro", title: "Agenda" })]);
+  await opened();
+  await click(radios("scope").find((input) => input.value === "pages")!);
+  await type(field("Chercher une page"), "zzz");
+  expect(dialog().textContent).toContain("Aucune page de l'arbre ne porte ce titre.");
+  // Entrée dans la recherche n'envoie pas le formulaire.
+  const enter = new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true });
+  await act(async () => {
+    field("Chercher une page").dispatchEvent(enter);
+  });
+  expect(enter.defaultPrevented).toBe(true);
+});
+
+test("a_page_unchecked_keeps_its_place", async () => {
+  publishPages("pro", [
+    page("a", { spaceId: "pro", title: "Agenda" }),
+    page("b", { spaceId: "pro", title: "Budget" }),
+    page("c", { spaceId: "pro", title: "Comptes" }),
+  ]);
+  await opened();
+  await click(radios("scope").find((input) => input.value === "pages")!);
+  const boxes = (list: string) =>
+    [...dialog().querySelectorAll<HTMLInputElement>(`[aria-label="${list}"] input[type="checkbox"]`)];
+  const titles = (list: string) => boxes(list).map((box) => box.closest("label")?.textContent?.trim());
+  await click(boxes("Pages proposées")[0]);
+  await click(boxes("Pages proposées")[1]);
+  // Une recherche qui ne les propose plus : elles passent dessous, cochées.
+  await type(field("Chercher une page"), "comp");
+  expect(titles("Autres pages choisies")).toEqual(["Agenda", "Budget"]);
+  // Décochée, « Agenda » reste à sa place, et « Budget » ne monte pas sous le pointeur.
+  await click(boxes("Autres pages choisies")[0]);
+  expect(titles("Autres pages choisies")).toEqual(["Agenda", "Budget"]);
+  expect(boxes("Autres pages choisies").map((box) => box.checked)).toEqual([false, true]);
+});
+
+test("an_outdated_draft_is_revised_at_opening", async () => {
+  // Un espace quitté depuis, des pages choisies dont l'une n'est plus dans l'arbre.
+  publishPages("pro", [page("a", { spaceId: "pro", title: "Agenda renommé" })]);
+  const draft: TokenDraft = {
+    name: "Agent",
+    level: "edit",
+    scope: "pages",
+    spaceId: "quitte",
+    chosen: [
+      { id: "a", title: "Agenda" },
+      { id: "z", title: "Partie" },
+    ],
+    pagesOf: "pro",
+    canTrash: false,
+    expiry: 30,
+  };
+  await opened(pro, draft);
+  expect(field("Nom du jeton").value).toBe("Agent");
+  const boxes = [...dialog().querySelectorAll<HTMLInputElement>('input[type="checkbox"]')].filter((b) => b.checked);
+  expect(boxes.map((box) => box.closest("label")?.textContent?.trim())).toEqual(["Agenda renommé"]);
+  await act(async () => root.unmount());
+  root = createRoot(host);
+
+  // Sans l'arbre de l'espace, une portée « pages » revient à la portée par défaut, et l'espace quitté
+  // à l'espace affiché.
+  publishPages(null, null);
+  await opened(pro, draft);
+  expect(radios("scope").find((input) => input.checked)?.value).toBe("space");
+  expect(dialog().querySelector<HTMLSelectElement>('select[aria-label="Espace du jeton"]')!.value).toBe("pro");
 });

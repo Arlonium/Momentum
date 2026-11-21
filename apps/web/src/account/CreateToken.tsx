@@ -11,28 +11,44 @@
 // Les pages d'une portée « pages » sont celles de l'arbre que montre la barre latérale, et rien
 // d'autre (`findPages`, R570) : aucune lecture du serveur ne part d'ici, et une page que le compte ne
 // voit pas, ou à la corbeille, n'est jamais proposée. Elles sont donc d'un seul espace, celui qui est
-// ouvert. La liste proposée est lue à l'ouverture et à chaque frappe dans sa recherche, jamais quand
-// l'arbre change : rien n'y bouge sous le pointeur. Une page choisie reste à sa place, cochée.
+// ouvert. Les listes de pages sont lues à l'ouverture et à chaque frappe de la recherche, jamais quand
+// l'arbre change ni quand on coche : rien n'y bouge sous le pointeur, une page décochée reste à sa
+// place.
 //
-// **Le texte du jeton ne vit que dans cette fenêtre** (`created`) : il part avec elle. Échap, une fois
-// le jeton montré, demande avant de fermer ; Chrome, qui ferme quand même la fenêtre au second Échap
-// sans geste entre les deux, la voit se rouvrir et demander. La confirmation est rendue à côté de la
-// fenêtre dans l'arbre de React, jamais dedans : son Échap y remonterait.
+// **Le texte du jeton ne vit que dans cette fenêtre** (`created`) : il part avec elle. Une fois le jeton
+// montré, rien ne le fait partir sans demander (R1460) : Échap ouvre la confirmation ; Chrome, qui ferme
+// quand même la fenêtre au second Échap sans geste entre les deux, la voit se rouvrir et demander ;
+// Précédent et Suivant sont retenus par le routeur (`holdHistory`), qui remet l'adresse, et la fenêtre
+// demande ; recharger ou fermer l'onglet passe par la question du navigateur (`beforeunload`). Pendant
+// la création aussi (R1461) : sa réponse doit trouver la fenêtre pour montrer le jeton, si bien
+// qu'Échap, « Annuler » et Précédent n'y font rien. La confirmation est rendue à côté de la fenêtre
+// dans l'arbre de React, jamais dedans : son Échap y remonterait.
 //
 // Une réponse perdue (`answerLost`) : le jeton a peut-être été créé, sans que personne en ait le texte
 // ; la fenêtre le dit, et la liste est relue (`onChanged`), qui le montre s'il existe (R757, R1372).
 //
 // Échap ne détruit rien : fermée sans créer, la fenêtre laisse à l'écran ce qui a été choisi
-// (`onDraft`), qu'elle retrouve en se rouvrant ; jamais le mot de passe, qui ne survit pas à la
-// fenêtre. Un jeton créé repart d'un formulaire vide.
+// (`onDraft`), qu'elle retrouve en se rouvrant, revu contre les espaces et l'arbre du moment (R1463) ;
+// jamais le mot de passe, qui ne survit pas à la fenêtre. Un jeton créé repart d'un formulaire vide.
 import type { CreateToken as CreateTokenBody, SpaceInfo, TokenLevel, TokenScope } from "@mementum/protocol";
-import { useEffect, useId, useRef, useState, type FormEvent, type RefObject } from "react";
+import {
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FormEvent,
+  type ReactNode,
+  type RefObject,
+} from "react";
 import { answerLost, ApiError, createToken, isSessionLost, lostAnswer } from "../api";
+import { holdHistory } from "../router";
 import { Field, FormError, messageOf } from "../session/forms";
 import { ROLE_LABELS } from "../share/levels";
-import { findPages, publishedSpace, type FoundPage } from "../space/pageDirectory";
+import { findPages, pageTitle, publishedSpace, type FoundPage } from "../space/pageDirectory";
 import { Confirm } from "../ui/Confirm";
 import { TokenCreated } from "./TokenCreated";
+
+const NBSP = String.fromCharCode(0xa0);
 
 const LEVELS: readonly { id: TokenLevel; label: string; hint: string }[] = [
   { id: "read", label: "Lecture", hint: "Il lit les pages de sa portée, et n'écrit rien." },
@@ -84,9 +100,37 @@ type Props = {
   onClose: () => void;
 };
 
+/** L'arbre publié est celui de `space` : ses pages peuvent être proposées. */
+function treeOf(space: SpaceInfo | null): boolean {
+  return space !== null && publishedSpace() === space.id;
+}
+
 /** Les pages proposées pour `query` : celles de l'arbre de `space` s'il est l'arbre publié. */
 function offer(space: SpaceInfo | null, query: string): FoundPage[] {
-  return space !== null && publishedSpace() === space.id ? findPages(query, OFFERED) : [];
+  return treeOf(space) ? findPages(query, OFFERED) : [];
+}
+
+/**
+ * Le brouillon, revu contre ce qui vaut à la réouverture (R1463) : l'espace d'une portée « espace »
+ * que le compte a quitté devient l'espace affiché ; une portée « pages » sans arbre lu de l'espace
+ * affiché revient à la portée par défaut ; une page choisie qui n'est plus dans l'arbre part, les
+ * autres prennent leur titre du moment.
+ */
+function resumed(draft: TokenDraft | null, spaces: readonly SpaceInfo[], current: SpaceInfo | null): TokenDraft | null {
+  if (draft === null) return null;
+  const fallback = current !== null ? "space" : "all";
+  const spaceId = spaces.some((s) => s.id === draft.spaceId) ? draft.spaceId : (current?.id ?? spaces[0]?.id ?? "");
+  const pagesHere = current !== null && draft.pagesOf === current.id && treeOf(current);
+  const chosen = pagesHere
+    ? draft.chosen.flatMap((p) => {
+        const title = pageTitle(p.id);
+        return title === null ? [] : [{ id: p.id, title }];
+      })
+    : [];
+  let scope = draft.scope;
+  if (scope === "pages" && !treeOf(current)) scope = fallback;
+  if (scope === "space" && spaces.length === 0) scope = "all";
+  return { ...draft, spaceId, scope, chosen };
 }
 
 export function CreateToken({ spaces, current, email, draft, onDraft, onChanged, onClose }: Props) {
@@ -103,23 +147,29 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
   const searchRef = useRef<HTMLInputElement>(null);
   const copyRef = useRef<HTMLDivElement>(null);
 
-  const [name, setName] = useState(draft?.name ?? "");
-  const [level, setLevel] = useState<TokenLevel>(draft?.level ?? "read");
-  const [scope, setScope] = useState<TokenScope>(draft?.scope ?? (current !== null ? "space" : "all"));
-  const [spaceId, setSpaceId] = useState(draft?.spaceId ?? current?.id ?? spaces[0]?.id ?? "");
+  const [start] = useState(() => resumed(draft, spaces, current));
+  const [name, setName] = useState(start?.name ?? "");
+  const [level, setLevel] = useState<TokenLevel>(start?.level ?? "read");
+  const [scope, setScope] = useState<TokenScope>(start?.scope ?? (current !== null ? "space" : "all"));
+  const [spaceId, setSpaceId] = useState(start?.spaceId ?? current?.id ?? spaces[0]?.id ?? "");
   const [query, setQuery] = useState("");
   const [offered, setOffered] = useState<FoundPage[]>(() => offer(current, ""));
-  const [chosen, setChosen] = useState<FoundPage[]>(() =>
-    draft !== null && draft.pagesOf === (current?.id ?? null) ? draft.chosen : [],
+  const [chosen, setChosen] = useState<FoundPage[]>(start?.chosen ?? []);
+  /** Les pages choisies hors de la liste proposée, figées comme elle : décochées, elles restent. */
+  const [kept, setKept] = useState<FoundPage[]>(() =>
+    (start?.chosen ?? []).filter((p) => !offered.some((o) => o.id === p.id)),
   );
-  const [canTrash, setCanTrash] = useState(draft?.canTrash ?? false);
-  const [expiry, setExpiry] = useState<number | null>(draft === null ? DEFAULT_EXPIRY : draft.expiry);
+  const [canTrash, setCanTrash] = useState(start?.canTrash ?? false);
+  const [expiry, setExpiry] = useState<number | null>(start === null ? DEFAULT_EXPIRY : start.expiry);
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   /** Le jeton créé, montré cette fois seulement : il part avec la fenêtre. */
   const [created, setCreated] = useState<{ token: string; name: string } | null>(null);
   const [confirming, setConfirming] = useState(false);
+  /** Le jeton est montré (lu par la retenue de l'historique, posée une fois). */
+  const shown = useRef(false);
+  shown.current = created !== null;
 
   useEffect(() => {
     const dialog = ref.current;
@@ -127,11 +177,30 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
     nameRef.current?.focus();
   }, []);
 
-  // Le formulaire, et le bouton qui avait le focus, sont partis : le focus va au bouton qui copie le
-  // jeton, la première chose à faire.
+  // Le formulaire, et le bouton qui avait le focus, sont partis : le focus va au premier geste de la
+  // fenêtre (copier la ligne qui attend le jeton, R1462).
   useEffect(() => {
-    if (created !== null) copyRef.current?.querySelector<HTMLButtonElement>("[data-copy-token]")?.focus();
+    if (created !== null) copyRef.current?.querySelector<HTMLButtonElement>("[data-first-gesture]")?.focus();
   }, [created]);
+
+  // Rien ne fait partir la fenêtre sans demander tant qu'une création est en route ou que le jeton est
+  // montré : ni Précédent (le routeur remet l'adresse), ni le rechargement ou la fermeture de l'onglet.
+  const guarded = busy || created !== null;
+  useEffect(() => {
+    if (!guarded) return;
+    const release = holdHistory(() => {
+      if (shown.current) setConfirming(true);
+    });
+    const unload = (event: BeforeUnloadEvent) => {
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", unload);
+    return () => {
+      release();
+      window.removeEventListener("beforeunload", unload);
+    };
+  }, [guarded]);
 
   /** La fenêtre part : ce qui a été choisi reste à l'écran, si aucun jeton n'a été créé. */
   const leave = () => {
@@ -143,9 +212,18 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
     onClose();
   };
 
+  /** Une demande de fermeture (Échap, « Annuler ») : attendue pendant la création, demandée après. */
+  const askToLeave = () => {
+    if (busy) return;
+    if (created !== null) setConfirming(true);
+    else leave();
+  };
+
   const search = (next: string) => {
+    const pages = offer(current, next);
     setQuery(next);
-    setOffered(offer(current, next));
+    setOffered(pages);
+    setKept(chosen.filter((p) => !pages.some((o) => o.id === p.id)));
   };
 
   const toggle = (found: FoundPage) =>
@@ -225,21 +303,20 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
         ref={ref}
         className="mm-dialog mm-token-dialog"
         aria-labelledby={titleId}
-        // Échap : le jeton montré, on demande d'abord ; sinon, la fenêtre part. Seulement le sien :
-        // celui de la confirmation ne la concerne pas.
+        // Échap : attendu pendant la création, demandé une fois le jeton montré ; sinon, la fenêtre
+        // part. Seulement le sien : celui de la confirmation ne la concerne pas.
         onCancel={(event) => {
           if (event.target !== event.currentTarget) return;
           event.preventDefault();
-          if (created !== null) setConfirming(true);
-          else leave();
+          askToLeave();
         }}
-        // Chrome la ferme quand même au second Échap sans geste entre les deux : le jeton montré, elle
-        // se rouvre et demande.
+        // Chrome la ferme quand même au second Échap sans geste entre les deux : pendant la création ou
+        // le jeton montré, elle se rouvre (et demande, une fois le jeton montré).
         onClose={(event) => {
           if (event.target !== event.currentTarget) return;
-          if (created === null) return leave();
+          if (!busy && created === null) return leave();
           event.currentTarget.showModal();
-          setConfirming(true);
+          if (created !== null) setConfirming(true);
         }}
       >
         {created === null ? (
@@ -264,50 +341,39 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
               <fieldset className="mm-token-choices">
                 <legend>Niveau</legend>
                 {LEVELS.map((item, i) => (
-                  <label key={item.id} className="mm-token-choice">
-                    <input
-                      ref={i === 0 ? levelRef : undefined}
-                      type="radio"
-                      name={`${levelName}-level`}
-                      value={item.id}
-                      checked={level === item.id}
-                      onChange={() => setLevel(item.id)}
-                    />
-                    <span className="mm-token-choice-text">
-                      <span className="mm-token-choice-label">{item.label}</span>
-                      <span className="mm-token-choice-hint">{item.hint}</span>
-                    </span>
-                  </label>
+                  <Choice
+                    key={item.id}
+                    inputRef={i === 0 ? levelRef : undefined}
+                    type="radio"
+                    name={`${levelName}-level`}
+                    value={item.id}
+                    checked={level === item.id}
+                    onChange={() => setLevel(item.id)}
+                    label={item.label}
+                    hint={item.hint}
+                  />
                 ))}
               </fieldset>
               <fieldset className="mm-token-choices">
                 <legend>Portée</legend>
-                <label className="mm-token-choice">
-                  <input
-                    ref={scopeRef}
-                    type="radio"
-                    name={`${scopeName}-scope`}
-                    value="all"
-                    checked={scope === "all"}
-                    onChange={() => setScope("all")}
-                  />
-                  <span className="mm-token-choice-text">
-                    <span className="mm-token-choice-label">Tous mes espaces</span>
-                  </span>
-                </label>
-                <label className="mm-token-choice">
-                  <input
-                    type="radio"
-                    name={`${scopeName}-scope`}
-                    value="space"
-                    checked={scope === "space"}
-                    disabled={spaces.length === 0}
-                    onChange={() => setScope("space")}
-                  />
-                  <span className="mm-token-choice-text">
-                    <span className="mm-token-choice-label">Un espace</span>
-                  </span>
-                </label>
+                <Choice
+                  inputRef={scopeRef}
+                  type="radio"
+                  name={`${scopeName}-scope`}
+                  value="all"
+                  checked={scope === "all"}
+                  onChange={() => setScope("all")}
+                  label="Tous mes espaces"
+                />
+                <Choice
+                  type="radio"
+                  name={`${scopeName}-scope`}
+                  value="space"
+                  checked={scope === "space"}
+                  disabled={spaces.length === 0}
+                  onChange={() => setScope("space")}
+                  label="Un espace"
+                />
                 {scope === "space" && (
                   <select
                     className="mm-select mm-select-boxed mm-token-space"
@@ -322,41 +388,36 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
                     ))}
                   </select>
                 )}
-                <label className="mm-token-choice">
-                  <input
-                    type="radio"
-                    name={`${scopeName}-scope`}
-                    value="pages"
-                    checked={scope === "pages"}
-                    disabled={current === null}
-                    onChange={() => setScope("pages")}
-                  />
-                  <span className="mm-token-choice-text">
-                    <span className="mm-token-choice-label">
-                      {current === null ? (
-                        "Des pages"
-                      ) : (
-                        <>
-                          Des pages de «&nbsp;
-                          <span className="mm-isolate" dir="auto">
-                            {current.name}
-                          </span>
-                          &nbsp;», avec leurs sous-pages
-                        </>
-                      )}
-                    </span>
-                    <span className="mm-token-choice-hint">
-                      Celles de l'espace ouvert dans la barre latérale ; pour un autre espace, ouvre-le
-                      d'abord.
-                    </span>
-                  </span>
-                </label>
+                <Choice
+                  type="radio"
+                  name={`${scopeName}-scope`}
+                  value="pages"
+                  checked={scope === "pages"}
+                  disabled={current === null}
+                  onChange={() => setScope("pages")}
+                  label={
+                    current === null ? (
+                      "Des pages"
+                    ) : (
+                      <>
+                        Des pages de «&nbsp;
+                        <span className="mm-isolate" dir="auto">
+                          {current.name}
+                        </span>
+                        &nbsp;», avec leurs sous-pages
+                      </>
+                    )
+                  }
+                  hint="Celles de l'espace ouvert dans la barre latérale ; pour un autre espace, ouvre-le d'abord."
+                />
                 {scope === "pages" && (
                   <PagePicker
                     searchRef={searchRef}
                     query={query}
                     offered={offered}
+                    kept={kept}
                     chosen={chosen}
+                    treeRead={treeOf(current)}
                     onSearch={search}
                     onToggle={toggle}
                   />
@@ -369,15 +430,13 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
                 des pages, il ne crée que sous elles). Il ne déplace jamais une page sous une autre, ne
                 supprime rien pour de bon et ne partage rien.
               </p>
-              <label className="mm-token-check">
-                <input type="checkbox" checked={canTrash} onChange={(e) => setCanTrash(e.target.checked)} />
-                <span className="mm-token-choice-text">
-                  <span className="mm-token-choice-label">Permettre la corbeille</span>
-                  <span className="mm-token-choice-hint">
-                    Mettre une page à la corbeille et l'en sortir.
-                  </span>
-                </span>
-              </label>
+              <Choice
+                type="checkbox"
+                checked={canTrash}
+                onChange={(checked) => setCanTrash(checked)}
+                label="Permettre la corbeille"
+                hint="Mettre une page à la corbeille et l'en sortir."
+              />
               <div className="mm-field">
                 <label htmlFor={expiryId}>Échéance</label>
                 <select
@@ -408,10 +467,16 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
               />
               <FormError message={error} />
               <div className="mm-dialog-actions">
-                <button type="button" className="mm-button" onClick={leave}>
+                {/* Grisés par `aria-disabled` : ils gardent le focus pendant la demande, et « Annuler »
+                    n'y fait rien (la réponse doit trouver la fenêtre). */}
+                <button
+                  type="button"
+                  className="mm-button"
+                  aria-disabled={busy || undefined}
+                  onClick={askToLeave}
+                >
                   Annuler
                 </button>
-                {/* Grisé par `aria-disabled` : il garde le focus pendant la demande. */}
                 <button
                   type="submit"
                   className="mm-button mm-button-primary"
@@ -447,7 +512,7 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
       </dialog>
       {confirming && (
         <Confirm
-          title={"Fermer la fenêtre du jeton\u00a0?"}
+          title={`Fermer la fenêtre du jeton${NBSP}?`}
           confirmLabel="Fermer"
           cancelLabel="Rester"
           onConfirm={leave}
@@ -460,24 +525,92 @@ export function CreateToken({ spaces, current, email, draft, onDraft, onChanged,
   );
 }
 
+type ChoiceProps = {
+  type: "radio" | "checkbox";
+  name?: string;
+  value?: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+  label: ReactNode;
+  /** Sa précision : dite à part (`aria-describedby`), hors de son nom. */
+  hint?: string;
+  inputRef?: RefObject<HTMLInputElement | null>;
+};
+
+/** Un choix : son nom, puis sa précision dessous, qui le décrit sans entrer dans son nom. */
+function Choice({ type, name, value, checked, disabled, onChange, label, hint, inputRef }: ChoiceProps) {
+  const id = useId();
+  return (
+    <label className={type === "radio" ? "mm-token-choice" : "mm-token-check"}>
+      <input
+        ref={inputRef}
+        type={type}
+        name={name}
+        value={value}
+        checked={checked}
+        disabled={disabled}
+        aria-labelledby={`${id}-label`}
+        aria-describedby={hint === undefined ? undefined : `${id}-hint`}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span className="mm-token-choice-text">
+        <span id={`${id}-label`} className="mm-token-choice-label">
+          {label}
+        </span>
+        {hint !== undefined && (
+          <span id={`${id}-hint`} className="mm-token-choice-hint">
+            {hint}
+          </span>
+        )}
+      </span>
+    </label>
+  );
+}
+
 type PickerProps = {
   searchRef: RefObject<HTMLInputElement | null>;
   query: string;
   offered: readonly FoundPage[];
+  kept: readonly FoundPage[];
   chosen: readonly FoundPage[];
+  /** L'arbre publié est celui de l'espace de la portée. */
+  treeRead: boolean;
   onSearch: (query: string) => void;
   onToggle: (page: FoundPage) => void;
 };
 
 /**
- * Les pages d'une portée : une recherche dans l'arbre affiché, les pages qu'elle propose (des cases,
- * qui restent à leur place une fois cochées), puis celles qui sont choisies, recherche changée
- * comprise. Cinquante au plus.
+ * Les pages d'une portée : une recherche dans l'arbre affiché, les pages qu'elle propose, puis celles
+ * choisies plus tôt hors de cette liste ; des cases, qui restent à leur place cochées ou non. Cinquante
+ * pages au plus. Entrée dans la recherche n'envoie pas le formulaire.
  */
-function PagePicker({ searchRef, query, offered, chosen, onSearch, onToggle }: PickerProps) {
+function PagePicker({ searchRef, query, offered, kept, chosen, treeRead, onSearch, onToggle }: PickerProps) {
   const isChosen = (id: string) => chosen.some((p) => p.id === id);
   const full = chosen.length >= MAX_PAGES;
-  const elsewhere = chosen.filter((p) => !offered.some((o) => o.id === p.id));
+  let empty: string | null = null;
+  if (offered.length === 0) {
+    if (!treeRead) {
+      empty =
+        "Les pages de cet espace ne sont pas encore lues : ouvre-le dans la barre latérale, puis rouvre cette fenêtre.";
+    } else if (query.trim() === "") empty = "Cet espace n'a aucune page que tu vois.";
+    else empty = "Aucune page de l'arbre ne porte ce titre.";
+  }
+  const box = (found: FoundPage) => (
+    <li key={found.id}>
+      <label className="mm-token-check">
+        <input
+          type="checkbox"
+          checked={isChosen(found.id)}
+          disabled={full && !isChosen(found.id)}
+          onChange={() => onToggle(found)}
+        />
+        <span className="mm-isolate" dir="auto">
+          {found.title || "Sans titre"}
+        </span>
+      </label>
+    </li>
+  );
   return (
     <div className="mm-token-pages">
       <input
@@ -489,26 +622,15 @@ function PagePicker({ searchRef, query, offered, chosen, onSearch, onToggle }: P
         autoComplete="off"
         value={query}
         onChange={(e) => onSearch(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") e.preventDefault();
+        }}
       />
-      {offered.length === 0 ? (
-        <p className="mm-token-choice-hint">Aucune page de l'arbre ne porte ce titre.</p>
+      {empty !== null ? (
+        <p className="mm-token-choice-hint">{empty}</p>
       ) : (
         <ul className="mm-token-offered" aria-label="Pages proposées">
-          {offered.map((found) => (
-            <li key={found.id}>
-              <label className="mm-token-check">
-                <input
-                  type="checkbox"
-                  checked={isChosen(found.id)}
-                  disabled={full && !isChosen(found.id)}
-                  onChange={() => onToggle(found)}
-                />
-                <span className="mm-isolate" dir="auto">
-                  {found.title || "Sans titre"}
-                </span>
-              </label>
-            </li>
-          ))}
+          {offered.map(box)}
         </ul>
       )}
       <p className="mm-token-choice-hint" role="status">
@@ -516,18 +638,9 @@ function PagePicker({ searchRef, query, offered, chosen, onSearch, onToggle }: P
           ? "Aucune page choisie."
           : `${chosen.length} ${chosen.length > 1 ? "pages choisies" : "page choisie"}${full ? ", le plus qu'un jeton admet : pour d'autres, crée un autre jeton ou choisis leur page parente." : "."}`}
       </p>
-      {elsewhere.length > 0 && (
+      {kept.length > 0 && (
         <ul className="mm-token-offered" aria-label="Autres pages choisies">
-          {elsewhere.map((found) => (
-            <li key={found.id}>
-              <label className="mm-token-check">
-                <input type="checkbox" checked onChange={() => onToggle(found)} />
-                <span className="mm-isolate" dir="auto">
-                  {found.title || "Sans titre"}
-                </span>
-              </label>
-            </li>
-          ))}
+          {kept.map(box)}
         </ul>
       )}
     </div>

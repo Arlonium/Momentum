@@ -8,7 +8,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import { ApiError, createToken, listTokens, revokeToken } from "../api";
 import { SessionContext } from "../session/session";
-import { until } from "../test/hooks";
+import { navigate, tokensPath, usePathname } from "../router";
+import { renderHook, until } from "../test/hooks";
 import { space } from "../test/pages";
 import AccountTokens from "./AccountTokens";
 import { announceTokensChanged } from "./tokensChanged";
@@ -141,6 +142,8 @@ test("the_token_is_shown_once_and_gone_when_the_window_closes", async () => {
   // Dans la fenêtre, une fois ; la liste relue derrière elle n'en montre que la fin.
   await until(host, () => lines().length === 1, "la liste relue");
   expect(field("Jeton d'API").value).toBe(TOKEN);
+  // Le premier geste a le focus : copier la ligne qui attend le jeton (R1462).
+  expect(document.activeElement?.getAttribute("aria-label")).toBe("Copier la ligne 1");
   expect(dialog()!.querySelectorAll(TOKEN_FIELD)).toHaveLength(1);
   expect(everything(field("Jeton d'API"))).not.toContain(TOKEN);
   expect(lineOf("t1").textContent).toContain("…00ab");
@@ -283,7 +286,10 @@ test("revoking_asks_first_and_gives_the_focus_back", async () => {
   revoke().focus();
   await click(revoke());
   expect(confirmation()).not.toBeNull();
-  expect(confirmation()!.textContent).toContain("Jeton A");
+  // Le nom du jeton, venu d'ailleurs, isolé (U+2068 et U+2069), dans le titre et dans le nom du bouton.
+  const isolated = `${String.fromCharCode(0x2068)}Jeton A${String.fromCharCode(0x2069)}`;
+  expect(confirmation()!.querySelector("h2")!.textContent).toContain(isolated);
+  expect(revoke().getAttribute("aria-label")).toContain(isolated);
   await click(buttonNamed(confirmation()!, "Annuler")!);
   expect(confirmation()).toBeNull();
   expect(revokeToken).not.toHaveBeenCalled();
@@ -334,4 +340,50 @@ test("nothing_moves_under_the_pointer_when_the_list_is_read_again", async () => 
   await until(host, () => vi.mocked(listTokens).mock.calls.length === 3, "la liste relue");
   await act(async () => {});
   expect(order()).toEqual(["c", "b", "a"]);
+});
+
+test("the_screen_takes_the_focus_when_it_arrives_on_body", async () => {
+  // Arrivé depuis le menu du compte au clavier, le lien suivi part avec le menu : le titre de l'écran
+  // prend le focus, jamais `body` (R1621).
+  (document.activeElement as HTMLElement | null)?.blur();
+  await rendered([]);
+  expect(document.activeElement?.tagName).toBe("H1");
+  expect(document.activeElement?.textContent).toBe("Jetons d'API");
+});
+
+test("leaving_with_a_shown_token_asks_first", async () => {
+  // Le routeur suit l'adresse, comme dans l'application (`App` lit `usePathname`).
+  history.replaceState(null, "", "/s/pro");
+  await renderHook(usePathname, undefined);
+  await act(async () => navigate(tokensPath()));
+  await rendered([]);
+  vi.mocked(createToken).mockResolvedValue({ token: TOKEN, info: token("t1") });
+  // Sans jeton montré, rien n'est retenu.
+  const before = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(before);
+  expect(before.defaultPrevented).toBe(false);
+
+  await create();
+  expect(field("Jeton d'API").value).toBe(TOKEN);
+  // Recharger ou fermer l'onglet : le navigateur demande.
+  const unload = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(unload);
+  expect(unload.defaultPrevented).toBe(true);
+  // Précédent : l'adresse revient, et la fenêtre demande ; « Rester » garde le jeton.
+  await act(async () => {
+    const popped = new Promise((done) => window.addEventListener("popstate", done, { once: true }));
+    history.back();
+    await popped;
+  });
+  expect(location.pathname).toBe("/account/tokens");
+  expect(confirmation()).not.toBeNull();
+  expect(document.activeElement).not.toBe(document.body);
+  await click(buttonNamed(confirmation()!, "Rester")!);
+  expect(field("Jeton d'API").value).toBe(TOKEN);
+
+  // Fermée, la fenêtre ne retient plus rien.
+  await click(buttonNamed(dialog()!, "Fermer")!);
+  const after = new Event("beforeunload", { cancelable: true });
+  window.dispatchEvent(after);
+  expect(after.defaultPrevented).toBe(false);
 });

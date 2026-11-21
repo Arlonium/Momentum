@@ -24,6 +24,13 @@ import { Confirm } from "../ui/Confirm";
 import { CreateToken, type TokenDraft } from "./CreateToken";
 import { useTokens } from "./useTokens";
 
+/** Isole un texte venu d'ailleurs dans une chaîne (un titre, un nom accessible) : jamais en littéral. */
+const FSI = String.fromCharCode(0x2068);
+const PDI = String.fromCharCode(0x2069);
+const NBSP = String.fromCharCode(0xa0);
+/** « nom », le nom isolé : pour une chaîne, là où un élément `dir` ne peut pas l'être. */
+const quoted = (text: string) => `«${NBSP}${FSI}${text}${PDI}${NBSP}»`;
+
 const day = new Intl.DateTimeFormat("fr-FR", { day: "numeric", month: "long", year: "numeric" });
 const moment = new Intl.DateTimeFormat("fr-FR", {
   day: "numeric",
@@ -121,6 +128,14 @@ export default function AccountTokens({ space }: { space: SpaceInfo | null }) {
   /** Compte les fermetures de la fenêtre, pour rendre le focus après chacune. */
   const [closed, setClosed] = useState(0);
   const openerRef = useRef<HTMLButtonElement>(null);
+  const titleRef = useRef<HTMLHeadingElement>(null);
+
+  // L'arrivée depuis le menu du compte : le lien suivi part avec le menu, et le focus tomberait sur
+  // `body` ; le titre de l'écran le prend (R1621).
+  useEffect(() => {
+    const active = document.activeElement;
+    if (active === null || active === document.body) titleRef.current?.focus();
+  }, []);
 
   // La fenêtre partie, le focus revient au bouton qui l'a ouverte (pas dans le vide).
   useEffect(() => {
@@ -138,7 +153,9 @@ export default function AccountTokens({ space }: { space: SpaceInfo | null }) {
         </span>
       </header>
       <div className="mm-settings">
-        <h1 className="mm-settings-title">Jetons d'API</h1>
+        <h1 ref={titleRef} className="mm-settings-title" tabIndex={-1}>
+          Jetons d'API
+        </h1>
         <p className="mm-settings-lead">
           Un jeton laisse un agent (Claude Code, un script) lire ou modifier tes pages en ton nom, dans la
           portée que tu choisis, sans jamais faire plus que toi. Tu le révoques quand tu veux ; changer ton
@@ -323,7 +340,7 @@ function TokenList({ tokens, error, reread }: ListProps) {
       {content}
       {revoking !== null && (
         <Confirm
-          title={`Révoquer le jeton «\u00a0${revoking.name}\u00a0»\u00a0?`}
+          title={`Révoquer le jeton ${quoted(revoking.name)}${NBSP}?`}
           confirmLabel="Révoquer"
           destructive
           busy={busy}
@@ -360,7 +377,12 @@ function TokenLine({ token, onRevoke }: { token: TokenInfo; onRevoke: () => void
       </span>
       <span className="mm-person-action">
         {!dead && (
-          <button type="button" className="mm-button mm-button-quiet" onClick={onRevoke}>
+          <button
+            type="button"
+            className="mm-button mm-button-quiet"
+            aria-label={`Révoquer ${quoted(token.name)}`}
+            onClick={onRevoke}
+          >
             Révoquer
           </button>
         )}

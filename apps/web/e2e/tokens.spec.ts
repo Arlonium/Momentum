@@ -54,7 +54,8 @@ test("a_token_is_created_copied_used_and_revoked", async ({ browser }) => {
   await spaceSwitcher(p).click();
   await sidebarOf(p).getByRole("link", { name: "Jetons d'API" }).click();
   await expect(p).toHaveURL(/\/account\/tokens$/);
-  await expect(p.getByRole("heading", { level: 1, name: "Jetons d'API" })).toBeVisible();
+  // Le lien suivi part avec le menu : le titre de l'écran prend le focus (R1621).
+  await expect(p.getByRole("heading", { level: 1, name: "Jetons d'API" })).toBeFocused();
   await expect(p.getByText("Aucun jeton pour l'instant.")).toBeVisible();
 
   await p.getByRole("button", { name: "Créer un jeton" }).click();
@@ -68,7 +69,8 @@ test("a_token_is_created_copied_used_and_revoked", async ({ browser }) => {
   const shown = p.getByRole("dialog", { name: "Jeton créé" });
   const field = shown.getByLabel("Jeton d'API");
   await expect(field).toHaveValue(/^mmt_[A-Za-z0-9_-]{43}$/);
-  await expect(shown.getByRole("button", { name: "Copier le jeton" })).toBeFocused();
+  // Le premier geste a le focus : copier la ligne qui attend le jeton (R1462).
+  await expect(shown.getByRole("button", { name: "Copier la ligne 1", exact: true })).toBeFocused();
   await shown.getByRole("button", { name: "Copier le jeton" }).click();
   await expect(shown.getByRole("button", { name: "Jeton copié" })).toBeVisible();
   const token = await p.evaluate(() => navigator.clipboard.readText());
@@ -146,4 +148,35 @@ test("changing_the_password_revokes_the_tokens", async ({ browser }) => {
   await expect(line).toContainText("Révoqué");
   await expect(line.getByRole("button", { name: "Révoquer" })).toHaveCount(0);
   expect(await readTree(client, spaceId, token)).toEqual({ status: 401, error: "invalid_token" });
+});
+
+test("going_back_with_a_shown_token_asks_first", async ({ browser }) => {
+  // Précédent, le jeton montré : l'adresse reste, la fenêtre demande, et « Rester » garde le jeton
+  // (R1460). Le focus n'est jamais sur `body`.
+  const account = await signUpAccount();
+  const spaceId = (await firstSpace(await apiAs(account))).id;
+  const p = await newUser(browser, account);
+  await p.goto(`/s/${spaceId}`);
+  await spaceSwitcher(p).click();
+  await sidebarOf(p).getByRole("link", { name: "Jetons d'API" }).click();
+  await p.getByRole("button", { name: "Créer un jeton" }).click();
+  const form = p.getByRole("dialog", { name: "Créer un jeton" });
+  await form.getByLabel("Nom du jeton").fill("Agent");
+  await form.getByLabel("Mot de passe actuel").fill(PASSWORD);
+  await form.getByRole("button", { name: "Créer le jeton" }).click();
+  const shown = p.getByRole("dialog", { name: "Jeton créé" });
+  const field = shown.getByLabel("Jeton d'API");
+  await expect(field).toHaveValue(/^mmt_/);
+  const token = await field.inputValue();
+
+  await p.goBack();
+  const confirm = p.getByRole("alertdialog", { name: /Fermer la fenêtre du jeton/ });
+  await expect(confirm).toBeVisible();
+  await expect(p).toHaveURL(/\/account\/tokens$/);
+  await expect(confirm.getByRole("button", { name: "Rester" })).toBeFocused();
+  await confirm.getByRole("button", { name: "Rester" }).click();
+  await expect(confirm).toHaveCount(0);
+  expect(await p.evaluate(() => document.activeElement !== document.body)).toBe(true);
+  await expect(field).toHaveValue(token);
+  await expect(p).toHaveURL(/\/account\/tokens$/);
 });
