@@ -142,22 +142,27 @@ pub(crate) fn permit(access: &NodeAccess, action: Action) -> Result<(), ApiError
             .into_iter()
             .find(|level| level.allows(action))
             .unwrap_or(Level::Full);
-        // Le niveau d'un jeton d'API sous celui du compte (recette du lot 5, F5, Ruling R1549) :
-        // si le compte le pourrait, c'est le jeton qui borne, et le refus le dit ; sinon, le
-        // niveau du compte, comme à sa session. Un geste qui demande « Accès complet » n'est
-        // permis à aucun jeton : son interdit le dit mieux. Un geste de « Peut modifier » refusé à
-        // un jeton « Lecture » se dit par le niveau du jeton, même s'il est aussi interdit (la
-        // corbeille sans l'option) : un jeton « Lecture » ne porte pas l'option (R1665).
+        // Un jeton d'API qui ramène le niveau du compte plus bas (`capped_from`, recette du lot 5,
+        // F5, Rulings R1549, R1558). Un jeton « Modification » n'est borné que pour les gestes
+        // d'« Accès complet » (ranger sous une autre page, partager, supprimer pour de bon),
+        // qu'aucun jeton ne fait : son interdit le dit (`ALWAYS_BARRED`). Tout autre refus d'un
+        // jeton borné est celui d'un jeton « Lecture », qui le dit avec le niveau du compte, la
+        // corbeille comprise (un jeton « Lecture » ne porte pas l'option, R1665).
         return Err(match access.capped_from {
             Some(account)
                 if account.allows(action)
-                    && needed > Level::Edit
+                    && needed == Level::Full
                     && access.barred.contains(action) =>
             {
                 barred(action)
             }
-            Some(account) if account.allows(action) => capped(needed, access.level, account),
-            Some(account) => below(needed, account),
+            Some(account) => {
+                debug_assert!(
+                    access.level < Level::Comment,
+                    "seul un jeton « Lecture » arrive ici"
+                );
+                read_only_token(needed, account, action)
+            }
             None => below(needed, access.level),
         });
     }
@@ -208,11 +213,12 @@ pub(crate) fn permit_root_page(space: &SpaceAccess, user: &AuthUser) -> Result<R
     Ok(role)
 }
 
-/// `403 forbidden` : il faut `needed` sur la page ; le compte l'a (`account`), mais son jeton d'API
-/// s'arrête à `token`. Les niveaux de jeton sont ceux de l'écran « Jetons d'API » (« Lecture »,
-/// « Modification ») ; ceux de la page, ceux du menu Partager.
-fn capped(needed: Level, token: Level, account: Level) -> ApiError {
-    ApiError::forbidden(if token < Level::Comment {
+/// `403 forbidden` à un jeton « Lecture » (Rulings R1549, R1558) : il faut `needed` sur la page,
+/// pour `action`, et le compte a `account`. Les niveaux du jeton sont ceux de l'écran « Jetons
+/// d'API » (« Lecture », « Modification »), ceux de la page ceux du menu Partager. Si le compte le
+/// pourrait, c'est le jeton qui borne ; sinon, le refus dit les deux.
+fn read_only_token(needed: Level, account: Level, action: Action) -> ApiError {
+    ApiError::forbidden(if account.allows(action) {
         format!(
             "ce jeton d'API est un jeton « Lecture » : il lit les pages de sa portée, et n'écrit \
              rien, même là où ton compte a « {} » ; pour écrire, il faut un jeton « Modification »",
@@ -220,9 +226,10 @@ fn capped(needed: Level, token: Level, account: Level) -> ApiError {
         )
     } else {
         format!(
-            "ce jeton d'API est un jeton « Modification » : ce geste demande « {} », que ton \
-             compte a sur cette page, mais aucun jeton ; passe par l'application",
-            level_name(needed)
+            "niveau insuffisant sur cette page : il faut « {} » ; ton compte a « {} », et ce jeton \
+             « Lecture » ne fait que lire",
+            level_name(needed),
+            level_name(account)
         )
     })
 }

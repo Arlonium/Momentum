@@ -717,6 +717,26 @@ async fn a_read_token_says_that_the_token_is_what_reads_only() {
         below,
         "niveau insuffisant sur cette page : il faut « Peut modifier », tu as « Peut lire »"
     );
+    // Le compte peut commenter « Commentée », pas la modifier : le refus dit les deux niveaux
+    // (Ruling R1558).
+    let commented = team
+        .page(None, "Commentée", &[(Subject::Members, Level::Comment)])
+        .await;
+    let both = message(
+        &json_by(
+            &t,
+            &token,
+            Method::POST,
+            &format!("{}/operations", page_uri(commented)),
+            json!({ "operations": [{ "op": "insert", "position": "end", "markdown": "Plus\n" }] }),
+        )
+        .await,
+    );
+    assert_eq!(
+        both,
+        "niveau insuffisant sur cette page : il faut « Peut modifier » ; ton compte a « Peut \
+         commenter », et ce jeton « Lecture » ne fait que lire"
+    );
     // L'outil le dit dans ses lignes, hors du contenu borné.
     let mcp = common::mcp::Mcp::new(&t, &token, common::mcp::Era::V2026);
     let refused = mcp
@@ -761,7 +781,13 @@ async fn a_token_never_moves_a_page_under_another_parent() {
     ] {
         let before = t.store.get_node(page).await.unwrap().unwrap().parent_id;
         let reply = json_by(&t, &token, Method::PATCH, &page_uri(page), body).await;
-        reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+        // Le refus dit ce qu'aucun jeton ne fait, pas le niveau du jeton (Ruling R1558).
+        let refused = reply.assert_error(StatusCode::FORBIDDEN, "forbidden");
+        assert_eq!(
+            refused["message"],
+            "un jeton d'API ne range pas une page sous une autre, ni à la racine : il ne la \
+             déplace que parmi ses sœurs"
+        );
         let after = t.store.get_node(page).await.unwrap().unwrap().parent_id;
         assert_eq!(before, after);
     }
