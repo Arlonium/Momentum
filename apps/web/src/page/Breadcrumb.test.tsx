@@ -7,7 +7,8 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, expect, test } from "vitest";
 import "../test/hooks";
 import { page } from "../test/pages";
-import { arriveAt, Breadcrumb } from "./Breadcrumb";
+import { arriveAt } from "../pageArrival";
+import { Breadcrumb } from "./Breadcrumb";
 
 let host: HTMLDivElement;
 let root: Root;

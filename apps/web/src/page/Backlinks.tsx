@@ -28,7 +28,7 @@ import {
 } from "react";
 import { blockPath } from "../router";
 import { publishedTitles, watchPages } from "../space/pageDirectory";
-import { arriveAt } from "./Breadcrumb";
+import { arriveAt } from "../pageArrival";
 
 /**
  * L'adresse d'un rétrolien : **le seul endroit** où une page source et son bloc deviennent une

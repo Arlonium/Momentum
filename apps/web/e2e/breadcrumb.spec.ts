@@ -7,11 +7,14 @@ import {
   closeContexts,
   createPage,
   guestOf,
+  mention,
   newUser,
   openPage,
   ownerAndMember,
+  putMmd,
   signUpAccount,
   unique,
+  waitSynced,
 } from "./helpers";
 
 test.afterEach(closeContexts);
@@ -29,6 +32,28 @@ async function crumbs(p: Page): Promise<string[]> {
       items.map((item) => item.querySelector("a, button, [aria-current]")?.textContent ?? ""),
     );
 }
+
+test("following_a_page_link_or_a_mention_puts_the_focus_on_the_breadcrumb", async ({ browser }) => {
+  // Le lien suivi part avec la page quittée : le focus tombait sur `body`. Il va à la page atteinte,
+  // dans son fil d'Ariane, comme par un rétrolien sans bloc (R1128, R1589).
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const tag = unique();
+  const target = await createPage(api, { title: `Cible ${tag}` });
+  const source = await createPage(api, { title: `Source ${tag}` });
+  await putMmd(api, source.id, `Voir ${mention(target.id, target.title)} ici.\n\n<page id="${target.id}">${target.title}</page>\n`);
+  const p = await openPage(browser, source.id, account);
+  const current = breadcrumbOf(p).locator('[aria-current="page"]');
+  for (const link of [p.locator(".mm-editor a.mm-mention-link"), p.locator(".mm-editor a.mm-page-link-anchor")]) {
+    await expect(p).toHaveURL(new RegExp(`/p/${source.id}$`));
+    await waitSynced(p);
+    await link.click();
+    await expect(p).toHaveURL(new RegExp(`/p/${target.id}$`));
+    await expect(current).toHaveText(target.title);
+    await expect(current).toBeFocused();
+    await p.goBack();
+  }
+});
 
 test("breadcrumb_follows_a_move_made_by_someone_else", async ({ browser }) => {
   const { aliceApi, bruno } = await ownerAndMember();

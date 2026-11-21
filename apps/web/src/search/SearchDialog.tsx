@@ -41,7 +41,7 @@ import {
   type SyntheticEvent,
 } from "react";
 import { PageIcon, SearchIcon } from "../icons";
-import { arriveAt } from "../page/Breadcrumb";
+import { arriveAt } from "../pageArrival";
 import { blockPath, navigate } from "../router";
 import { useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";

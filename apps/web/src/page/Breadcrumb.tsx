@@ -20,6 +20,7 @@ import type { PageNode } from "@mementum/protocol";
 import { useCallback, useEffect, useRef, useState, type MouseEvent } from "react";
 import { isolate } from "../comments/dom";
 import { PageIcon } from "../icons";
+import { arriveAt, forgetArrival, onArrival, takeArrival } from "../pageArrival";
 import { navigate, pagePath } from "../router";
 import { RowMenu, type MenuAction } from "../sidebar/RowMenu";
 
@@ -35,26 +36,6 @@ type Props = {
   /** Ses pages parentes que le compte voit, de la plus haute à la page parente. */
   ancestors: PageNode[];
 };
-
-/**
- * La page qu'un lien vient d'ouvrir : le fil de sa barre du haut, quand il sera monté (ou à son rendu
- * suivant, s'il l'est déjà), prendra le focus. Tout fil qui se monte l'efface.
- */
-let arriving: string | null = null;
-/** Les fils montés, prévenus d'une arrivée : celui de la page ouverte la suit sans être remonté. */
-const arrivals = new Set<() => void>();
-
-/**
- * Un geste mène à la page `id`, sans bloc : un rétrolien (`Backlinks.tsx`), une page trouvée par son
- * titre (`SearchDialog.tsx`). Ce qui avait le focus part avec la page quittée, et il tomberait sur
- * `body` : le fil de la page d'arrivée le prend (R292, R1128), et la page est montrée en haut (choix
- * 24 de la recette du lot 4). La page déjà ouverte n'est pas remontée (seul le fragment de l'adresse
- * a changé, R1104) : son fil, déjà monté, est prévenu, et y va de même.
- */
-export function arriveAt(id: string): void {
-  arriving = id;
-  for (const arrival of arrivals) arrival();
-}
 
 /** Un clic que le routeur suivra (`useLinkInterception`) : bouton principal, sans touche. */
 function followed(event: MouseEvent): boolean {
@@ -74,29 +55,22 @@ export function Breadcrumb({ node, ancestors }: Props) {
   /** Les arrivées annoncées pendant que ce fil est monté : chacune le fait rendre de nouveau. */
   const [announced, setAnnounced] = useState(0);
 
-  useEffect(() => {
-    const announce = () => setAnnounced((n) => n + 1);
-    arrivals.add(announce);
-    return () => {
-      arrivals.delete(announce);
-    };
-  }, []);
+  useEffect(() => onArrival(() => setAnnounced((n) => n + 1)), []);
 
-  // Le fil monté prend une arrivée vers sa page, dans un effet : après le rendu qui ferme ce qui l'a
-  // demandée (la fenêtre de recherche, qui rend le focus dans un nettoyage), jamais avant. La page est
-  // montrée en haut, puis le focus va au fil sans la faire défiler. Monté, il efface toute arrivée ;
-  // une arrivée vers une autre page (que ce fil va quitter) ne le touche pas.
+  // Le fil monté prend une arrivée vers sa page (`pageArrival.ts`), dans un effet : après le rendu qui
+  // ferme ce qui l'a demandée (la fenêtre de recherche, qui rend le focus dans un nettoyage), jamais
+  // avant. La page est montrée en haut, puis le focus va au fil sans la faire défiler. Monté, il efface
+  // toute arrivée ; une arrivée vers une autre page (que ce fil va quitter) ne le touche pas.
   const mounting = useRef(true);
   useEffect(() => {
     const first = mounting.current;
     mounting.current = false;
-    if (arriving === node.id) {
-      arriving = null;
+    if (takeArrival(node.id)) {
       const page = current.current;
       (page?.closest(".mm-topbar") ?? page)?.scrollIntoView?.({ block: "start" });
       page?.focus({ preventScroll: true });
     } else if (first) {
-      arriving = null;
+      forgetArrival();
     }
   }, [node.id, announced]);
 
@@ -127,7 +101,7 @@ export function Breadcrumb({ node, ancestors }: Props) {
     icon: <PageIcon />,
     foreign: true,
     onSelect: () => {
-      arriving = page.id;
+      arriveAt(page.id);
       navigate(pagePath(page.id));
     },
   }));
@@ -178,7 +152,7 @@ export function Breadcrumb({ node, ancestors }: Props) {
                 href={pagePath(page.id)}
                 title={isolate(titleOf(page))}
                 onClick={(event) => {
-                  if (followed(event)) arriving = page.id;
+                  if (followed(event)) arriveAt(page.id);
                 }}
               >
                 <span className="mm-isolate" dir="auto">

@@ -11,9 +11,9 @@ import { publishPages } from "../space/pageDirectory";
 import "../test/hooks";
 import { page } from "../test/pages";
 import { backlinkHref, Backlinks } from "./Backlinks";
-import { arriveAt } from "./Breadcrumb";
+import { arriveAt } from "../pageArrival";
 
-vi.mock("./Breadcrumb", () => ({ arriveAt: vi.fn() }));
+vi.mock("../pageArrival", () => ({ arriveAt: vi.fn() }));
 
 const A = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const B = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";

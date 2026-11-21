@@ -7,6 +7,7 @@
 // `<a href>` (nouvel onglet, copie du lien) ; un clic simple est intercepté pour changer de
 // page sans recharger l'application.
 import { useEffect, useSyncExternalStore } from "react";
+import { arriveAt } from "./pageArrival";
 
 export type Route =
   | { name: "home" }
@@ -196,9 +197,16 @@ export function useLinkInterception(): void {
       if (url.origin !== location.origin) return;
       // Un lien d'invitation porte son jeton dans le fragment : il se suit en chargeant la page,
       // qui lit le jeton. Le fragment d'une page (le bloc visé, `#b=`) est gardé.
-      const target = parseRoute(url.pathname).name;
-      if (target === "notFound" || target === "invite") return;
+      const target = parseRoute(url.pathname);
+      if (target.name === "notFound" || target.name === "invite") return;
       event.preventDefault();
+      // Un lien du contenu (un lien de page, une mention, un rétrolien) part avec la page quittée, et le
+      // focus tomberait sur `body` : le fil d'Ariane de la page d'arrivée le prend (R1589). Pas un lien
+      // de la barre latérale, qui reste là, avec le focus ; pas un lien à un bloc, que l'arrivée sur le
+      // bloc prend (`useArrival`).
+      if (target.name === "page" && parseBlockTarget(url.hash) === null && anchor.closest("main") !== null) {
+        arriveAt(target.id);
+      }
       navigate(url.pathname + url.search + url.hash);
     };
     document.addEventListener("click", onClick);
