@@ -670,6 +670,18 @@ Décisions au registre du lot 5, « Task S6 » (R1365 à R1374) et son tour de c
 - **Voir rouge un test sous la mutation de sa règle se fait une mutation à la fois** (R1374, tour de correction) : le poste a refusé un troisième passage groupé de mutations par script (règle du lot : pas de campagne de mutations avant la fin), puis laissé passer sept mutations menées une à une, chacune pour le test de sa règle, demandées par le coordinateur. Lire le message de chaque rouge (la ligne `panicked at` et les deux suivantes), et remettre la copie saine après chaque passage (`cmp`).
 - **Une révocation, comme une déconnexion, va au bout si le client coupe** (`to_completion`, R1376) : une écriture qui retire un droit et qu'un onglet fermé abandonnerait se mène ainsi ; son test tient la file (`hold_writes`), abandonne la requête une fois en file, rend la file et attend l'effet (`a_revocation_whose_client_left_still_lands`).
 
+### Task C1 : l'écran « Jetons d'API » (`apps/web/src/account/`)
+
+Décisions au registre du lot 5, « Task C1 » (R1445 à R1459).
+
+- **Le texte d'un jeton ne vit que dans l'état de `CreateToken`** (la fenêtre qui le montre, R1451, R1452) : ni la liste (`useTokens`, qui ne porte que `TokenInfo`), ni le brouillon que l'écran garde (`TokenDraft`, jamais le mot de passe), ni le stockage, ni la console, ni une adresse. Tout chemin neuf qui montre un jeton passe par cette fenêtre, et par `the_token_is_never_in_storage_nor_in_the_console` (des espions sur la console et `Storage.prototype.setItem`).
+- **React écrit l'attribut `value` d'un champ contrôlé** : `innerHTML` porte le texte d'un `<input readOnly value=…>`. Une preuve d'absence d'un texte dans la page retire d'une copie du `body` le champ qui doit le porter, et lit à part la `value` des autres champs (`everything`, `AccountTokens.test.tsx`) ; sans cela, le champ voulu compte deux fois.
+- **Ce qui change les jetons d'un compte hors de leur écran l'annonce** (`announceTokensChanged`, `account/tokensChanged.ts`, R1453) : la fenêtre du mot de passe le fait ; sinon l'écran ouvert derrière montre vivants des jetons révoqués. Le module est à part pour que le menu du compte n'importe pas l'écran, chargé à la demande.
+- **Les pages d'une portée « pages » sont celles de l'arbre publié** (`findPages`), donc de l'espace affiché dans la barre latérale, que `publishedSpace()` (`space/pageDirectory.ts`) nomme : un sélecteur neuf lié à un espace le compare avant de proposer quoi que ce soit (R1446).
+- **Une commande de `commandsFor` (`TokenCreated.tsx`) change avec ses deux tests** (`the_command_to_paste_never_carries_the_token`, `each_shell_gets_its_own_quotes`) : l'en-tête et l'adresse entre apostrophes sous bash, zsh et PowerShell, entre guillemets sous cmd (R1576, R1449), deux lignes copiées une à une (R1448). Si X1 trouve que `claude mcp add` ne garde pas `${MEMENTUM_TOKEN}` en portée `local`, c'est là que `--scope project` s'ajoute. Vite relaie `/mcp` (R1447) : la commande porte `location.origin`, juste en développement comme dans les e2e.
+- **Le menu du compte se parcourt au clavier dans un e2e** (`account_menu_by_keyboard`, `e2e/auth.spec.ts`) : une entrée neuve du menu s'ajoute à sa liste, à son rang.
+- **L'outil d'écriture change aussi `\u00a0` en caractère réel** (comme les caractères de direction, piège de la Task C8) : sans danger, mais invisible à la relecture, et un `grep` de l'échappement ne le trouve plus ; remettre l'échappement par un script après coup dans les chaînes du code (le texte JSX prend `&nbsp;`).
+
 ## Tester
 
 Structure du dépôt (conception, §8) :
