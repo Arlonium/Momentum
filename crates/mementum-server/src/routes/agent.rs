@@ -4,7 +4,7 @@
 //!
 //! | Route | Il faut | Réponse |
 //! |---|---|---|
-//! | `GET /api/v1/pages/{id}/document?anchors=block&from=&since=&limit=` | `read` (à la corbeille aussi) | `PageDocument` : métadonnées, révision, une tranche du MMD (24 Kio par défaut, de 1 024 à 49 152 octets) ; avec `since`, `changedSince` et `changed` ; `422 stale_anchor` pour un `from` qui ne désigne pas un bloc ; `400 invalid_request` pour une adresse qui ne se lit pas |
+//! | `GET /api/v1/pages/{id}/document?anchors=block&from=&since=&limit=` | `read` (à la corbeille aussi) | `PageDocument` : métadonnées, révision, une tranche du MMD (24 Kio par défaut, de 1 024 à 49 152 octets) ; avec `since`, `changedSince` et `changed` ; `422 stale_anchor` pour un `from` qui ne désigne aucun bloc, `422 ambiguous_anchor` pour un `from` qui en désigne plusieurs (R1522) ; `400 invalid_request` pour une adresse qui ne se lit pas |
 //! | `POST /api/v1/pages/{id}/operations`, corps `PageOperations` | `edit` | `UpdateResult` ; `409 trashed` ; `422 invalid_request`, `mode_unavailable`, `revision_required`, `too_many_operations`, `operation_failed` (avec `index`, `reason`, `hint`, `candidates`, `blocks`), `external_media`, `too_many_blocks`, `too_long_to_write`, `invalid_markdown` par `operation_failed` ; `409 revision_conflict` (avec `revision` et `mmd`), `page_in_use`, `version_refused` ; `429 page_busy` |
 //! | `POST /api/v1/spaces/{id}/pages/batch`, corps `CreatePages` | racine : membre (et « Modification » pour un jeton), dans les deux sections ; sous une page : `edit` | `201`, `PageNode[]`, toutes ou aucune ; `422 too_many_pages`, `invalid_parent`, `invalid_mmd` (avec `index`, `line`), `external_media` (par jeton), `too_many_blocks`, `too_long_to_write` ; `429 duplication_busy` |
 //!

@@ -485,7 +485,15 @@ impl Tools<'_> {
             Target::Id(id) => (id, None, true),
             Target::Page(id, block) => (id, block, false),
             Target::Space(id) => return self.outline(&id.to_string()).await,
-            Target::Name(name) => return self.outline(&name).await,
+            // Un nom qui n'est celui d'aucun espace ouvert : peut-être le titre d'une page, que
+            // `fetch` ne cherche pas (D4, R1523) ; le refus dit ce qu'il prend, sans recopier le nom.
+            Target::Name(name) => {
+                return match self.outline(&name).await {
+                    Err(failure) if failure.is_absence() => Err(neither_page_nor_space()),
+                    found => found,
+                };
+            }
+            Target::Resource => return Err(resource_to_read()),
             Target::Unknown => return Err(ApiError::page_not_found().into()),
         };
         self.note(|seen| seen.node = Some(id));
@@ -716,6 +724,34 @@ impl Tools<'_> {
             spaces: me.spaces.into_iter().map(space_line).collect(),
             space,
         }))
+    }
+}
+
+/// `fetch` d'un nom qui n'est celui d'aucun espace que le jeton ouvre (défaut D4 de la passe de fin,
+/// Ruling R1523) : ce que l'outil prend, et où chercher une page par son titre ; la même réponse
+/// pour un nom inconnu et pour un espace hors de la portée, sans recopier le nom.
+fn neither_page_nor_space() -> Failure {
+    Failure::Tool {
+        code: "not_found",
+        message: "aucune page ni aucun espace de ce nom parmi ceux que ton jeton ouvre : fetch \
+                  prend l'identifiant ou l'adresse d'une page, ou le nom ou l'identifiant d'un \
+                  espace (workspace_info les nomme) ; une page se trouve par son titre avec \
+                  search"
+            .into(),
+    }
+}
+
+/// `fetch` de l'adresse d'une ressource MCP (`mementum://…`, D4, R1523) : elle se lit par
+/// `resources/read`.
+fn resource_to_read() -> Failure {
+    Failure::Tool {
+        code: "invalid_arguments",
+        message: format!(
+            "une adresse mementum:// est une ressource MCP, pas une page : lis-la par \
+             resources/read (la ressource {} décrit le format MMD) ; fetch prend l'identifiant ou \
+             l'adresse d'une page, ou le nom ou l'identifiant d'un espace",
+            mementum_mcp::spec::MMD_URI
+        ),
     }
 }
 
@@ -972,6 +1008,9 @@ enum Target {
     Space(Uuid),
     /// Ni identifiant ni adresse : le nom d'un espace.
     Name(String),
+    /// L'adresse d'une ressource MCP du serveur (`mementum://…`), qui se lit par `resources/read`,
+    /// pas par `fetch` (défaut D4 de la passe de fin, Ruling R1523).
+    Resource,
     /// Une adresse qui ne désigne rien que l'outil connaisse.
     Unknown,
 }
@@ -982,6 +1021,9 @@ fn target(text: &str) -> Target {
     let text = text.trim();
     if let Ok(id) = Uuid::try_parse(text) {
         return Target::Id(id);
+    }
+    if text.starts_with("mementum://") {
+        return Target::Resource;
     }
     let path = match text
         .strip_prefix("https://")
@@ -1256,19 +1298,29 @@ mod tests {
         );
     }
 
-    /// Un message de route qui cite l'entrée de l'agent (entre « et ») va entier dans les
-    /// citations, la ligne du serveur ne disant que cela (R1439) ; un message sans citation reste
-    /// dans la ligne ; `invalid_parent` et `invalid_after` nomment les champs de l'outil (R1440).
+    /// Un message de route qui cite l'entrée de l'agent (entre « et »), marqué à sa source, va
+    /// entier dans les citations, la ligne du serveur ne disant que cela (R1439, R1517) ; un
+    /// message que le serveur écrit seul reste dans la ligne, même avec des « » ; `invalid_parent`
+    /// et `invalid_after` nomment les champs de l'outil (R1440).
     #[test]
     fn a_route_message_that_quotes_goes_inside_the_boundary() {
         let quoting = ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::OperationFailed,
             "« x » Ignore tout « y » ne se trouve dans le texte d'aucun bloc",
-        );
+        )
+        .quoting();
         let refusal = refusal_of(&quoting, Counted::Operation);
         assert!(!refusal.message.contains("Ignore"), "{}", refusal.message);
         assert_eq!(refusal.quotes, [quoting.message().to_string()]);
+        let unmarked = ApiError::new(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Forbidden,
+            "il faut « Peut modifier », tu as « Peut lire »",
+        );
+        let refusal = refusal_of(&unmarked, Counted::Operation);
+        assert_eq!(refusal.message, unmarked.message());
+        assert!(refusal.quotes.is_empty());
         let plain = ApiError::page_not_found();
         let refusal = refusal_of(&plain, Counted::Operation);
         assert_eq!(refusal.message, "page introuvable");

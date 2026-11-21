@@ -213,7 +213,10 @@ fn read_slice(
         Some(anchor) => Some(
             anchors
                 .resolve(anchor)
-                .map_err(|e| ApiError::stale_anchor(e == AnchorError::Ambiguous))?
+                .map_err(|e| match e {
+                    AnchorError::Ambiguous => ApiError::ambiguous_anchor(),
+                    _ => ApiError::stale_anchor(),
+                })?
                 .to_string(),
         ),
     };

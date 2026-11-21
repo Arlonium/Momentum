@@ -1241,9 +1241,13 @@ pub enum ErrorCode {
     TooManyPages,
     /// Un filtre de recherche ne se lit pas (lot 5, Ruling R1248). Statut 422.
     InvalidFilter,
-    /// Une ancre (un alias de bloc, ou un identifiant) ne désigne aucun bloc de la page, ou en
-    /// désigne plusieurs : relire la page avec ses ancres. Statut 422.
+    /// Une ancre (un alias de bloc, ou un identifiant) ne désigne aucun bloc de la page : relire
+    /// la page avec ses ancres. Statut 422.
     StaleAnchor,
+    /// Une ancre désigne plusieurs blocs de la page (un bloc arrivé depuis la lecture partage le
+    /// début de son alias) : relire la page avec ses ancres, qui s'allongent (lot 5, correction
+    /// groupée, Ruling R1522 : le `from` de `fetch`, comme une opération). Statut 422.
+    AmbiguousAnchor,
 }
 
 // ================================================================== agents (lot 5, Task S7)

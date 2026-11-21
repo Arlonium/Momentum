@@ -918,18 +918,25 @@ impl ApiError {
         )
     }
 
-    /// `422 stale_anchor` : l'ancre ne désigne aucun bloc de la page, ou plusieurs.
-    pub fn stale_anchor(ambiguous: bool) -> ApiError {
+    /// `422 stale_anchor` : l'ancre ne désigne aucun bloc de la page.
+    pub fn stale_anchor() -> ApiError {
         ApiError::new(
             StatusCode::UNPROCESSABLE_ENTITY,
             ErrorCode::StaleAnchor,
-            if ambiguous {
-                "cette ancre désigne plusieurs blocs de la page : relis la page avec ses ancres, \
-                 puis vise le bloc par l'alias qu'elle donne"
-            } else {
-                "cette ancre ne désigne aucun bloc de la page : relis la page avec ses ancres, \
-                 puis vise le bloc par l'alias qu'elle donne"
-            },
+            "cette ancre ne désigne aucun bloc de la page : relis la page avec ses ancres, puis \
+             vise le bloc par l'alias qu'elle donne",
+        )
+    }
+
+    /// `422 ambiguous_anchor` : l'ancre désigne plusieurs blocs de la page, comme le refus d'une
+    /// opération (`from` de `fetch`, Ruling R1522 ; R1505 levé).
+    pub fn ambiguous_anchor() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::AmbiguousAnchor,
+            "cette ancre désigne plusieurs blocs de la page (un bloc arrivé depuis ta lecture \
+             partage le début de son alias) : relis la page avec ses ancres, puis vise le bloc par \
+             l'alias qu'elle donne",
         )
     }
 

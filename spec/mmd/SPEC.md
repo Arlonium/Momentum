@@ -46,9 +46,7 @@
 - Un alias se résout au bloc de la page dont le hachage commence ainsi. Aucun : `stale_anchor` (le
   bloc n'existe plus, ou a été recréé sous un autre identifiant : relis la page). Plusieurs :
   `ambiguous_anchor` (un bloc arrivé depuis partage son début : relis la page avec ses ancres, tu
-  recevras un alias plus long). Une exception : un `from` ambigu de `fetch` répond aujourd'hui
-  `stale_anchor`, avec un message qui dit que l'ancre « désigne plusieurs blocs » ; la conduite à
-  tenir est la même (relire la page avec ses ancres).
+  recevras un alias plus long). Le `from` de `fetch` suit la même règle.
 - **L'identifiant entier d'un bloc** est accepté à la place de son alias, sauf s'il a lui-même la
   forme d'un alias : une ancre de cette forme ne se lit que comme un alias.
 - `<block>` écrit toujours le vrai identifiant du bloc, même avec les ancres, et ne reçoit pas

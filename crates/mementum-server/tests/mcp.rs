@@ -2132,6 +2132,113 @@ async fn a_search_while_the_index_lags_says_so() {
     }
 }
 
+/// Lot 5, correction groupée (défaut D4 de la passe de fin, Ruling R1523) : `fetch` d'un titre de
+/// page, ou de l'adresse de la ressource `mementum://spec/mmd`, dit ce que l'outil prend, et où
+/// aller : `search` pour un titre, `resources/read` pour la ressource ; sans recopier le nom.
+#[tokio::test]
+async fn fetch_says_what_it_takes_for_a_title_or_a_resource() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    page_with(&team, "Projet de Pro", "Un texte.\n").await;
+    let (token, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Read,
+        TokenScope::All,
+        false,
+    )
+    .await;
+    for era in ERAS {
+        let mcp = Mcp::new(&t, &token, era);
+        mcp.open().await;
+        let refused = mcp.call("fetch", json!({ "id": "Projet de Pro" })).await;
+        refused.refused("not_found");
+        for said in ["aucune page ni aucun espace", "search", "workspace_info"] {
+            assert!(refused.head().contains(said), "{said} : {}", refused.text);
+        }
+        assert!(!refused.text.contains("Projet de Pro"), "{}", refused.text);
+        let refused = mcp
+            .call("fetch", json!({ "id": "mementum://spec/mmd" }))
+            .await;
+        refused.refused("invalid_arguments");
+        assert!(
+            refused.head().contains("resources/read"),
+            "{}",
+            refused.text
+        );
+        // Témoin : le nom d'un espace ouvert rend son plan.
+        mcp.call("fetch", json!({ "id": "Équipe" })).await.ok();
+    }
+}
+
+/// Lot 5, correction groupée (défaut I8 de la relecture finale, R1505 levé, Ruling R1522) : un
+/// `from` de `fetch` qui désigne plusieurs blocs répond `ambiguous_anchor`, comme une opération,
+/// par la route comme par l'outil. Deux blocs dont les alias partagent leurs quatre premiers
+/// caractères : lu seul, le premier a l'alias court ; le second arrivé, cet alias en désigne deux.
+#[tokio::test]
+async fn an_ambiguous_from_answers_ambiguous_anchor() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let mut seen = std::collections::HashMap::new();
+    let (first, second) = (0..)
+        .find_map(|n| {
+            let id = format!("x{n}");
+            let alias = mementum_crdt::anchors::standalone_alias(&id).unwrap();
+            seen.insert(alias[..5].to_string(), id.clone())
+                .map(|other| (other, id))
+        })
+        .unwrap();
+    let page = page_with(&team, "Ancres", &format!("Un ^{first}\n")).await;
+    let short = mementum_crdt::anchors::standalone_alias(&first).unwrap()[..5].to_string();
+    let (token, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Read,
+        TokenScope::All,
+        false,
+    )
+    .await;
+    let mcp = Mcp::new(&t, &token, Era::V2026);
+    let read = mcp
+        .call("fetch", json!({ "id": page.to_string(), "anchors": true }))
+        .await;
+    assert!(
+        read.content().unwrap().contains(&format!("^{short}")),
+        "lu seul, l'alias court : {}",
+        read.text
+    );
+    team.olga
+        .put_mmd(
+            &page.to_string(),
+            format!("Un ^{first}\n\nDeux ^{second}\n"),
+        )
+        .await
+        .assert_status(StatusCode::NO_CONTENT);
+    let refused = mcp
+        .call(
+            "fetch",
+            json!({ "id": page.to_string(), "from": short.clone() }),
+        )
+        .await;
+    refused.refused("ambiguous_anchor");
+    let route = t
+        .send(with_bearer(
+            Request::get(format!("/api/v1/pages/{page}/document?from={short}"))
+                .body(Body::empty())
+                .unwrap(),
+            &token,
+        ))
+        .await;
+    route.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "ambiguous_anchor");
+    // Témoin : un alias qui ne désigne rien reste `stale_anchor`.
+    mcp.call(
+        "fetch",
+        json!({ "id": page.to_string(), "from": "baaaaaaaaaaaa" }),
+    )
+    .await
+    .refused("stale_anchor");
+}
+
 /// `fetch` dit une page à la corbeille, et ramène un `limit` sous 1 024 octets à 1 024 : la même
 /// tranche qu'à 1 024.
 #[tokio::test]
