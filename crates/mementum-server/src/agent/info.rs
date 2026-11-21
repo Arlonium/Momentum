@@ -126,8 +126,9 @@ fn named(members: Vec<mementum_store::Member>) -> Vec<MemberName> {
 
 /// Le plan d'un espace tel que l'appel le voit (l'outil `fetch` d'un espace, et `workspace_info`
 /// d'un espace nommé) : les pages hors corbeille, dans l'ordre de l'arbre, chacune avec sa
-/// profondeur (0 à la racine de ce que l'appel voit) et sa section, jusqu'à `max_depth` et `max`
-/// lignes au plus ; vrai s'il y en a d'autres. Mené par la route de l'arbre (`GET …/tree`).
+/// profondeur (0 à la racine de ce que l'appel voit) et sa section (pour une page de la racine,
+/// celle de la barre latérale du compte, R1557), jusqu'à `max_depth` et `max` lignes au plus ;
+/// vrai s'il y en a d'autres. Mené par la route de l'arbre (`GET …/tree`).
 pub(crate) async fn space_plan(
     state: &AppState,
     user: &AuthUser,
@@ -175,6 +176,26 @@ pub(crate) async fn space_plan(
                 stack.extend(children.iter().rev().map(|c| (depth + 1, *c)));
             } else {
                 more = true;
+            }
+        }
+    }
+    // La section d'une page de la racine est celle de la barre latérale du compte (Ruling R1557) :
+    // c'est sur elle que `move` juge une sœur (R1548), et un jeton à racines, qui voit toutes ses
+    // pages dans « Partagé », ne saurait pas sinon laquelle choisir. Rien hors de sa portée : les
+    // pages du plan sont celles qu'il voit.
+    let roots: Vec<(usize, Uuid)> = out
+        .iter()
+        .enumerate()
+        .filter(|(_, (depth, _, _))| *depth == 0)
+        .filter_map(|(i, (_, page, _))| Uuid::parse_str(&page.id).ok().map(|id| (i, id)))
+        .collect();
+    if !roots.is_empty() {
+        let space = state.space_access(user, space_id).await?;
+        let ids: Vec<Uuid> = roots.iter().map(|(_, id)| *id).collect();
+        let sections = state.sidebar_sections(user, &space, space_id, &ids).await?;
+        for ((i, _), section) in roots.into_iter().zip(sections) {
+            if let Some(section) = section {
+                out[i].2 = section.into();
             }
         }
     }

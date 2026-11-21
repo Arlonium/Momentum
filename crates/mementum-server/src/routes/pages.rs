@@ -51,7 +51,6 @@
 //! entre-temps, et le client réessaierait.
 
 use std::cmp::Reverse;
-use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
@@ -423,7 +422,7 @@ async fn planned_move(
     user: &AuthUser,
     node: &Node,
     access: &NodeAccess,
-    space: &Arc<SpaceAccess>,
+    space: &SpaceAccess,
     body: &UpdatePage,
 ) -> Result<Option<Move>, ApiError> {
     if body.parent_id.is_none() && body.after_id.is_none() {
@@ -438,19 +437,20 @@ async fn planned_move(
         None => node.parent_id,
         Some(_) => named_parent.map(|(parent, _)| parent),
     };
-    // La place parmi les enfants de ce parent, lue après les droits ([`sibling_after`]).
-    let shown_under = named_parent.map(|(parent, _)| parent);
-    let place = async || {
+    // La place parmi les enfants de ce parent, lue après les droits ([`sibling_after`]), dans la
+    // section où la page se rangera.
+    let place = async |arrival: Arrival| {
         Ok::<_, ApiError>(Place {
             parent_id: parent,
-            after: sibling_after(state, user, space, node, shown_under, &body.after_id).await?,
+            after: sibling_after(state, user, space, node, arrival, &body.after_id).await?,
             from: Some(node.parent_id),
         })
     };
     if parent == node.parent_id {
         permit(access, Action::Reorder)?;
+        let under = named_parent.map_or(node.id, |(parent, _)| parent);
         return Ok(Some(Move {
-            place: place().await?,
+            place: place(Arrival::SectionOf(under)).await?,
             root_grant: None,
             changes_parent: false,
             access: Some(*access),
@@ -459,7 +459,7 @@ async fn planned_move(
     permit(access, Action::Move)?;
     // Ce que la page devient pour la personne : ce que lui donnent les lignes posées sur la
     // page, et ce qu'elle hérite du nouveau parent.
-    let (root_grant, access) = match named_parent {
+    let (root_grant, access, arrival) = match named_parent {
         Some((parent, under)) => {
             permit(&under, Action::CreateChild)?;
             let role = at_least(space, Role::Guest)?;
@@ -473,45 +473,56 @@ async fn planned_move(
                 barred: under.barred,
                 capped_from: under.capped_from,
             };
-            (None, Some(access))
+            (None, Some(access), Arrival::SectionOf(parent))
         }
         // Pas de parent nommé, et un autre parent que le sien : la racine. Il faut ce qu'il
         // faut pour y créer une page. La page y garde son accès général (Ruling R94), et la
         // personne y a l'accès complet (Ruling R82) : c'est la transaction du déplacement qui
         // décide des lignes de la page, et qui les rend.
         None => {
-            at_least(space, Role::Member)?;
+            let role = at_least(space, Role::Member)?;
             let grant = Grant {
                 subject: Subject::User(user.id),
                 level: Level::Full,
             };
-            (Some(grant), None)
+            (Some(grant), None, Arrival::AtRoot(role))
         }
     };
     Ok(Some(Move {
-        place: place().await?,
+        place: place(arrival).await?,
         root_grant,
         changes_parent: true,
         access,
     }))
 }
 
-/// Le frère après lequel ranger `node` (`after_id` du corps : absent, en dernier ; `null`, en tête),
-/// sous la page parente nommée `shown_under` ou sous la sienne. Un frère que la personne ne voit
-/// pas est refusé comme un id inconnu (`422 invalid_after`) ; un frère d'une autre section de sa
-/// barre latérale aussi (recette du lot 5, F1, Ruling R1548) : à la racine, les pages des trois
-/// sections sont sœurs pour le store, si bien qu'une page de « Privé » rangée après une page
-/// d'« Espace » changeait de place parmi toutes les pages de la racine sans bouger dans aucune
-/// section, et la route répondait comme d'un déplacement fait. La section est celle de la barre
-/// latérale du compte, pas celle d'un jeton à racines, qui voit toutes les siennes dans
-/// « Partagé ». Sous une même page parente visible, toutes les pages ont la section de leur plus
-/// haut ancêtre visible : la règle ne refuse rien de plus que le store.
+/// Où la page se rangera dans la barre latérale, une fois déplacée : la section d'une page qu'on
+/// y voit (la sienne, ou celle de sa nouvelle page parente), ou celle qu'elle prendra à la racine.
+#[derive(Clone, Copy)]
+enum Arrival {
+    SectionOf(Uuid),
+    /// Passée à la racine par qui a ce rôle (Ruling R1559).
+    AtRoot(Role),
+}
+
+/// Le frère après lequel ranger `node` (`after_id` du corps : absent, en dernier ; `null`, en tête).
+/// Un frère que la personne ne voit pas est refusé comme un id inconnu (`422 invalid_after`) ; un
+/// frère d'une autre section de sa barre latérale que celle où la page se rangera (`arrival`)
+/// aussi (recette du lot 5, F1, Ruling R1548) : à la racine, les pages des trois sections sont
+/// sœurs pour le store, si bien qu'une page de « Privé » rangée après une page d'« Espace »
+/// changeait de place parmi toutes les pages de la racine sans bouger dans aucune section, et la
+/// route répondait comme d'un déplacement fait. La section est celle de la barre latérale du
+/// compte (`AppState::sidebar_sections`), pas celle d'un jeton à racines, qui voit toutes les
+/// siennes dans « Partagé ». Une page passée à la racine se juge sur la section qu'elle y prendra,
+/// pas sur celle qu'elle quitte (`AppState::section_at_root`, Ruling R1559). Sous une même page
+/// parente visible, toutes les pages ont la section de leur plus haut ancêtre visible : la règle
+/// ne refuse rien de plus que le store.
 async fn sibling_after(
     state: &AppState,
     user: &AuthUser,
-    space: &Arc<SpaceAccess>,
+    space: &SpaceAccess,
     node: &Node,
-    shown_under: Option<Uuid>,
+    arrival: Arrival,
     after_id: &Option<Option<String>>,
 ) -> Result<Option<Sibling>, ApiError> {
     let raw = match after_id {
@@ -520,10 +531,23 @@ async fn sibling_after(
         Some(Some(raw)) => raw,
     };
     let (sibling, _) = seen_in(space, raw).ok_or_else(ApiError::invalid_after)?;
-    let sidebar = state.sidebar_access(user, space, node.space_id).await?;
-    let section = |id| sidebar.node(id).map(|access| access.section);
-    let wanted = section(shown_under.unwrap_or(node.id));
-    if wanted.is_none() || section(sibling) != wanted {
+    let (wanted, theirs) = match arrival {
+        Arrival::SectionOf(page) => {
+            let sections = state
+                .sidebar_sections(user, space, node.space_id, &[page, sibling])
+                .await?;
+            (sections[0], sections[1])
+        }
+        Arrival::AtRoot(role) => {
+            let chain = state.store.chain_grants(node.id).await?;
+            let wanted = AppState::section_at_root(node.id, &chain, user, role);
+            let sections = state
+                .sidebar_sections(user, space, node.space_id, &[sibling])
+                .await?;
+            (wanted, sections[0])
+        }
+    };
+    if wanted.is_none() || theirs != wanted {
         return Err(ApiError::invalid_after());
     }
     Ok(Some(Sibling::Node(sibling)))

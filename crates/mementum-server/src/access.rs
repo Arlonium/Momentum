@@ -71,7 +71,9 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use mementum_acl::{Action, Grant, Level, NodeAccess, Role, SpaceAccess, TreeNode};
+use mementum_acl::{
+    Action, Grant, Level, NodeAccess, Role, Section, SpaceAccess, Subject, TreeNode,
+};
 use mementum_store::{Authorship, Node};
 use uuid::Uuid;
 
@@ -424,24 +426,71 @@ impl AppState {
         }))
     }
 
-    /// Ce que voit le compte de l'appel dans l'espace, sans la restriction d'un jeton : `space`
-    /// lui-même pour une session ; pour un jeton, le calcul de son compte. Pour dire où une page se
-    /// range dans la barre latérale de la personne (la section d'une page de la racine : un jeton à
-    /// racines voit toutes les siennes dans « Partagé »), jamais pour permettre : les droits d'un
-    /// jeton restent ceux de `space` (recette du lot 5, F1, Ruling R1548).
-    pub(crate) async fn sidebar_access(
+    /// La section de la barre latérale du compte de l'appel où se range chacune des pages `ids`,
+    /// sans la restriction d'un jeton (un jeton à racines voit toutes les siennes dans
+    /// « Partagé ») : pour dire où une page se range (recette du lot 5, F1, Rulings R1548, R1557)
+    /// et l'écrire dans le plan d'un espace, jamais pour permettre. `None` pour une page que la vue
+    /// de l'appel (`space`, restreinte pour un jeton) ne voit pas : rien hors de sa portée. Le calcul
+    /// non restreint du compte ne sort pas d'ici.
+    pub(crate) async fn sidebar_sections(
         &self,
         user: &AuthUser,
-        space: &Arc<SpaceAccess>,
+        space: &SpaceAccess,
         space_id: Uuid,
-    ) -> Result<Arc<SpaceAccess>, ApiError> {
+        ids: &[Uuid],
+    ) -> Result<Vec<Option<Section>>, ApiError> {
+        let seen = |id: &Uuid| space.node(*id).map(|access| access.section);
         if user.token().is_none() {
-            return Ok(Arc::clone(space));
+            return Ok(ids.iter().map(seen).collect());
         }
-        Ok(self
-            .account_access(user, space_id)
-            .await?
-            .map_or_else(|| Arc::clone(space), |(account, _)| account))
+        let account = self.account_access(user, space_id).await?;
+        Ok(ids
+            .iter()
+            .map(|id| {
+                seen(id)?;
+                match &account {
+                    Some((account, _)) => account.node(*id).map(|access| access.section),
+                    None => None,
+                }
+            })
+            .collect())
+    }
+
+    /// La section de la barre latérale où se rangera, pour `user` de rôle `role`, la page `page`
+    /// passée à la racine (Ruling R1559) : celle des lignes qu'elle y portera, décidées par la
+    /// transaction du déplacement (`root_lines` du store) : ses lignes propres, la plus forte ligne
+    /// `members` de son ancienne chaîne (Ruling R94), et l'accès complet de qui la déplace (Ruling
+    /// R82). `chain` : les lignes de la page et de ses ancêtres (`Store::chain_grants`). Une
+    /// sous-page « Partagé » dont les lignes nommées sont sur l'ancienne page parente arrive dans
+    /// « Privé ».
+    pub(crate) fn section_at_root(
+        page: Uuid,
+        chain: &[(Uuid, Grant)],
+        user: &AuthUser,
+        role: Role,
+    ) -> Option<Section> {
+        let mut lines: Vec<Grant> = chain
+            .iter()
+            .filter(|(on, grant)| *on == page && grant.subject != Subject::User(user.id))
+            .map(|(_, grant)| *grant)
+            .filter(|grant| grant.subject != Subject::Members)
+            .collect();
+        if let Some(level) = chain
+            .iter()
+            .filter(|(_, grant)| grant.subject == Subject::Members)
+            .map(|(_, grant)| grant.level)
+            .max()
+        {
+            lines.push(Grant {
+                subject: Subject::Members,
+                level,
+            });
+        }
+        lines.push(Grant {
+            subject: Subject::User(user.id),
+            level: Level::Full,
+        });
+        Self::own_access(&lines, user, role).map(|access| access.section)
     }
 
     /// Le calcul du compte de `user`, `account`, fait à la révision `rev`, restreint au jeton

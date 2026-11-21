@@ -1846,8 +1846,10 @@ async fn overtaken_patch_naming_the_old_parent_becomes_a_move() {
 ///
 /// La requête a bien décidé avant l'écriture concurrente : elle range la page après une page
 /// de racine que Mona ne voit plus ensuite. Arrivée après, elle aurait reçu `422
-/// invalid_after`. Ce témoin est de la section où Mona voit la page (« Espace » sous une ligne
-/// `members`, « Partagé » sinon) : une sœur d'une autre section est refusée (Ruling R1548).
+/// invalid_after`. Ce témoin est de la section où la page arrivera à la racine, telle que la route
+/// la juge avant l'écriture concurrente (« Espace » sous une ligne `members` ; « Privé » sinon, les
+/// lignes nommées de l'ancienne page parente ne la suivant pas) : une sœur d'une autre section est
+/// refusée (Rulings R1548, R1559).
 async fn root_move_overtaken(
     above: impl FnOnce(&Team<'_>) -> Vec<(Subject, Level)>,
     meanwhile: impl FnOnce(&Team<'_>, Uuid) -> String,
@@ -1862,12 +1864,14 @@ async fn root_move_overtaken(
         .any(|(subject, _)| *subject == Subject::Members);
     let parent = team.page(None, "Parent", &above).await;
     let page = team.page(Some(parent), "Page", &[]).await;
-    let through = if in_space {
-        Subject::Members
+    let (seen_before, through) = if in_space {
+        (
+            vec![user(olga, Level::Full), members(Level::Read)],
+            Subject::Members,
+        )
     } else {
-        Subject::User(mona.id)
+        (vec![user(mona, Level::Read)], Subject::User(mona.id))
     };
-    let seen_before = [user(olga, Level::Full), (through, Level::Read)];
     let witness = team.page(None, "Témoin", &seen_before).await;
     let unseen = format!("DELETE FROM acl WHERE node_id = '{witness}' AND subject = '{through}'");
 
@@ -1887,6 +1891,61 @@ async fn root_move_overtaken(
         text(&moved, "level").to_string(),
         text(&moved, "section").to_string(),
     )
+}
+
+/// Un passage à la racine se range après une sœur de la section où la page arrivera, pas de celle
+/// qu'elle quitte (Ruling R1559, qui corrige R1548). La sous-page d'une page partagée entre Olga et
+/// Mona est dans « Partagé » ; passée à la racine, elle perd les lignes de son ancienne page parente,
+/// Mona y a l'accès complet, et elle arrive dans « Privé ». Après une page « Partagé » : `422
+/// invalid_after`, rien d'écrit ; après une page « Privé » : elle y passe, dans « Privé ».
+#[tokio::test]
+async fn a_move_to_the_root_is_judged_on_the_section_it_arrives_in() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (olga, mona) = (&team.olga, &team.mona);
+    let parent = team
+        .page(
+            None,
+            "D'Olga et Mona",
+            &[user(olga, Level::Full), user(mona, Level::Full)],
+        )
+        .await;
+    let page = team.page(Some(parent), "Sous-page", &[]).await;
+    let shared = team
+        .page(
+            None,
+            "Partagée",
+            &[user(olga, Level::Full), user(mona, Level::Full)],
+        )
+        .await;
+    let private = team.page(None, "À Mona", &[user(mona, Level::Full)]).await;
+    let id = page.to_string();
+    let seen = mona.browser.get(&format!("/api/v1/pages/{id}")).await;
+    seen.assert_status(StatusCode::OK);
+    assert_eq!(text(&seen.json(), "section"), "shared");
+
+    let before = team.store.get_node(page).await.unwrap().expect("la page");
+    mona.patch(
+        &id,
+        json!({ "parentId": null, "afterId": shared.to_string() }),
+    )
+    .await
+    .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_after");
+    assert_eq!(
+        team.store.get_node(page).await.unwrap().expect("la page"),
+        before
+    );
+
+    let moved = mona
+        .patch(
+            &id,
+            json!({ "parentId": null, "afterId": private.to_string() }),
+        )
+        .await;
+    moved.assert_status(StatusCode::OK);
+    let moved = moved.json();
+    assert!(moved["parentId"].is_null());
+    assert_eq!(text(&moved, "section"), "private");
 }
 
 /// La réponse d'un passage à la racine dit ce que la transaction a écrit, pas ce que la route
