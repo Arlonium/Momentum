@@ -56,20 +56,20 @@ pub(crate) async fn create_pages(
     let user = &caller.user;
     let parent = match request.parent_id.as_deref() {
         None => None,
-        Some(raw) => {
-            if request.section.is_some() {
-                return Err(ApiError::new(
-                    StatusCode::UNPROCESSABLE_ENTITY,
-                    ErrorCode::InvalidRequest,
-                    "« section » ne se donne qu'à la racine : une sous-page hérite des accès de sa \
-                     page parente (retirer « section », ou « parentId »)",
-                ));
-            }
-            Some(Uuid::parse_str(raw).map_err(|_| ApiError::invalid_parent())?)
-        }
+        Some(raw) => Some(Uuid::parse_str(raw).map_err(|_| ApiError::invalid_parent())?),
     };
     let section = request.section.unwrap_or_default();
+    // La destination d'abord (`403` sous le niveau), puis la forme du corps (`422`) : l'ordre des
+    // refus (tour de correction de S7).
     destination(state, user, space_id, parent, section).await?;
+    if parent.is_some() && request.section.is_some() {
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidRequest,
+            "« section » ne se donne qu'à la racine : une sous-page hérite des accès de sa page \
+             parente (retirer « section », ou « parentId »)",
+        ));
+    }
     if request.pages.is_empty() || request.pages.len() > MAX_BATCH_PAGES {
         return Err(ApiError::too_many_pages(MAX_BATCH_PAGES));
     }
@@ -88,7 +88,7 @@ pub(crate) async fn create_pages(
         let markdown = page.markdown.unwrap_or_default();
         let doc = state
             .mmd_reads
-            .run(user.id, {
+            .run(user.party(), {
                 let running = Arc::clone(&running);
                 move || {
                     let doc = built_doc(&markdown, forbid_media).map_err(|e| e.with("index", i))?;
@@ -115,6 +115,10 @@ pub(crate) async fn create_pages(
     let state = state.clone();
     let LiveCaller { user, proof } = caller.clone();
     let token = user.token().map(|grant| grant.token_id);
+    // La portée d'un jeton de pages, relue dans la transaction (tour de correction de S7).
+    let token_roots = user
+        .token()
+        .and_then(|grant| grant.roots().map(<[Uuid]>::to_vec));
     to_completion(async move {
         // La place du compte est rendue quand cette tâche finit, client parti ou non.
         let _running = running;
@@ -129,6 +133,7 @@ pub(crate) async fn create_pages(
                 grants: now.grants,
                 created_by: user.id,
                 token,
+                token_roots: token_roots.clone(),
                 pages,
             };
             match state.store.create_pages(&new, now_ms()).await {

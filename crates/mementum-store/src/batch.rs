@@ -32,6 +32,10 @@ pub struct NewPages {
     /// Le jeton d'API par lequel il crée, relu vivant dans la transaction ; `None` pour une
     /// session.
     pub token: Option<Uuid>,
+    /// Les pages de la portée d'un jeton de portée « pages » (ses racines) : la page parente doit
+    /// être l'une d'elles, ou sous l'une d'elles, dans la transaction ; aucune page à la racine.
+    /// `None` : une session, ou un jeton de tout un espace.
+    pub token_roots: Option<Vec<Uuid>>,
     pub pages: Vec<NewPageDoc>,
 }
 
@@ -70,6 +74,10 @@ impl Store {
         let author = new.created_by.to_string();
         let parent = new.parent_id.map(|p| p.to_string());
         let mut tx = self.write_in(Lane::Copies).await?;
+        #[cfg(feature = "test-hooks")]
+        if self.copies_to_refuse.take_one() {
+            return Err(StoreError::NotFound);
+        }
         sqlx::query("SELECT 1 FROM spaces WHERE id = ?")
             .bind(&space)
             .fetch_optional(&mut **tx)
@@ -87,6 +95,30 @@ impl Store {
             .is_some();
             if !live {
                 return Err(StoreError::TokenRevoked);
+            }
+        }
+        // La portée d'un jeton de pages (Rulings R1219, R1574) : la page parente sous une de ses
+        // racines, lue par les parents de l'arbre (une page déplacée hors de la portée pendant
+        // l'attente du tour d'écriture est refusée ; la remontée des parents visibles est celle de
+        // la route, juste avant).
+        if let Some(roots) = &new.token_roots {
+            let Some(parent) = &parent else {
+                return Err(StoreError::Stale);
+            };
+            let chain: Vec<String> = sqlx::query_scalar(
+                "WITH RECURSIVE up(id, parent, depth) AS ( \
+                     SELECT id, parent_id, 0 FROM nodes WHERE id = ?1 \
+                     UNION ALL \
+                     SELECT n.id, n.parent_id, up.depth + 1 FROM nodes n \
+                     JOIN up ON n.id = up.parent WHERE up.depth < 10000 \
+                 ) SELECT id FROM up",
+            )
+            .bind(parent)
+            .fetch_all(&mut **tx)
+            .await?;
+            let roots: Vec<String> = roots.iter().map(Uuid::to_string).collect();
+            if !chain.iter().any(|id| roots.contains(id)) {
+                return Err(StoreError::Stale);
             }
         }
         let role = role_of(&mut tx, &space, &author)

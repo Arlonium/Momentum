@@ -456,6 +456,19 @@ fn open_page_routes(id: Uuid) -> Vec<(&'static str, Request<Body>)> {
             "GET fichier",
             bare(Method::GET, &format!("{page}/files/{}", Uuid::now_v7())),
         ),
+        // Les routes des agents (Task S7).
+        (
+            "GET document",
+            bare(Method::GET, &format!("{page}/document")),
+        ),
+        (
+            "POST opérations",
+            json_request(
+                Method::POST,
+                &format!("{page}/operations"),
+                &json!({ "operations": [{ "op": "insert", "position": "end", "markdown": "Plus\n" }] }),
+            ),
+        ),
     ]
 }
 
@@ -506,6 +519,20 @@ async fn a_page_out_of_scope_is_indistinguishable_from_missing() {
             missing.push(refusal(&unknown_reply));
         }
         assert_eq!(seen, missing);
+    }
+    // La création en lot dans un espace hors de la portée : la réponse d'un espace inconnu.
+    let batch = |space: Uuid| {
+        json_request(
+            Method::POST,
+            &format!("/api/v1/spaces/{space}/pages/batch"),
+            &json!({ "pages": [{ "title": "Neuve" }] }),
+        )
+    };
+    for token in [&by_pages, &by_space] {
+        let hidden = t.send(with_bearer(batch(elsewhere), token)).await;
+        let unknown = t.send(with_bearer(batch(Uuid::now_v7()), token)).await;
+        assert_eq!(hidden.status, StatusCode::NOT_FOUND, "lot ailleurs");
+        assert_eq!(refusal(&hidden), refusal(&unknown));
     }
     // La session de Mona voit la page sœur : c'est bien le jeton qui la cache.
     team.mona

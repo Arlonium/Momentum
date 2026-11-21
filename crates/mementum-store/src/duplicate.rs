@@ -109,7 +109,7 @@ impl CopiesToRefuse {
     }
 
     /// Vrai, et une de moins à refuser, s'il en reste.
-    fn take_one(&self) -> bool {
+    pub(crate) fn take_one(&self) -> bool {
         let mut left = self.left();
         let any = *left > 0;
         *left = left.saturating_sub(1);

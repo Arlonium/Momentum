@@ -1337,6 +1337,86 @@ async fn changing_the_password_counts_the_tokens_that_lived() {
     assert_eq!(f.store.set_password(alice.id, "toujours").await.unwrap(), 1);
 }
 
+/// Tour de correction de S7 : un lot créé par un jeton de portée « pages » relit, dans sa
+/// transaction, que la page parente est sous une racine de la portée. Une page sortie de la portée
+/// pendant l'attente du tour d'écriture (déplacée ailleurs) fait refuser le lot (`Stale`), rien
+/// d'écrit ; à la racine de l'espace, jamais. Témoin : sans portée, le même lot passe.
+#[tokio::test]
+async fn a_batch_of_a_scoped_token_reads_its_scope_again() {
+    let f = fresh().await;
+    let olga = account(&f.store, "olga").await;
+    f.store
+        .add_member(f.space.id, olga.id, Role::Owner)
+        .await
+        .unwrap();
+    // Deux pages ouvertes aux membres : Olga peut créer sous chacune.
+    let open = |title: &str| {
+        let mut node = page(&f.space, None, None, title);
+        node.grants = vec![mementum_acl::Grant {
+            subject: mementum_acl::Subject::Members,
+            level: mementum_acl::Level::Full,
+        }];
+        node
+    };
+    let root = f
+        .store
+        .create_node(open("Racine de la portée"))
+        .await
+        .unwrap()
+        .id;
+    let elsewhere = f.store.create_node(open("Ailleurs")).await.unwrap().id;
+    let inside = f
+        .store
+        .create_node(page(&f.space, Some(root), None, "Dedans"))
+        .await
+        .unwrap()
+        .id;
+    let token = common::new_token(&f.db, olga.id).await;
+    let batch = |parent: Option<Uuid>, roots: Option<Vec<Uuid>>| mementum_store::NewPages {
+        space_id: f.space.id,
+        parent_id: parent,
+        grants: Vec::new(),
+        created_by: olga.id,
+        token: Some(token),
+        token_roots: roots,
+        pages: vec![mementum_store::NewPageDoc {
+            id: Uuid::now_v7(),
+            title: "Neuve".to_string(),
+            doc: Vec::new(),
+        }],
+    };
+    let scope = Some(vec![root]);
+    let count = || int(&f.db, "SELECT COUNT(*) FROM nodes WHERE title = 'Neuve'");
+    // Sous la page de la portée, et sous une de ses sous-pages : écrit.
+    f.store
+        .create_pages(&batch(Some(inside), scope.clone()), T0)
+        .await
+        .unwrap();
+    assert_eq!(count().await, 1);
+    // La sous-page sortie de la portée : refusé, rien d'écrit.
+    f.store
+        .move_node(inside, Some(elsewhere), None, None)
+        .await
+        .unwrap();
+    for parent in [Some(inside), Some(elsewhere), None] {
+        let refused = f
+            .store
+            .create_pages(&batch(parent, scope.clone()), T0)
+            .await;
+        assert!(
+            matches!(refused, Err(StoreError::Stale)),
+            "{parent:?} : {refused:?}"
+        );
+    }
+    assert_eq!(count().await, 1);
+    // Témoin : sans portée (une session, un jeton de tout l'espace), le lot passe.
+    f.store
+        .create_pages(&batch(Some(inside), None), T0)
+        .await
+        .unwrap();
+    assert_eq!(count().await, 2);
+}
+
 /// Ruling R1607 (R1381 récrit, tour de correction de S7) : une écriture au journal au nom d'un
 /// jeton n'est admise que si le jeton a une ligne vivante ; un jeton inconnu (sans ligne) est
 /// refusé comme un jeton révoqué, rien d'écrit. Témoin : le jeton vivant écrit.

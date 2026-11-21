@@ -793,3 +793,71 @@ async fn sqlx_dump(db: &std::path::Path, token: &str) -> String {
         .collect::<Vec<_>>()
         .join("\n")
 }
+
+/// Tour de correction de S7, sur le modèle de `a_copy_refused_at_its_turn_is_tried_three_times` :
+/// un lot refusé à son tour d'écriture (ce sur quoi il a décidé ne tient plus) est repris ; deux
+/// refus, il s'écrit en entier ; trois, `409 page_moved`, rien d'écrit.
+#[tokio::test]
+async fn a_batch_refused_at_its_turn_is_tried_three_times() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let (token, _) = token_of(&t, team.olga.id, TokenLevel::Edit).await;
+    let uri = format!("/api/v1/spaces/{}/pages/batch", team.space);
+    t.store.refuse_next_copies(2);
+    let created = json_by(
+        &t,
+        &token,
+        Method::POST,
+        &uri,
+        json!({ "section": "space", "pages": [
+            { "title": "Reprise", "markdown": "Texte repris\n" },
+            { "title": "Reprise bis" },
+        ]}),
+    )
+    .await;
+    created.assert_status(StatusCode::CREATED);
+    let pages = created.json();
+    let one = pages[0]["id"].as_str().unwrap();
+    assert_eq!(team.olga.get_mmd(one).await.text(), "Texte repris\n");
+    let titles = || async {
+        tree_nodes(&team.olga.browser, team.space)
+            .await
+            .into_iter()
+            .filter_map(|n| n["title"].as_str().map(str::to_string))
+            .collect::<Vec<_>>()
+    };
+    let now = titles().await;
+    assert_eq!(now.iter().filter(|t| *t == "Reprise").count(), 1);
+    assert_eq!(now.iter().filter(|t| *t == "Reprise bis").count(), 1);
+    t.store.refuse_next_copies(3);
+    json_by(
+        &t,
+        &token,
+        Method::POST,
+        &uri,
+        json!({ "section": "space", "pages": [{ "title": "Jamais" }] }),
+    )
+    .await
+    .assert_error(StatusCode::CONFLICT, "page_moved");
+    assert!(!titles().await.iter().any(|t| t == "Jamais"));
+}
+
+/// Tour de correction de S7 : la destination d'un lot est jugée avant la forme de son corps ; un
+/// jeton qui ne peut pas créer sous la page reçoit `403`, même si son corps nomme aussi une
+/// section ; celui qui peut, `422`.
+#[tokio::test]
+async fn a_batch_judges_its_destination_before_its_section() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let parent = page_with(&team, "Parente", "Un\n").await;
+    let uri = format!("/api/v1/spaces/{}/pages/batch", team.space);
+    let body = json!({ "parentId": parent.to_string(), "section": "space", "pages": [{ "title": "Neuve" }] });
+    let (reader, _) = token_of(&t, team.olga.id, TokenLevel::Read).await;
+    json_by(&t, &reader, Method::POST, &uri, body.clone())
+        .await
+        .assert_error(StatusCode::FORBIDDEN, "forbidden");
+    let (writer, _) = token_of(&t, team.olga.id, TokenLevel::Edit).await;
+    json_by(&t, &writer, Method::POST, &uri, body)
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "invalid_request");
+}
