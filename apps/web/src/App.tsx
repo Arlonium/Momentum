@@ -188,7 +188,7 @@ export function App() {
     content = me.spaces.some((s) => s.id === settingsOf) ? (
       <SpaceSettings key={settingsOf} spaceId={settingsOf} />
     ) : (
-      <Message title="Chargement…" />
+      <Message title="Chargement…" transient />
     );
   } else if (schema.error) {
     // Au premier chargement seulement : sans la version du serveur, rien ne peut s'ouvrir.
@@ -199,7 +199,7 @@ export function App() {
       </Message>
     );
   } else if (!schema.loaded) {
-    content = <Message title="Chargement…" />;
+    content = <Message title="Chargement…" transient />;
   } else if (route.name === "home" && space === null) {
     content = (
       <Message title="Tu n'as aucun espace">
@@ -217,7 +217,7 @@ export function App() {
     );
   } else if (route.name === "home" || (inSpace && atSpace === null)) {
     // En route vers un espace du compte.
-    content = <Message title="Chargement…" />;
+    content = <Message title="Chargement…" transient />;
   } else if (route.name === "trash" && atSpace !== null) {
     content = (
       <TrashView
@@ -292,7 +292,7 @@ export function App() {
       </Message>
     );
   } else if (activeId !== null && looked?.state !== "missing") {
-    content = <Message title="Chargement…" />;
+    content = <Message title="Chargement…" transient />;
   } else {
     content = (
       <Message title="Page introuvable">

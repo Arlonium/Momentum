@@ -25,6 +25,7 @@ import {
   createPage,
   expectSignedInAs,
   firstSpace,
+  getMe,
   getMmd,
   guestOf,
   hideSyncClosures,
@@ -291,6 +292,38 @@ test("a_line_whose_access_was_just_withdrawn_opens_on_a_refusal", async ({ brows
   await expect(p.locator("main")).not.toContainText(shared.title);
   await expect(p.locator(".mm-editor")).toHaveCount(0);
   expect(await focusOnBody(p)).toBe(false);
+});
+
+test("a_guest_who_loses_his_only_access_finds_the_focus_on_the_screen_that_says_it", async ({ browser }) => {
+  // Recette B, E5 : un invité dont l'unique accès est retiré, la fenêtre ouverte, sort de l'espace.
+  // Rien n'est caché : l'onglet l'apprend par la synchro de la page, qui relit la page, puis par
+  // l'arbre et le compte. La fenêtre se ferme, l'écran dit l'accès perdu, et le focus, que ni la
+  // fenêtre ni l'entrée « Rechercher » (partie avec l'espace) ne peuvent garder, va à son titre.
+  const tag = unique();
+  const alice = await signUpAccount(`Alice ${tag}`);
+  const aliceApi = await apiAs(alice);
+  const space = await firstSpace(aliceApi);
+  const secret = word();
+  const shared = await createPage(aliceApi, { title: `Pour l'invité ${tag}` });
+  await putMmd(aliceApi, shared.id, `Le ${secret} est ici.\n`);
+  const guest = await guestOf(alice, shared.id, `Invité ${tag}`, "read");
+  const guestApi = await apiAs(guest);
+  const guestId = (await getMe(guestApi)).user.id;
+  await waitFindable(guestApi, space.id, secret, shared.id);
+
+  const p = await openPage(browser, shared.id, guest);
+  await openWindow(p);
+  expect((await ask(p, secret)).pages).toEqual([shared.id]);
+  expect((await aliceApi.delete(`/api/v1/pages/${shared.id}/access/users/${guestId}`)).status()).toBe(200);
+  expect((await guestApi.get(`/api/v1/pages/${shared.id}`)).status()).toBe(404);
+
+  await expect(accessLost(p)).toBeVisible({ timeout: 15_000 });
+  // Il n'a plus d'espace : l'entrée « Rechercher » part, et la fenêtre avec elle.
+  await expect(entry(p)).toHaveCount(0, { timeout: 15_000 });
+  await expect(win(p)).toHaveCount(0);
+  await expect(accessLost(p)).toBeFocused();
+  expect(await focusOnBody(p)).toBe(false);
+  await expect(p.locator("main")).not.toContainText(secret);
 });
 
 test("a_member_removed_from_the_space_gets_the_answer_of_an_unknown_space", async ({ browser }) => {

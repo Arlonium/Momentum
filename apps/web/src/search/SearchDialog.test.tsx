@@ -17,6 +17,7 @@ import { publishPages } from "../space/pageDirectory";
 import { recentsKey } from "../space/recents";
 import { deferred, settle, type Deferred } from "../test/hooks";
 import { page, space, unauthenticated } from "../test/pages";
+import { Message } from "../ui/Message";
 import { SearchDialog } from "./SearchDialog";
 import { SEARCH_DEBOUNCE_MS } from "./useSearch";
 
@@ -492,6 +493,36 @@ test("the_selection_of_the_editor_is_given_back_with_the_focus", async () => {
   text.remove();
   await act(async () => root.render(null));
   expect(document.activeElement).toBe(editor);
+});
+
+test("the_focus_goes_to_the_screen_that_replaced_the_page_before_the_sidebar_entry", async () => {
+  // Recette E5 : la page sous la fenêtre a été remplacée par un écran qui dit pourquoi (un
+  // `Message`), et ce qui avait le focus est parti avec elle. Son titre prend le focus, pas l'entrée
+  // de la barre latérale ; sans entrée (l'espace parti avec l'accès), jamais `body`.
+  const opener = document.createElement("button");
+  const entry = document.createElement("button");
+  entry.setAttribute("data-search-entry", "");
+  document.body.append(opener, entry);
+  opener.focus();
+  await show();
+  opener.remove();
+  const screen = document.createElement("div");
+  document.body.append(screen);
+  const screenRoot = createRoot(screen);
+  await act(async () => screenRoot.render(<Message title="Tu n'as plus accès à cette page" />));
+  entry.remove();
+  await act(async () => root.render(null));
+  expect(document.activeElement).toBe(screen.querySelector("h1"));
+  // Un écran de passage (« Chargement… ») ne le prend pas : l'entrée, s'il y en a une.
+  document.body.append(entry);
+  await act(async () => screenRoot.render(<Message title="Chargement…" transient />));
+  document.body.append(opener);
+  opener.focus();
+  await show();
+  opener.remove();
+  await act(async () => root.render(null));
+  expect(document.activeElement).toBe(entry);
+  await act(async () => screenRoot.unmount());
 });
 
 test("opened_with_nothing_focused_the_focus_goes_back_to_the_sidebar_entry", async () => {

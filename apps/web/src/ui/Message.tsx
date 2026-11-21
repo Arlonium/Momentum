@@ -1,20 +1,33 @@
 // Un écran de l'application qui ne montre qu'un message, à la place d'une page : rien n'est
 // ouvert, la page n'existe pas, une lecture a échoué. Un titre, une ou deux phrases, et au
 // besoin un bouton (`Retry`, ou un autre, dans un `mm-message-actions`).
+//
+// Son titre est l'endroit où va le focus quand cet écran a pris la place de la page sous une
+// fenêtre qui se ferme, et que ce qui avait le focus est parti avec la page (`LANDING`, lu par
+// `giveBack`, recette du lot 4, E5) : focalisable par le script seulement. Pas celui d'un écran
+// de passage (« Chargement… », `transient`), qui partirait avec le focus.
 import type { ReactNode } from "react";
+
+/**
+ * L'attribut du titre d'un écran qui remplace la page : là où le focus va quand il n'a plus où
+ * revenir (`search/focusBack.ts`).
+ */
+export const LANDING = "data-focus-landing";
 
 type Props = {
   title: string;
   /** Un bandeau, au-dessus du titre (lecture seule). */
   banner?: ReactNode;
+  /** Un écran de passage (« Chargement… ») : son titre ne prend pas le focus. */
+  transient?: boolean;
   children?: ReactNode;
 };
 
-export function Message({ title, banner, children }: Props) {
+export function Message({ title, banner, transient = false, children }: Props) {
   return (
     <section className="mm-message">
       {banner}
-      <h1>{title}</h1>
+      <h1 {...(transient ? {} : { [LANDING]: "", tabIndex: -1 })}>{title}</h1>
       {children && <p>{children}</p>}
     </section>
   );
