@@ -427,6 +427,9 @@ fn read_operations(
     let mut title = None;
     let mut blocks_written = 0usize;
     let read = |i: usize, markdown: &str, out_blocks: &mut usize| {
+        if super::fetch_header(markdown) {
+            return Err(fetch_header_refused(i));
+        }
         let mut blocks =
             ops::read_markdown(i, &super::agent_mmd(markdown)).map_err(operation_failed)?;
         registered_props_only(&blocks).map_err(|e| e.with("index", i))?;
@@ -542,6 +545,19 @@ fn operation_failed(refusal: ops::OpRefusal) -> ApiError {
     .with("hint", refusal.reason.hint())
     // Le message cite l'entrée de l'agent (une ligne de son MMD, une ancre nommée deux fois).
     .quoting()
+}
+
+/// Le MMD de l'opération `index` commence par l'en-tête de `fetch` (Ruling R1550) : `invalid_markdown`,
+/// comme une lecture refusée, mais par un message que le serveur écrit seul, qui nomme l'en-tête.
+fn fetch_header_refused(index: usize) -> ApiError {
+    ApiError::new(
+        StatusCode::UNPROCESSABLE_ENTITY,
+        ErrorCode::OperationFailed,
+        super::FETCH_HEADER_REFUSAL,
+    )
+    .with("index", index)
+    .with("reason", Reason::InvalidMarkdown.code())
+    .with("hint", Reason::InvalidMarkdown.hint())
 }
 
 /// La réponse d'une écriture d'agent refusée (voir « Pour S7 et M2 » au registre du lot, S4).

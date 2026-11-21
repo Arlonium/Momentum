@@ -444,7 +444,9 @@ const SPECS: [Spec; 6] = [
         name: "fetch",
         title: "Lire une page",
         description: "Lit une page en MMD, avec sa révision, ou le plan d'un espace. Le format est \
-                      décrit par la ressource mementum://spec/mmd. Une page longue est rendue par \
+                      décrit par la ressource mementum://spec/mmd. L'en-tête du contenu (de \
+                      « titre : » à la ligne « --- ») n'est pas du MMD : ne le recopie jamais dans \
+                      une écriture. Une page longue est rendue par \
                       tranches : reprends avec `from` (l'alias `next`) et `since` (la révision de \
                       la première tranche) ; une tranche dit alors quels blocs déjà lus ont changé \
                       depuis (relis-les avant de les modifier). Donne la révision de la dernière \

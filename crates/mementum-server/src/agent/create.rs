@@ -213,6 +213,13 @@ async fn destination(
 fn built_doc(markdown: &str, forbid_media: bool) -> Result<Vec<u8>, ApiError> {
     let blocks = if markdown.trim().is_empty() {
         Vec::new()
+    } else if super::fetch_header(markdown) {
+        // L'en-tête de `fetch` recopié avec le contenu (Ruling R1550) : nommé, sans citation.
+        return Err(ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidMmd,
+            super::FETCH_HEADER_REFUSAL,
+        ));
     } else {
         read_mmd(super::agent_mmd(markdown).as_bytes())?
     };

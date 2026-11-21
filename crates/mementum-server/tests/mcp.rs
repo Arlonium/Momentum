@@ -2031,6 +2031,79 @@ async fn a_refusal_quotes_the_input_only_inside_the_boundary() {
     assert_eq!(mmd_of(&team, page).await, "Le chat dort.\n");
 }
 
+/// Le contenu que rend `fetch`, recopié tel quel dans une écriture (recette du lot 5, D6, Ruling
+/// R1550) : son en-tête (« titre : … » jusqu'à la ligne « --- ») n'est pas du MMD. Refusé, dans
+/// `replace_page`, un `insert` et `create_pages`, par un message que le serveur écrit seul (dans ses
+/// lignes, hors des citations) et qui nomme l'en-tête ; le refus parlait d'un « titre souligné », et
+/// menait le modèle à faire du titre de la page un titre du contenu. Sans l'en-tête, le même MMD
+/// passe.
+#[tokio::test]
+async fn the_header_of_fetch_copied_into_a_write_is_named() {
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let page = page_with(&team, "Notes", "Un paragraphe.\n\n## Suite\n\nDeux.\n").await;
+    team.page(Some(page), "Sous-page", &[]).await;
+    let (token, _) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Edit,
+        TokenScope::All,
+        false,
+    )
+    .await;
+    let mcp = Mcp::new(&t, &token, Era::V2026);
+    let p = page.to_string();
+    let fetched = mcp.call("fetch", json!({ "id": p })).await;
+    let revision = fetched.ok().revision();
+    let copied = fetched.content().unwrap().to_string();
+    assert!(
+        copied.starts_with("titre : Notes\nsous-pages :\n"),
+        "{copied}"
+    );
+    let (_, body) = copied.split_once("---\n").unwrap();
+    let body = body.to_string();
+    for (tool, arguments, code) in [
+        (
+            "update_page",
+            json!({ "page": p, "base_revision": revision, "operations": [{ "op": "replace_page", "markdown": copied }] }),
+            "operation_failed",
+        ),
+        (
+            "update_page",
+            json!({ "page": p, "operations": [{ "op": "insert", "position": "end", "markdown": copied }] }),
+            "operation_failed",
+        ),
+        (
+            "create_pages",
+            json!({ "space": team.space.to_string(), "pages": [{ "title": "Copie", "markdown": copied }] }),
+            "invalid_mmd",
+        ),
+    ] {
+        let refused = mcp.call(tool, arguments).await;
+        refused.refused(code);
+        let head = refused.head();
+        assert!(head.contains("l'en-tête que fetch"), "{}", refused.text);
+        assert!(!head.contains("citation"), "{}", refused.text);
+    }
+    assert_eq!(
+        mmd_of(&team, page).await,
+        "Un paragraphe.\n\n## Suite\n\nDeux.\n"
+    );
+    // Sans l'en-tête, le même MMD passe.
+    mcp.call(
+        "update_page",
+        json!({ "page": p, "base_revision": revision, "operations": [{ "op": "replace_page", "markdown": body }] }),
+    )
+    .await
+    .ok();
+    mcp.call(
+        "create_pages",
+        json!({ "space": team.space.to_string(), "pages": [{ "title": "Copie", "markdown": body }] }),
+    )
+    .await
+    .ok();
+}
+
 /// Un refus d'une route qui nomme un champ le dit sous le nom de l'outil (`after`, `parent`), pas
 /// sous celui de la route (`afterId`, `parentId`).
 #[tokio::test]
