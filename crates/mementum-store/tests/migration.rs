@@ -438,6 +438,7 @@ async fn migration_keeps_lot1_pages() {
         indexes,
         [
             "api_token_pages_by_node",
+            "api_tokens_by_space",
             "api_tokens_by_user",
             "attachments_by_file",
             "attachments_by_node",
@@ -456,6 +457,7 @@ async fn migration_keeps_lot1_pages() {
     );
     for (index, columns) in [
         ("api_token_pages_by_node", &["node_id"][..]),
+        ("api_tokens_by_space", &["space_id"]),
         ("api_tokens_by_user", &["user_id", "created_at"]),
         ("attachments_by_file", &["file_hash"]),
         ("attachments_by_node", &["node_id", "created_at"]),

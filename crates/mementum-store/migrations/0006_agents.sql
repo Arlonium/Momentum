@@ -37,7 +37,7 @@
 --
 -- Quand une ligne d'une table mère est supprimée, SQLite cherche ses lignes filles par leur clé
 -- étrangère : `api_token_pages_by_node` sert à la suppression d'une page (la clé primaire commence
--- par le jeton).
+-- par le jeton), `api_tokens_by_space` à celle d'un espace (la cascade de `space_id`).
 
 CREATE TABLE api_tokens (
     id           TEXT PRIMARY KEY NOT NULL,
@@ -60,6 +60,7 @@ CREATE TABLE api_tokens (
     CHECK ((scope = 'all') = (space_id IS NULL))
 );
 CREATE INDEX api_tokens_by_user ON api_tokens (user_id, created_at);
+CREATE INDEX api_tokens_by_space ON api_tokens (space_id);
 
 CREATE TABLE api_token_pages (
     token_id TEXT NOT NULL REFERENCES api_tokens(id) ON DELETE CASCADE,
