@@ -470,3 +470,56 @@ test("a_lit_block_moved_by_another_does_not_keep_its_light_and_nothing_breaks", 
   expect(stored(m.doc).map((b) => b.id)).toEqual(["end", "top", "mid", ODD, "pic"]);
   expect(m.errors).toEqual([]);
 });
+
+// Un bloc dans un repli fermé (C5 de la recette du lot 4) : l'arrivée ouvre les replis qui le
+// contiennent, puis y va. BlockNote 0.57 tient l'état d'un repli dans le navigateur
+// (`localStorage`, `toggle-<id>`) et dans `aria-expanded` de son bouton : rien du document.
+
+const FOLDED: Seed = [
+  { id: "top", type: "paragraph", content: "En haut" },
+  {
+    id: "fold",
+    type: "toggleListItem",
+    content: "Repli",
+    children: [
+      { id: "inner", type: "toggleListItem", content: "Repli dedans", children: [{ id: "hid", type: "paragraph", content: "dauphin" }] },
+    ],
+  },
+  { id: "end", type: "paragraph", content: "À la fin" },
+];
+
+/** Le bouton du repli du bloc `id`. */
+const foldButton = (m: Mounted, id: string) =>
+  blockOf2(m, id).querySelector<HTMLButtonElement>(":scope > .bn-block > .bn-toggle-frame > .bn-toggle-button")!;
+
+test("arriving_in_closed_folds_opens_them_and_writes_nothing", async () => {
+  const m = await mountEditor({ blocks: FOLDED });
+  const ids = elementIds(m.doc);
+  const page = stored(m.doc);
+  // Fermés au départ : le bloc visé n'est pas montré.
+  expect(foldButton(m, "fold").getAttribute("aria-expanded")).toBe("false");
+  expect(foldButton(m, "inner").getAttribute("aria-expanded")).toBe("false");
+  try {
+    expect(go(m.editor, "hid")).toBe(true);
+    // Les deux replis qui le contiennent sont ouverts, le curseur et l'écran sur lui, surligné.
+    expect(foldButton(m, "fold").getAttribute("aria-expanded")).toBe("true");
+    expect(foldButton(m, "inner").getAttribute("aria-expanded")).toBe("true");
+    expect(scrolledTo()).toEqual([contentOf(m, "hid")]);
+    expect(m.editor.getTextCursorPosition().block.id).toBe("hid");
+    expect(lit(m, "hid")).toContain("mm-arrived");
+    // Un repli ouvert le reste : une seconde arrivée ne le referme pas.
+    expect(go(m.editor, "hid")).toBe(true);
+    expect(foldButton(m, "fold").getAttribute("aria-expanded")).toBe("true");
+    // Le repli lui-même, visé : son texte est montré, ses enfants restent comme ils étaient.
+    foldButton(m, "inner").click();
+    expect(go(m.editor, "inner")).toBe(true);
+    expect(foldButton(m, "inner").getAttribute("aria-expanded")).toBe("false");
+  } finally {
+    for (const id of ["fold", "inner"]) localStorage.removeItem(`toggle-${id}`);
+  }
+  // Rien n'est écrit dans le document.
+  expect(m.writes).toEqual([]);
+  expect(elementIds(m.doc)).toEqual(ids);
+  expect(stored(m.doc)).toEqual(page);
+  expect(m.errors).toEqual([]);
+});

@@ -2,8 +2,8 @@
 // bloc amené à l'écran. Pour un lien de la table des matières (`blocks/Toc.tsx`, d'où vient ce code)
 // et pour une adresse qui vise un bloc (`/p/<page>#b=<bloc>`, lot 4 : un résultat de recherche, un
 // rétrolien ; `useArrival`). C'est une navigation : rien n'est écrit dans le document, et la même
-// chose vaut pour qui lit et pour qui modifie. Le bloc atteint est surligné un instant (recette du
-// lot 4, correction 11).
+// chose vaut pour qui lit et pour qui modifie. Les replis fermés qui contiennent le bloc s'ouvrent,
+// et le bloc atteint est surligné un instant (recette du lot 4, C5 et correction 11).
 //
 // L'identifiant d'un bloc vient d'ailleurs (une adresse, un serveur, un autre client) : un texte
 // quelconque. Il n'est comparé qu'à l'attribut `data-id` des blocs affichés (`blockElement`, qui
@@ -22,15 +22,36 @@ type How = {
 };
 
 /**
+ * Ouvre les replis fermés qui contiennent le bloc `element` (C5 de la recette du lot 4) : la frappe
+ * n'irait jamais dans un texte caché. BlockNote 0.57 tient l'état d'un repli dans le navigateur
+ * (`localStorage`, `toggle-<id>`) et dans `aria-expanded` de son bouton, jamais dans le document
+ * (`createToggleFrame`) : ouvert ici par son bouton, par son propre gestionnaire, rien n'est écrit, et
+ * le repli reste ouvert comme si la personne l'avait ouvert. Le repli du bloc lui-même n'est pas
+ * touché : son texte est montré, ses enfants restent comme ils étaient. À relire à chaque montée de
+ * BlockNote (`.bn-toggle-frame`, `.bn-toggle-button`, `aria-expanded`).
+ */
+function openFolds(root: Element, element: Element): void {
+  for (
+    let frame = element.parentElement?.closest(".bn-toggle-frame") ?? null;
+    frame !== null && root.contains(frame);
+    frame = frame.parentElement?.closest(".bn-toggle-frame") ?? null
+  ) {
+    const button = frame.querySelector<HTMLElement>(":scope > .bn-toggle-button");
+    if (button?.getAttribute("aria-expanded") === "false") button.click();
+  }
+}
+
+/**
  * Va au bloc `id` de `editor`. Rend faux, sans rien faire, si la vue n'est pas montée ou si le bloc
- * n'y est pas (parti, d'une autre page, jamais écrit). Le bloc atteint est surligné un instant
- * (`arrival.ts`).
+ * n'y est pas (parti, d'une autre page, jamais écrit). Un bloc dans des replis fermés les ouvre
+ * (`openFolds`) ; le bloc atteint est surligné un instant (`arrival.ts`).
  */
 export function goToBlock(editor: MementumEditor, id: string, { block = "center", focus = true }: How = {}): boolean {
   const root = editor.domElement;
   const element = root?.isConnected ? blockElement(root, id) : null;
   // Une seule recherche du bloc dans la page (R641), et seulement s'il est affiché.
   if (element === null || editor.getBlock(id) === undefined) return false;
+  openFolds(root!, element);
   try {
     editor.setTextCursorPosition(id, "start");
   } catch {

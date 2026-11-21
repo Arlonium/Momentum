@@ -549,6 +549,32 @@ test("the_found_block_is_lit_on_arrival_then_let_go", async ({ browser }) => {
   expect(await getMmd(api, recipes.id)).toBe(before);
 });
 
+test("a_found_block_in_a_closed_fold_opens_it_and_takes_what_is_typed", async ({ browser }) => {
+  // C5 de la recette du lot 4 : le bloc trouvé est dans un repli fermé (l'état par défaut d'un repli
+  // jamais ouvert dans ce navigateur). L'arrivée ouvre le repli, montre le bloc, et la frappe y va.
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const space = await firstSpace(api);
+  const dolphin = word();
+  const folded = await createPage(api, { title: "Page à repli" });
+  await putMmd(api, folded.id, `Avant.\n\n<toggle title="Repli">\nLe ${dolphin} est caché.\n</toggle>\n\nAprès.\n`);
+  const home = await createPage(api, { title: "Accueil" });
+  await putMmd(api, home.id, "Rien ici\n");
+  await waitFindable(api, space.id, dolphin, folded.id);
+
+  const p = await openPage(browser, home.id, account);
+  await searchAndEnter(p, dolphin, folded.id);
+  const blockId = await blockOfUrl(p, folded.id);
+  await waitSynced(p);
+  const found = p.locator(`.mm-editor [data-node-type="blockOuter"][data-id="${blockId}"]`);
+  await expect(found).toBeVisible();
+  await expect(p.locator(".mm-editor .bn-toggle-button")).toHaveAttribute("aria-expanded", "true");
+  await expect.poll(() => cursorAt(p)).toEqual({ inEditor: true, block: blockId });
+  await p.keyboard.type("Ici : ");
+  await expect(found).toContainText(`Ici : Le ${dolphin} est caché.`);
+  await expect.poll(() => getMmd(api, folded.id)).toContain(`Ici : Le ${dolphin} est caché.`);
+});
+
 /** Cherche `query` par Ctrl+K, et ouvre par Entrée la page `id`, trouvée par son titre dans l'arbre. */
 async function titleAndEnter(p: Page, query: string, id: string) {
   await p.keyboard.press("Control+k");
