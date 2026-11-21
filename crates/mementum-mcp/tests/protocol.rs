@@ -12,7 +12,8 @@ use std::task::{Context, Poll, Waker};
 
 use linear::{Answer as Size, Form, Limits, grows_like_input};
 use mementum_mcp::protocol::{
-    self, Answer, Endpoint, Era, Headers, SUPPORTED, TTL_MS, V2025_11_25, V2026_07_28,
+    self, Answer, Endpoint, Era, Headers, MAX_BODY_BYTES, SUPPORTED, TTL_MS, V2025_11_25,
+    V2026_07_28,
 };
 use mementum_mcp::text::{self, SpaceLine, TokenLine, Workspace};
 use mementum_mcp::tools::{self, ToolCall};
@@ -43,6 +44,7 @@ impl Host for FakeHost {
         let output = match call {
             ToolCall::WorkspaceInfo(_) => text::workspace(&Workspace {
                 account: "Alex".into(),
+                account_id: "0193a1b2-0000-7000-8000-00000000000a".into(),
                 token: TokenLine {
                     name: "Claude Code".into(),
                     level: "edit".into(),
@@ -97,11 +99,14 @@ struct Call {
 
 impl Call {
     fn from_case(case: &Value) -> Call {
-        let body = match (case.get("raw"), case.get("body")) {
+        let mut body = match (case.get("raw"), case.get("body")) {
             (Some(raw), _) => raw.as_str().unwrap().as_bytes().to_vec(),
             (None, Some(body)) => serde_json::to_vec(body).unwrap(),
             (None, None) => panic!("cas sans corps"),
         };
+        if let Some(bytes) = case.get("pad_to").and_then(Value::as_u64) {
+            body.resize(bytes as usize, b' ');
+        }
         Call {
             version: header_values(case, "MCP-Protocol-Version"),
             method: header_values(case, "Mcp-Method"),
@@ -920,7 +925,12 @@ fn schema_bounds_are_the_constants() {
         update["properties"]["operations"]["maxItems"],
         json!(tools::MAX_OPERATIONS)
     );
+    assert_eq!(
+        create["properties"]["pages"]["items"]["properties"]["markdown"]["maxLength"],
+        json!(tools::MAX_MARKDOWN_CHARS)
+    );
     let catalog = serde_json::to_string(&update).unwrap();
+    assert!(catalog.contains(&format!("\"maxLength\":{}", tools::MAX_MARKDOWN_CHARS)));
     assert!(catalog.contains(&format!("\"maxLength\":{}", tools::MAX_OLD_CHARS)));
     assert!(catalog.contains(&format!("\"maxLength\":{}", tools::MAX_ANCHOR_CHARS)));
 }
@@ -1014,4 +1024,73 @@ fn a_refused_request_never_reaches_the_tool() {
 #[test]
 fn the_newest_revision_comes_first() {
     assert_eq!(SUPPORTED, [V2026_07_28, V2025_11_25]);
+}
+
+/// Un MMD (`markdown`) a sa borne, sous celle d'un corps moins l'enveloppe (Task M2) : un champ
+/// au-delà, ou les MMD d'un `create_pages` ensemble au-delà, sont des arguments refusés, qui le
+/// disent ; la borne se tient sous celle du corps.
+#[test]
+fn a_markdown_over_its_bound_is_refused() {
+    const _: () = assert!(tools::MAX_MARKDOWN_CHARS + 64 * 1024 < MAX_BODY_BYTES);
+    let long = "a".repeat(tools::MAX_MARKDOWN_CHARS + 1);
+    let half = "a".repeat(tools::MAX_MARKDOWN_CHARS / 2 + 1);
+    let refused = |tool: &str, arguments: Value| {
+        let Value::Object(arguments) = arguments else {
+            unreachable!()
+        };
+        let output = tools::parse(tool, arguments).expect_err("un refus");
+        assert_eq!(
+            output.code(),
+            Some("invalid_arguments"),
+            "{}",
+            output.text()
+        );
+        output.text().to_string()
+    };
+    let one = refused(
+        "create_pages",
+        json!({ "pages": [{ "title": "T", "markdown": long }] }),
+    );
+    assert!(one.contains("markdown"), "{one}");
+    let total = refused(
+        "create_pages",
+        json!({ "pages": [{ "title": "A", "markdown": half }, { "title": "B", "markdown": half }] }),
+    );
+    assert!(total.contains("ensemble"), "{total}");
+    for operation in [
+        json!({ "op": "insert", "position": "end", "markdown": long }),
+        json!({ "op": "replace_block", "anchor": "bk7qa", "markdown": long }),
+        json!({ "op": "replace_page", "markdown": long }),
+    ] {
+        let text = refused(
+            "update_page",
+            json!({ "page": "p", "operations": [operation] }),
+        );
+        assert!(text.contains("markdown"), "{text}");
+    }
+    let Value::Object(fits) = json!({ "pages": [{ "title": "A", "markdown": half }] }) else {
+        unreachable!()
+    };
+    assert!(tools::parse("create_pages", fits).is_ok());
+}
+
+/// Un corps de plus de 2 Mio reçoit `-32600` avant d'être lu, avec un `id` nul et un message qui
+/// dit de découper ; c'est aussi la réponse que la route fait à un corps qu'elle n'a pas reçu en
+/// entier (`protocol::too_large`, Task M2).
+#[test]
+fn a_body_over_the_bound_is_an_invalid_request() {
+    let reply = protocol::too_large();
+    assert_eq!(reply.status, 400);
+    let body = reply.body.clone().unwrap();
+    assert_eq!(body["id"], Value::Null);
+    assert_eq!(body["error"]["code"], json!(protocol::INVALID_REQUEST));
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("plusieurs appels")
+    );
+    let mut call = Call::modern("tools/list", None, json!({}));
+    call.body.resize(MAX_BODY_BYTES + 1, b' ');
+    assert_eq!(call.serve(&FakeHost::default()), reply);
 }

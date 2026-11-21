@@ -30,6 +30,10 @@ pub const TTL_MS: u64 = 300_000;
 /// Longueur d'un `id` de requête en texte, au plus : la réponse le recopie.
 pub const MAX_ID_BYTES: usize = 256;
 
+/// Octets d'un corps de requête, au plus : la borne de toute route du serveur (`MAX_BODY_BYTES` de
+/// `mementum-server`, 2 Mio ; Task M2, dont un test affirme l'égalité). Au-delà, `-32600`.
+pub const MAX_BODY_BYTES: usize = 2 << 20;
+
 /// Codes JSON-RPC.
 pub const PARSE_ERROR: i64 = -32700;
 pub const INVALID_REQUEST: i64 = -32600;
@@ -219,6 +223,24 @@ const LEGACY_METHODS: &str = "initialize, ping, tools/list, tools/call, resource
      resources/templates/list et resources/read";
 
 /// Un refus du protocole : le statut HTTP, l'`id` s'il est lisible, le code et le message.
+/// La réponse à un corps de plus de [`MAX_BODY_BYTES`] : `400` et `-32600`, `id` nul (la requête
+/// n'est pas lue), et un message qui dit de découper. La route la rend aussi pour un corps qu'elle
+/// n'a pas reçu en entier, faute de place (Task M2).
+pub fn too_large() -> Reply {
+    refuse(
+        400,
+        None,
+        INVALID_REQUEST,
+        format!(
+            "Corps de plus de {} Mio : rien n'est fait ; découpe la demande en plusieurs appels \
+             (moins de pages par create_pages, moins d'opérations ou un MMD plus court par \
+             update_page).",
+            MAX_BODY_BYTES >> 20
+        ),
+        None,
+    )
+}
+
 fn refuse(status: u16, id: Option<&Id>, code: i64, message: String, data: Option<Value>) -> Reply {
     let mut error = json!({ "code": code, "message": message });
     if let Some(data) = data {
@@ -374,6 +396,13 @@ pub fn read(
     body: &[u8],
     endpoint: Endpoint,
 ) -> Result<Incoming, Box<Refused>> {
+    // La borne d'abord : un corps trop long n'est pas lu.
+    if body.len() > MAX_BODY_BYTES {
+        return Err(Box::new(Refused {
+            reply: too_large(),
+            call: None,
+        }));
+    }
     let (id, method, params) =
         envelope(body).map_err(|reply| Box::new(Refused { reply, call: None }))?;
     dispatch(headers, id, &method, &params, endpoint).map_err(|reply| {

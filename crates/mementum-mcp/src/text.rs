@@ -176,9 +176,11 @@ pub struct SpaceLine {
     pub role: String,
 }
 
-/// Une personne d'un espace : son nom et son rôle, jamais son adresse (Ruling R1247).
+/// Une personne d'un espace : l'identifiant de son compte, son nom et son rôle, jamais son
+/// adresse (Ruling R1247 ; l'identifiant sert au filtre `created_by` de `search`, Task M2).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Member {
+    pub id: String,
     pub name: String,
     pub role: String,
 }
@@ -206,6 +208,8 @@ pub struct TokenLine {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Workspace {
     pub account: String,
+    /// L'identifiant du compte (Task M2).
+    pub account_id: String,
     pub token: TokenLine,
     pub spaces: Vec<SpaceLine>,
     pub space: Option<SpaceDetail>,
@@ -235,6 +239,10 @@ pub struct Refusal {
     /// Ce qu'il faut faire, propre à ce refus (la raison d'un `operation_failed`), écrit par le
     /// serveur : à la place du conseil de son code, dont l'exemple reste.
     pub hint: Option<String>,
+    /// Ce que le message cite de l'entrée de l'agent (un `old`, une ancre, une ligne de MMD), que
+    /// le message nomme `[1]`, `[2]`… : entre les lignes de borne, jamais dans une ligne du serveur
+    /// (Task M2).
+    pub quotes: Vec<String>,
 }
 
 /// Octets d'un identifiant, d'une révision, d'un alias ou d'une date écrits par le serveur.
@@ -258,6 +266,7 @@ const MAX_SPACES: usize = 50;
 const MAX_MEMBERS: usize = 200;
 const MAX_SPACE_PAGES: usize = 200;
 const MAX_CANDIDATES: usize = 5;
+const MAX_QUOTES: usize = 10;
 /// Éléments d'un chemin montrés (les plus proches de la page).
 const PATH_ITEMS: usize = 8;
 
@@ -665,8 +674,9 @@ pub fn workspace(workspace: &Workspace) -> ToolOutput {
     let token = &workspace.token;
     let mut lines = Lines::new(MAX_CONTENT_BYTES);
     lines.line(&format!(
-        "compte : {}",
-        one_line(&workspace.account, ITEM_BYTES)
+        "compte : {} ({})",
+        one_line(&workspace.account, ITEM_BYTES),
+        id(&workspace.account_id)
     ));
     lines.line(&format!("jeton : {}", one_line(&token.name, ITEM_BYTES)));
     lines.line("espaces :");
@@ -689,8 +699,9 @@ pub fn workspace(workspace: &Workspace) -> ToolOutput {
         lines.line("membres :");
         let members = lines.list(&detail.members, MAX_MEMBERS, |member| {
             format!(
-                "- {} : {}",
+                "- {} ({}) : {}",
                 one_line(&member.name, ITEM_BYTES),
+                id(&member.id),
                 word(&member.role)
             )
         });
@@ -787,6 +798,13 @@ fn refusal_drawn(
         ));
     }
     let mut meta = Lines::new(MAX_META_BYTES);
+    if !refusal.quotes.is_empty() {
+        meta.line("citations :");
+        let numbered: Vec<(usize, &String)> = refusal.quotes.iter().enumerate().collect();
+        meta.list(&numbered, MAX_QUOTES, |(i, quote)| {
+            format!("[{}] {}", i + 1, one_line(quote, EXCERPT_BYTES))
+        });
+    }
     if !refusal.candidates.is_empty() {
         meta.line("blocs proches :");
         meta.list(&refusal.candidates, MAX_CANDIDATES, |candidate| {
@@ -979,7 +997,8 @@ static HINTS: [(&str, Hint); 32] = [
         "invalid_filter",
         shows(
             "Écris une date en AAAA-MM-JJ (ou date et heure RFC 3339), et une personne par son nom \
-             ou l'identifiant de son compte.",
+             ou l'identifiant de son compte (workspace_info avec space donne l'identifiant de \
+             chaque membre).",
             "search",
             r#"{"query":"compte rendu","edited_after":"2026-11-01"}"#,
         ),

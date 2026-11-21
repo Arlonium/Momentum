@@ -31,6 +31,11 @@ pub const MAX_TOKEN_CHARS: usize = 120;
 pub const MAX_OLD_CHARS: usize = 2_000;
 /// Pages d'un `create_pages`, au plus.
 pub const MAX_PAGES: usize = 20;
+/// Caractères d'un MMD donné à un outil, au plus : un champ `markdown`, et tous ceux d'un
+/// `create_pages` ensemble. Sous la borne d'un corps ([`crate::protocol::MAX_BODY_BYTES`], 2 Mio),
+/// l'enveloppe JSON-RPC et les autres champs comptés (Task M2) : un MMD plus long ne tiendrait
+/// pas dans le corps.
+pub const MAX_MARKDOWN_CHARS: usize = 2_000_000;
 /// Opérations d'un `update_page`, au plus (§6.3).
 pub const MAX_OPERATIONS: usize = 100;
 /// Octets de MMD d'une lecture : par défaut, et au plus (Ruling R1225).
@@ -112,8 +117,10 @@ pub struct NewPage {
     /// Son titre : 500 caractères au plus (vide : « Sans titre »).
     #[schemars(length(max = MAX_TITLE_CHARS))]
     pub title: String,
-    /// Son contenu, en MMD (voir la ressource `mementum://spec/mmd`).
+    /// Son contenu, en MMD (voir la ressource `mementum://spec/mmd`) ; 2 000 000 caractères au
+    /// plus, pour toutes les pages de l'appel ensemble.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = MAX_MARKDOWN_CHARS))]
     pub markdown: Option<String>,
 }
 
@@ -207,12 +214,14 @@ pub enum Operation {
         before: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         position: Option<Position>,
+        #[schemars(length(max = MAX_MARKDOWN_CHARS))]
         markdown: String,
     },
     /// Remplacer un bloc et ses sous-blocs par des blocs (MMD). Demande `base_revision`.
     ReplaceBlock {
         #[schemars(length(min = 1, max = MAX_ANCHOR_CHARS))]
         anchor: String,
+        #[schemars(length(max = MAX_MARKDOWN_CHARS))]
         markdown: String,
         /// Permettre de retirer un lien de sous-page, une base, un bloc synchronisé ou un bloc
         /// inconnu.
@@ -242,6 +251,7 @@ pub enum Operation {
     /// Récrire toute la page (MMD) : seulement pour une page neuve ou petite. Demande
     /// `base_revision` ; refusé tant que quelqu'un écrit dans la page.
     ReplacePage {
+        #[schemars(length(max = MAX_MARKDOWN_CHARS))]
         markdown: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         allow_deleting_content: Option<bool>,
@@ -729,6 +739,7 @@ fn check_create(input: &CreatePagesInput) -> Result<(), String> {
     length("space", input.space.as_deref(), 1, MAX_NAME_CHARS)?;
     length("parent", input.parent.as_deref(), 1, MAX_PAGE_REF_CHARS)?;
     count("pages", input.pages.len(), 1, MAX_PAGES)?;
+    let mut total = 0;
     for (i, page) in input.pages.iter().enumerate() {
         length(
             &format!("pages[{i}].title"),
@@ -736,6 +747,20 @@ fn check_create(input: &CreatePagesInput) -> Result<(), String> {
             0,
             MAX_TITLE_CHARS,
         )?;
+        let markdown = page.markdown.as_deref().unwrap_or("");
+        length(
+            &format!("pages[{i}].markdown"),
+            Some(markdown),
+            0,
+            MAX_MARKDOWN_CHARS,
+        )?;
+        total += markdown.chars().count();
+        if total > MAX_MARKDOWN_CHARS {
+            return Err(format!(
+                "les « markdown » des pages ensemble : {MAX_MARKDOWN_CHARS} caractères au plus ; \
+                 crée les pages en plusieurs appels"
+            ));
+        }
     }
     Ok(())
 }
@@ -792,9 +817,18 @@ fn check_update(input: &UpdatePageInput) -> Result<(), String> {
                 after,
                 before,
                 position,
-                ..
-            } => one_place(&at, after, before, position)?,
-            Operation::ReplaceBlock { anchor, .. } | Operation::DeleteBlock { anchor, .. } => {
+                markdown,
+            } => {
+                one_place(&at, after, before, position)?;
+                markdown_length(&at, markdown)?;
+            }
+            Operation::ReplaceBlock {
+                anchor, markdown, ..
+            } => {
+                length(&format!("{at}.anchor"), Some(anchor), 1, MAX_ANCHOR_CHARS)?;
+                markdown_length(&at, markdown)?;
+            }
+            Operation::DeleteBlock { anchor, .. } => {
                 length(&format!("{at}.anchor"), Some(anchor), 1, MAX_ANCHOR_CHARS)?;
             }
             Operation::MoveBlock {
@@ -806,7 +840,7 @@ fn check_update(input: &UpdatePageInput) -> Result<(), String> {
                 length(&format!("{at}.anchor"), Some(anchor), 1, MAX_ANCHOR_CHARS)?;
                 one_place(&at, after, before, position)?;
             }
-            Operation::ReplacePage { .. } => {}
+            Operation::ReplacePage { markdown, .. } => markdown_length(&at, markdown)?,
             Operation::SetProperties { properties } => {
                 length(
                     &format!("{at}.properties.title"),
@@ -818,6 +852,16 @@ fn check_update(input: &UpdatePageInput) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+/// Le MMD d'une opération : [`MAX_MARKDOWN_CHARS`] caractères au plus.
+fn markdown_length(at: &str, markdown: &str) -> Result<(), String> {
+    length(
+        &format!("{at}.markdown"),
+        Some(markdown),
+        0,
+        MAX_MARKDOWN_CHARS,
+    )
 }
 
 fn check_manage(input: &ManagePagesInput) -> Result<(), String> {

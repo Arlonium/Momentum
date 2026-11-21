@@ -203,11 +203,12 @@
                   "maxLength": 500
                 },
                 "markdown": {
-                  "description": "Son contenu, en MMD (voir la ressource `mementum://spec/mmd`).",
+                  "description": "Son contenu, en MMD (voir la ressource `mementum://spec/mmd`) ; 2 000 000 caractères au plus, pour toutes les pages de l'appel ensemble.",
                   "type": [
                     "string",
                     "null"
-                  ]
+                  ],
+                  "maxLength": 2000000
                 }
               },
               "additionalProperties": false,
@@ -387,7 +388,8 @@
                       ]
                     },
                     "markdown": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 2000000
                     }
                   },
                   "additionalProperties": false,
@@ -410,7 +412,8 @@
                       "maxLength": 120
                     },
                     "markdown": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 2000000
                     },
                     "allow_deleting_content": {
                       "description": "Permettre de retirer un lien de sous-page, une base, un bloc synchronisé ou un bloc inconnu.",
@@ -510,7 +513,8 @@
                       "const": "replace_page"
                     },
                     "markdown": {
-                      "type": "string"
+                      "type": "string",
+                      "maxLength": 2000000
                     },
                     "allow_deleting_content": {
                       "type": [

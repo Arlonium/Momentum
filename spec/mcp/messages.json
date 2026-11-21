@@ -1,5 +1,5 @@
 {
-  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. « outcome » est l'issue que serve rend d'un tools/call pour le journal d'activité (l'outil nommé et le code du refus, null pour une réussite) ; sans « outcome », un tools/call doit en rendre une, et toute autre requête aucune. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0, ou la spécification seule (resources/read, Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, et une sortie de plus de 25 000 jetons ne l'ont été par aucun client : M2 et X1 les éprouvent).",
+  "description": "Table de cas du protocole MCP de Mementum (Task M1 du lot 5, Rulings R1236, R1251). Chaque cas : sa révision (« era »), l'adresse (« endpoint », /mcp par défaut), les en-têtes que le protocole compare au corps (une valeur, ou une liste pour un en-tête répété ; les autres en-têtes relevés sont gardés tels quels et ignorés), le corps (« body » en JSON, ou « raw » en texte), le statut et la réponse attendus. « expect » est un sous-ensemble de la réponse : chaque clé nommée doit y être, de même valeur ; une liste a autant d'éléments ; « <any> » admet toute valeur ; null attend une réponse sans corps. « absent » nomme des pointeurs JSON qui ne doivent pas être dans la réponse. « called » dit si l'outil a été appelé. « pad_to » allonge le corps d'espaces jusqu'à ce nombre d'octets (un corps de plus de 2 Mio, Task M2). « outcome » est l'issue que serve rend d'un tools/call pour le journal d'activité (l'outil nommé et le code du refus, null pour une réussite) ; sans « outcome », un tools/call doit en rendre une, et toute autre requête aucune. Les requêtes de Claude Code 2.1.329 sont celles que la Task S0 a relevées (spike/agents-bench/results/mcp/run1-both.requetes.jsonl et run5-both-legacy.requetes.jsonl), recopiées telles quelles. « proven_by » dit qui a éprouvé la forme du cas : une requête de Claude Code relevée par S0, ou la spécification seule (resources/read, Mcp-Name en =?base64?…?=, un _meta sans clientCapabilities, et une sortie de plus de 25 000 jetons ne l'ont été par aucun client : M2 et X1 les éprouvent).",
   "statuses": "Statut HTTP d'une erreur JSON-RPC (Rulings R1406, R1407) : 400 pour ce qui empêche de lire la requête ou d'en savoir l'ère (-32700 JSON illisible ; -32600 lot, corps qui n'est pas un objet, jsonrpc, method ou id mal formés, requête sans id, params qui ne sont pas un objet, réponse envoyée au serveur ; -32020 en-tête absent, répété, aux caractères non permis ou qui ne dit pas le corps, requête qui n'est d'aucune des deux révisions ; -32022 version nommée mais non servie, au _meta, ou par l'en-tête seul quand il a la forme AAAA-MM-JJ ; -32602 champ exigé du _meta qui manque ou n'a pas sa forme) ; 404 pour une méthode inconnue en 2026-07-28 (-32601) ; 200 pour une erreur des params d'une méthode servie (-32602 outil inconnu, arguments qui ne sont pas un objet, tools/call sans nom, ressource inconnue en 2026-07-28, curseur de liste, initialize sans protocolVersion ; -32002 ressource inconnue en 2025-11-25) et pour toute méthode inconnue en 2025-11-25 (-32601). Des arguments refusés ne sont pas une erreur JSON-RPC : un résultat isError, 200. -32021 (MissingRequiredClientCapability) existe dans la 2026-07-28 et n'a pas d'usage ici : aucun outil n'exige une capacité du client.",
   "cases": [
     {
@@ -118,6 +118,26 @@
       "raw": "",
       "status": 400,
       "expect": { "id": null, "error": { "code": -32700 } }
+    },
+    {
+      "name": "2026 : un corps de plus de 2 Mio",
+      "era": "2026-07-28",
+      "proven_by": "la spécification seule (une requête invalide de JSON-RPC) ; la borne est celle de toute route du serveur (Task M2, éprouvé par la route : a_body_over_the_bound_is_a_json_rpc_error)",
+      "headers": { "MCP-Protocol-Version": "2026-07-28", "Mcp-Method": "tools/list" },
+      "raw": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\", \"params\": {",
+      "pad_to": 2097153,
+      "status": 400,
+      "expect": { "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "<any>" } }
+    },
+    {
+      "name": "2025 : un corps de plus de 2 Mio",
+      "era": "2025-11-25",
+      "proven_by": "la spécification seule (une requête invalide de JSON-RPC) ; la borne est celle de toute route du serveur (Task M2)",
+      "headers": { "MCP-Protocol-Version": "2025-11-25" },
+      "raw": "{\"jsonrpc\": \"2.0\", \"id\": 1, \"method\": \"tools/list\", \"params\": {",
+      "pad_to": 2097153,
+      "status": 400,
+      "expect": { "jsonrpc": "2.0", "id": null, "error": { "code": -32600, "message": "<any>" } }
     },
     {
       "name": "2026 : un corps qui n'est pas un objet",
