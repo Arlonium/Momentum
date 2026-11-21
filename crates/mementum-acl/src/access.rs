@@ -39,6 +39,23 @@ impl NodeAccess {
     pub fn allows(&self, action: Action) -> bool {
         self.level.allows(action) && !self.barred.contains(action)
     }
+
+    /// Ces accès vus par un jeton d'API (Ruling R1217) : le niveau ramené sous `cap`, `barred`
+    /// ajouté à l'interdit, et « Partagé » pour un jeton à racines. La seule règle par page de la
+    /// restriction, pour [`SpaceAccess::narrowed`], [`SpaceAccess::narrowed_node`] et une page
+    /// qu'un jeton vient de créer ; le parent visible, lui, dépend de la portée.
+    pub fn narrowed(self, cap: Level, barred: Barred, has_roots: bool) -> NodeAccess {
+        NodeAccess {
+            level: self.level.min(cap),
+            section: if has_roots {
+                Section::Shared
+            } else {
+                self.section
+            },
+            barred: self.barred.union(barred),
+            ..self
+        }
+    }
 }
 
 /// Ce qu'une personne voit d'un espace. Calculé une fois par révision de l'espace (voir
@@ -366,15 +383,8 @@ fn restrict(
     parent_in_scope: bool,
 ) -> NodeAccess {
     NodeAccess {
-        level: access.level.min(cap),
-        section: if has_roots {
-            Section::Shared
-        } else {
-            access.section
-        },
-        in_trash: access.in_trash,
         visible_parent: access.visible_parent.filter(|_| parent_in_scope),
-        barred: access.barred.union(barred),
+        ..access.narrowed(cap, barred, has_roots)
     }
 }
 

@@ -984,6 +984,22 @@ fn barred_refuses_what_the_level_allows() {
 // ---------------------------------------------------------------------------
 // Cache.
 
+/// Une restriction de jeton et le calcul d'une personne ne partagent jamais une clé, même quand la
+/// forme du jeton porte les mêmes octets que l'identifiant de la personne (Ruling R1354).
+#[test]
+fn narrowings_and_people_do_not_share_keys() {
+    let (user, space) = (id(1), id(10));
+    let cache = AccessCache::new(1_000);
+    let person = access_to(3);
+    let narrowed = access_to(1);
+    cache.put(user, space, 7, Arc::clone(&person));
+    cache.put_narrowed(*user.as_bytes(), space, 7, Arc::clone(&narrowed));
+    assert!(Arc::ptr_eq(&cache.get(user, space, 7).unwrap(), &person));
+    let kept = cache.get_narrowed(*user.as_bytes(), space, 7).unwrap();
+    assert!(Arc::ptr_eq(&kept, &narrowed));
+    assert!(cache.get_narrowed(*user.as_bytes(), space, 8).is_none());
+}
+
 #[test]
 fn cache_misses_on_another_rev() {
     let (user, other_user, space, other_space) = (id(1), id(2), id(10), id(11));

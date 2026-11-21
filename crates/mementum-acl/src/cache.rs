@@ -7,11 +7,20 @@ use uuid::Uuid;
 
 use crate::SpaceAccess;
 
+/// À qui est un calcul gardé : à une personne, ou à une forme de jeton d'API (un compte, un
+/// niveau, un interdit, des racines : ce qui décide de sa restriction, lot 5, Ruling R1354).
+/// Deux espaces de clés distincts : une forme ne prend jamais la place d'une personne.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Holder {
+    Person(Uuid),
+    Narrowing([u8; 16]),
+}
+
 /// Le contenu du cache, sous un seul verrou.
 #[derive(Default)]
 struct Entries {
-    /// `(personne, espace)` → `(révision, accès)`.
-    map: HashMap<(Uuid, Uuid), (i64, Arc<SpaceAccess>)>,
+    /// `(à qui, espace)` → `(révision, accès)`.
+    map: HashMap<(Holder, Uuid), (i64, Arc<SpaceAccess>)>,
     /// La somme des poids ([`weight`]) des entrées gardées.
     nodes: usize,
 }
@@ -66,10 +75,7 @@ impl AccessCache {
 
     /// Les accès de `user` dans `space`, s'ils ont été calculés à la révision `rev`.
     pub fn get(&self, user: Uuid, space: Uuid, rev: i64) -> Option<Arc<SpaceAccess>> {
-        match self.lock().map.get(&(user, space)) {
-            Some((at, access)) if *at == rev => Some(Arc::clone(access)),
-            _ => None,
-        }
+        self.get_held(Holder::Person(user), space, rev)
     }
 
     /// Garde `access`, calculé à la révision `rev`, à la place de ce que le cache avait pour
@@ -77,7 +83,30 @@ impl AccessCache {
     /// est à lui seul plus gros que le plafond, il n'est pas gardé (l'ancienne entrée part
     /// quand même : elle est d'une autre révision).
     pub fn put(&self, user: Uuid, space: Uuid, rev: i64, access: Arc<SpaceAccess>) {
-        let key = (user, space);
+        self.put_held(Holder::Person(user), space, rev, access);
+    }
+
+    /// La restriction d'une forme de jeton dans `space`, si elle a été faite sur un calcul de la
+    /// révision `rev`. `shape` est tirée de ce qui décide de la restriction (le compte, le niveau,
+    /// l'interdit, les racines) : deux jetons de même forme partagent l'entrée (Ruling R1354).
+    pub fn get_narrowed(&self, shape: [u8; 16], space: Uuid, rev: i64) -> Option<Arc<SpaceAccess>> {
+        self.get_held(Holder::Narrowing(shape), space, rev)
+    }
+
+    /// Garde la restriction d'une forme de jeton, comme [`AccessCache::put`].
+    pub fn put_narrowed(&self, shape: [u8; 16], space: Uuid, rev: i64, access: Arc<SpaceAccess>) {
+        self.put_held(Holder::Narrowing(shape), space, rev, access);
+    }
+
+    fn get_held(&self, holder: Holder, space: Uuid, rev: i64) -> Option<Arc<SpaceAccess>> {
+        match self.lock().map.get(&(holder, space)) {
+            Some((at, access)) if *at == rev => Some(Arc::clone(access)),
+            _ => None,
+        }
+    }
+
+    fn put_held(&self, holder: Holder, space: Uuid, rev: i64, access: Arc<SpaceAccess>) {
+        let key = (holder, space);
         let added = weight(&access);
         let mut entries = self.lock();
         if let Some((_, old)) = entries.map.remove(&key) {
