@@ -291,7 +291,9 @@ async function play(seed: number): Promise<void> {
     } else if (path === "/api/v1/auth/password") {
       const owner = ownerOf(token)!;
       for (const session of sessions.values()) if (session.owner === owner) session.alive = false;
-      call.outcome = { status: 204, setCookie: open(owner, "tab") };
+      // Le corps dit les jetons d'API révoqués (R1365) : il peut se perdre après les en-têtes, et le
+      // changement reste fait (R1375).
+      call.outcome = { status: 200, body: { tokensRevoked: 0 }, setCookie: open(owner, "tab") };
     } else if (path === "/api/v1/me") {
       const owner = ownerOf(token)!;
       if (call.verification && owner !== ALICE) seen.refusedOtherAccount += 1;

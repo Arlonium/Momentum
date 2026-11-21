@@ -54,6 +54,8 @@ const ACCOUNT_CHANGED = {
   message: "tu t'es connecté sous un autre compte dans un autre onglet ; rien n'a été fait",
 };
 const PASSWORDS = { current: "ancien-mot-de-passe", new: "nouveau-mot-de-passe" };
+/** Ce que répond un changement de mot de passe réussi : les jetons d'API révoqués (R1365). */
+const PASSWORD_CHANGED = { tokensRevoked: 2 };
 const tree = (spaceId: string): Tree => ({ spaceId, lsn: 1, nodes: [] });
 
 beforeEach(async () => {
@@ -144,7 +146,7 @@ async function logIn(id: string): Promise<void> {
 /** L'onglet change son mot de passe : le serveur le remplace, et rouvre la session. */
 async function changePassword(): Promise<void> {
   const change = api.changePassword(PASSWORDS);
-  (await waiting("POST", "/api/v1/auth/password")).answer(204);
+  (await waiting("POST", "/api/v1/auth/password")).answer(200, PASSWORD_CHANGED);
   await change;
 }
 
@@ -389,11 +391,31 @@ test("a_401_that_comes_back_during_a_password_change_waits_for_it", async () => 
   first.answer(401, UNAUTHENTICATED);
   await flush();
   expect(asked).toBe(0);
-  password.answer(204);
+  password.answer(200, PASSWORD_CHANGED);
   await change;
   (await waiting("GET", "/api/v1/me")).answer(200, me("alice"));
   (await waiting("GET", "/api/v1/spaces/s1/tree")).answer(200, tree("s1"));
   await expect(read).resolves.toEqual(tree("s1"));
+  expect(asked).toBe(0);
+});
+
+test("a_password_change_says_its_revoked_tokens_and_survives_a_lost_body", async () => {
+  // R1375 : la réponse dit les jetons d'API révoqués ; un corps perdu après les en-têtes (le
+  // cookie est posé, le changement fait) ne fait pas échouer le changement.
+  await loadedAs("alice");
+  const change = api.changePassword(PASSWORDS);
+  (await waiting("POST", "/api/v1/auth/password")).answer(200, PASSWORD_CHANGED);
+  await expect(change).resolves.toEqual(PASSWORD_CHANGED);
+  const lost = api.changePassword(PASSWORDS);
+  (await waiting("POST", "/api/v1/auth/password")).answerLostBody(200);
+  await expect(lost).resolves.toBeNull();
+  // La session reste sûre : un appel suivant part au nom du compte, sans relecture du compte.
+  const read = api.getTree("s1");
+  const sent = await waiting("GET", "/api/v1/spaces/s1/tree");
+  expect(sent.account).toBe("alice");
+  sent.answer(200, tree("s1"));
+  await expect(read).resolves.toEqual(tree("s1"));
+  expect(count("GET", "/api/v1/me")).toBe(1);
   expect(asked).toBe(0);
 });
 
@@ -918,7 +940,7 @@ test("another_account_found_during_a_password_change_of_the_tab_is_told_once_it_
   reading.answer(200, me("bruno"));
   await flush();
   expect(told).toEqual([]);
-  sent.answer(204);
+  sent.answer(200, PASSWORD_CHANGED);
   await change;
   await flush();
   expect(told).toEqual(["bruno"]);

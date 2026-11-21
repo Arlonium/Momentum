@@ -57,6 +57,7 @@ import type {
   NewThread,
   PageAccess,
   PageNode,
+  PasswordChanged,
   PendingInvitation,
   ResolveThread,
   SearchRequest,
@@ -557,15 +558,24 @@ export function logOut(): Promise<void> {
 }
 
 /**
- * `POST /api/v1/auth/password` : les autres sessions du compte sont fermées, celle-ci
- * repart avec un cookie neuf. Mot de passe actuel faux : `401 invalid_credentials`.
+ * `POST /api/v1/auth/password` : les autres sessions du compte sont fermées, ses jetons d'API
+ * révoqués, celle-ci repart avec un cookie neuf. Rend le nombre de jetons révoqués, ou `null` si
+ * le corps de la réponse s'est perdu après ses en-têtes : le changement est fait quand même
+ * (R1375). Mot de passe actuel faux : `401 invalid_credentials`.
  */
-export function changePassword(body: ChangePassword): Promise<void> {
+export function changePassword(body: ChangePassword): Promise<PasswordChanged | null> {
   return changeSession(() =>
     opening(async () => {
-      await call<void>("POST", PASSWORD, body);
+      const res = await send("POST", PASSWORD, body);
       // Le même compte, sous une session neuve : ce qui était parti sous l'ancienne est refusé.
       generation += 1;
+      // Une réponse réussie a posé son cookie avec ses en-têtes : le compte de la session est sûr,
+      // et un corps perdu ensuite ne fait pas échouer un changement qui a eu lieu.
+      try {
+        return (await res.json()) as PasswordChanged;
+      } catch {
+        return null;
+      }
     }),
   );
 }
