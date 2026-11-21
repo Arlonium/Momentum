@@ -7,10 +7,11 @@ import { act, type ReactElement } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MementumEditor } from "./debug";
 import { EditorView } from "./Editor";
+import { EditorView as ProseMirrorView } from "prosemirror-view";
 import * as Y from "yjs";
 import { ARRIVAL_MS } from "./arrival";
 import { goToBlock, useArrival, type Arrival, type Synced } from "./goToBlock";
-import { drag, elementIds, exchange, peer, REMOTE, seedState, stored, type Seed } from "../test/editors";
+import { drag, elementIds, exchange, peer, REMOTE, seedState, stored, typeAtEnd, type Seed } from "../test/editors";
 import { blockOf, flush, mountEditor, renewSession, type Mounted } from "../test/richEditor";
 
 /** Un identifiant comme un client peut en écrire : ni UUID, ni sûr dans un sélecteur ou du HTML. */
@@ -454,7 +455,9 @@ test("the_reached_block_is_lit_by_its_own_content_then_let_go_and_nothing_is_wri
   expect(m.errors).toEqual([]);
 });
 
-test("a_lit_block_moved_by_another_does_not_keep_its_light_and_nothing_breaks", async () => {
+test("a_lit_block_keeps_its_light_while_another_types_elsewhere", async () => {
+  // y-prosemirror remplace tout le document à chaque changement venu de Yjs : la décoration, reportée
+  // par les positions, partait au premier caractère tapé par un autre, ailleurs (relecture, R1588).
   const base = await seedState(PAGE);
   const m = await mountEditor({ base, clientID: 2 });
   const tom = await peer("Tom", 3, base);
@@ -462,13 +465,70 @@ test("a_lit_block_moved_by_another_does_not_keep_its_light_and_nothing_breaks", 
   Y.applyUpdate(server, base, REMOTE);
   expect(go(m.editor, "end")).toBe(true);
   expect(lit(m, "end")).toContain("mm-arrived");
-  // Tom déplace le bloc en haut de la page : il est supprimé puis recréé au même `id` (R220).
+  typeAtEnd(tom, "top", " de Tom");
+  await exchange(server, [tom, m]);
+  await flush();
+  expect(blockOf(m, "top").textContent).toContain("En haut de Tom");
+  expect(lit(m, "end")).toContain("mm-arrived");
+  expect(lit(m, "top")).toEqual([]);
+  expect(m.errors).toEqual([]);
+});
+
+test("a_lit_block_moved_by_another_keeps_its_light_and_loses_it_when_deleted", async () => {
+  const base = await seedState(PAGE);
+  const m = await mountEditor({ base, clientID: 2 });
+  const tom = await peer("Tom", 3, base);
+  const server = new Y.Doc();
+  Y.applyUpdate(server, base, REMOTE);
+  expect(go(m.editor, "end")).toBe(true);
+  expect(lit(m, "end")).toContain("mm-arrived");
+  // Tom déplace le bloc en haut de la page : supprimé puis recréé au même `id` (R220), c'est le même
+  // bloc pour qui le lit, et il reste surligné.
   drag(tom, "end", { above: "top" });
   await exchange(server, [tom, m]);
   await flush();
-  expect(lit(m, "end")).toEqual([]);
   expect(stored(m.doc).map((b) => b.id)).toEqual(["end", "top", "mid", ODD, "pic"]);
+  expect(lit(m, "end")).toContain("mm-arrived");
+  // Tom le supprime : le surlignage part avec lui, sans erreur, et ne passe à aucun autre bloc.
+  tom.editor.removeBlocks(["end"]);
+  await exchange(server, [tom, m]);
+  await flush();
+  expect(stored(m.doc).map((b) => b.id)).toEqual(["top", "mid", ODD, "pic"]);
+  expect(m.host.querySelectorAll(".mm-arrived")).toHaveLength(0);
   expect(m.errors).toEqual([]);
+});
+
+test("the_end_of_the_light_does_not_cut_the_step_of_undo", async () => {
+  // La transaction qui éteint le surlignage ne porte qu'une méta : elle n'entre dans aucun historique.
+  // Marquée `addToHistory: false`, y-prosemirror fermait le pas d'annulation sur elle (R1590).
+  const m = await mountEditor({ blocks: PAGE });
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    expect(go(m.editor, "mid")).toBe(true);
+    type(m.editor, "ab");
+    act(() => {
+      vi.advanceTimersByTime(ARRIVAL_MS);
+    });
+    expect(lit(m, "mid")).toEqual([]);
+    type(m.editor, "cd");
+    expect(contentOf(m, "mid").textContent).toBe("abcdAu milieu");
+    act(() => {
+      const event = new KeyboardEvent("keydown", { key: "z", ctrlKey: true, bubbles: true, cancelable: true });
+      Object.defineProperty(event, "keyCode", { value: 90 });
+      m.editor.prosemirrorView.dom.dispatchEvent(event);
+    });
+    expect(contentOf(m, "mid").textContent).toBe("Au milieu");
+  } finally {
+    vi.useRealTimers();
+  }
+  expect(m.errors).toEqual([]);
+});
+
+test("the_editor_view_is_the_prosemirror_view_the_light_is_built_for", async () => {
+  // Une seconde copie de `prosemirror-view` donnerait deux classes `Decoration` : la décoration du
+  // surlignage ne serait pas celle que la vue sait lire (R1585, R1592).
+  const m = await mountEditor({ blocks: PAGE });
+  expect(m.editor.prosemirrorView).toBeInstanceOf(ProseMirrorView);
 });
 
 // Un bloc dans un repli fermé (C5 de la recette du lot 4) : l'arrivée ouvre les replis qui le
