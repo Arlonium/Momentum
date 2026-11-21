@@ -1416,12 +1416,26 @@ async fn alive_after(f: &Fixture, by: Duration) -> bool {
     f.hub.live_pages().await.contains(&f.page)
 }
 
-/// Attend, en temps réel, que l'acteur de la page soit arrêté.
-async fn stopped(f: &Fixture) {
-    until("l'acteur de la page ne s'arrête pas", async || {
-        !f.hub.live_pages().await.contains(&f.page)
-    })
-    .await;
+/// Avance l'horloge arrêtée par pas de 100 ms, jusqu'à l'arrêt de l'acteur de la page, et
+/// affirme qu'il s'arrête avant `within` de temps simulé. Ne suppose pas l'instant où l'acteur a
+/// réarmé son délai après sa dernière demande : sur un coureur lent, il le fait après une avance
+/// faite juste avant (vu sur la CI sous Linux, une avance d'`idle_close` tout juste ne suffisait
+/// pas, le minuteur de tokio arrondissant à la milliseconde suivante).
+async fn stops_within(f: &Fixture, within: Duration, what: &str) {
+    let step = Duration::from_millis(100);
+    let mut spent = Duration::ZERO;
+    loop {
+        let settle = std::time::Instant::now() + Duration::from_millis(50);
+        while std::time::Instant::now() < settle {
+            tokio::task::yield_now().await;
+        }
+        if !f.hub.live_pages().await.contains(&f.page) {
+            return;
+        }
+        assert!(spent < within, "{what}");
+        tokio::time::advance(step).await;
+        spent += step;
+    }
 }
 
 /// Lot 5, Task X2 (Ruling R1657, la voie (b) de R1645) : l'acteur d'une page qu'aucune connexion
@@ -1440,8 +1454,12 @@ async fn an_actor_no_connection_opened_stops_after_the_short_delay() {
         alive_after(&f, short - Duration::from_millis(10)).await,
         "l'acteur s'est arrêté avant le délai court"
     );
-    tokio::time::advance(Duration::from_millis(20)).await;
-    stopped(&f).await;
+    stops_within(
+        &f,
+        f.hub.config().idle_close - short,
+        "l'acteur ne s'est pas arrêté au délai court",
+    )
+    .await;
     assert!(versions(&f).await.is_empty(), "une version à l'arrêt");
 }
 
@@ -1471,8 +1489,7 @@ async fn an_actor_a_connection_opened_keeps_the_long_delay() {
         alive_after(&f, short + Duration::from_secs(1)).await,
         "l'acteur d'une page ouverte par une connexion s'est arrêté au délai court"
     );
-    tokio::time::advance(long).await;
-    stopped(&f).await;
+    stops_within(&f, long, "l'acteur ne s'arrête pas après `idle_close`").await;
 }
 
 /// Une page qu'aucune connexion n'a ouverte, mais dont la tranche demande une version de fin (une
@@ -1493,8 +1510,7 @@ async fn an_actor_whose_slice_closes_keeps_the_long_delay() {
         alive_after(&f, short + Duration::from_secs(1)).await,
         "l'acteur s'est arrêté au délai court avec une version de fin à couper"
     );
-    tokio::time::advance(long).await;
-    stopped(&f).await;
+    stops_within(&f, long, "l'acteur ne s'arrête pas après `idle_close`").await;
     let cut = versions(&f).await;
     assert_eq!(cut.len(), 1, "{cut:?}");
     assert_eq!(cut[0].reason, VersionReason::Closing);
