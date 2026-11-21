@@ -5,8 +5,9 @@
 // La liste des jetons du compte (`useTokens`), les vivants d'abord : leur nom, leurs quatre derniers
 // caractères (jamais leur texte, que le serveur ne garde pas), leur niveau, leur portée, leurs dates ;
 // « Créer un jeton » (`CreateToken`, où le jeton est montré une fois, puis part avec la fenêtre) ;
-// « Révoquer », après une confirmation. Un jeton mort (révoqué ou échu) reste dans la liste
-// quatre-vingt-dix jours, pour son activité (R1220).
+// « Révoquer », après une confirmation ; « Activité », qui déplie sous la ligne les appels du jeton
+// (`TokenActivity`, Task C2), lus seulement à ce moment-là. Un jeton mort (révoqué ou échu) reste dans
+// la liste quatre-vingt-dix jours, pour son activité (R1220).
 //
 // Rien ne bouge sous le pointeur ni sous le focus : tant que l'un ou l'autre est dans la liste, une
 // relecture garde chaque ligne à sa place (un jeton révoqué le dit là où il est, un jeton neuf vient à
@@ -22,6 +23,7 @@ import { useSession } from "../session/session";
 import { useAfterLogin } from "../session/useAfterLogin";
 import { Confirm } from "../ui/Confirm";
 import { CreateToken, type TokenDraft } from "./CreateToken";
+import { TokenActivity } from "./TokenActivity";
 import { useTokens } from "./useTokens";
 
 /** Isole un texte venu d'ailleurs dans une chaîne (un titre, un nom accessible) : jamais en littéral. */
@@ -171,7 +173,7 @@ export default function AccountTokens({ space }: { space: SpaceInfo | null }) {
             Créer un jeton
           </button>
         </p>
-        <TokenList tokens={tokens} error={error} reread={reread} />
+        <TokenList tokens={tokens} error={error} reread={reread} afterLogin={afterLogin} />
         {creating && (
           <CreateToken
             spaces={me.spaces}
@@ -195,10 +197,20 @@ type ListProps = {
   tokens: TokenInfo[] | null;
   error: string | null;
   reread: () => Promise<void>;
+  /** Tenue quand le compte revient, après une session perdue : l'activité d'un jeton est relue. */
+  afterLogin: () => Promise<void>;
 };
 
-function TokenList({ tokens, error, reread }: ListProps) {
+function TokenList({ tokens, error, reread, afterLogin }: ListProps) {
   const headingId = useId();
+  /** Les jetons dont l'activité est dépliée : plusieurs à la fois, rien ne se replie de lui-même. */
+  const [opened, setOpened] = useState<ReadonlySet<string>>(() => new Set());
+  const toggle = (id: string) =>
+    setOpened((was) => {
+      const next = new Set(was);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
   const headingRef = useRef<HTMLHeadingElement>(null);
   const section = useRef<HTMLElement>(null);
   /** Ce que la liste montrait quand le pointeur ou le focus y est entré : gardé tant qu'ils y sont. */
@@ -305,7 +317,14 @@ function TokenList({ tokens, error, reread }: ListProps) {
     content = (
       <ul className="mm-people mm-tokens" aria-labelledby={headingId}>
         {shown.map((token) => (
-          <TokenLine key={token.id} token={token} onRevoke={() => setRevoking(token)} />
+          <TokenLine
+            key={token.id}
+            token={token}
+            open={opened.has(token.id)}
+            afterLogin={afterLogin}
+            onToggle={() => toggle(token.id)}
+            onRevoke={() => setRevoking(token)}
+          />
         ))}
       </ul>
     );
@@ -355,8 +374,18 @@ function TokenList({ tokens, error, reread }: ListProps) {
   );
 }
 
-function TokenLine({ token, onRevoke }: { token: TokenInfo; onRevoke: () => void }) {
+type LineProps = {
+  token: TokenInfo;
+  /** Son activité est dépliée sous la ligne. */
+  open: boolean;
+  afterLogin: () => Promise<void>;
+  onToggle: () => void;
+  onRevoke: () => void;
+};
+
+function TokenLine({ token, open, afterLogin, onToggle, onRevoke }: LineProps) {
   const dead = !token.live;
+  const activityId = useId();
   return (
     <li className={dead ? "mm-person mm-token is-dead" : "mm-person mm-token"} data-token-id={token.id}>
       <span className="mm-person-names">
@@ -386,7 +415,26 @@ function TokenLine({ token, onRevoke }: { token: TokenInfo; onRevoke: () => void
             Révoquer
           </button>
         )}
+        {/* En dernier, à la même place sur chaque ligne, jeton mort compris. */}
+        <button
+          type="button"
+          className="mm-button mm-button-quiet mm-token-activity-toggle"
+          aria-expanded={open}
+          aria-controls={activityId}
+          aria-label={`Activité de ${quoted(token.name)}`}
+          onClick={(event) => {
+            // Le second clic d'un double clic ne la replie pas aussitôt.
+            if (event.detail > 1) return;
+            // Repliée, l'activité part avec ce qui avait le focus en elle : le bouton le prend, que le
+            // clic ne lui donne pas partout (Safari).
+            if (open) event.currentTarget.focus();
+            onToggle();
+          }}
+        >
+          Activité
+        </button>
       </span>
+      {open && <TokenActivity token={token} id={activityId} afterLogin={afterLogin} />}
     </li>
   );
 }

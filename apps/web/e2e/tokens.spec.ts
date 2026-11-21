@@ -9,6 +9,7 @@ import { expect, request, test, type APIRequestContext } from "@playwright/test"
 import {
   apiAs,
   closeContexts,
+  createPage,
   firstSpace,
   NO_SESSION,
   newUser,
@@ -179,4 +180,62 @@ test("going_back_with_a_shown_token_asks_first", async ({ browser }) => {
   expect(await p.evaluate(() => document.activeElement !== document.body)).toBe(true);
   await expect(field).toHaveValue(token);
   await expect(p).toHaveURL(/\/account\/tokens$/);
+});
+
+test("the_activity_of_a_token_tells_its_calls", async ({ browser }) => {
+  // Lot 5, Task C2 : les appels du jeton, lus quand on déplie son activité. Une page d'un autre
+  // compte, que celui-ci ne voit pas, y est dite sans titre ni identifiant.
+  const account = await signUpAccount();
+  const api = await apiAs(account);
+  const seen = await createPage(api, { title: "Projet suivi" });
+  const other = await createPage(await apiAs(await signUpAccount()), { title: "Page d'un autre" });
+  const created = await api.post("/api/v1/tokens", {
+    data: { name: "Agent curieux", level: "read", scope: "all", canTrash: false, password: PASSWORD },
+  });
+  expect(created.status(), await created.text()).toBe(201);
+  const { token, info } = (await created.json()) as { token: string; info: { id: string } };
+  const client = await agent();
+  const headers = { Authorization: `Bearer ${token}` };
+  expect((await client.get(`/api/v1/pages/${seen.id}`, { headers })).status()).toBe(200);
+  expect((await client.get(`/api/v1/pages/${other.id}`, { headers })).status()).toBe(404);
+  // Le journal s'écrit par paquets, toutes les deux secondes au plus.
+  await expect
+    .poll(async () => ((await (await api.get(`/api/v1/tokens/${info.id}/calls`)).json()) as { calls: unknown[] }).calls.length)
+    .toBe(2);
+
+  const p = await newUser(browser, account);
+  await p.goto("/account/tokens");
+  const line = p.locator("li[data-token-id]").filter({ hasText: "Agent curieux" });
+  const toggle = line.getByRole("button", { name: "Activité" });
+  await expect(toggle).toHaveAttribute("aria-expanded", "false");
+  await toggle.click();
+  await expect(toggle).toHaveAttribute("aria-expanded", "true");
+  const calls = line.locator("li[data-call-id]");
+  await expect(calls).toHaveCount(2);
+  // Le plus récent d'abord : le refus, puis la lecture réussie.
+  await expect(calls.nth(0).locator(".mm-token-call-outcome")).toHaveText("Refusé");
+  await expect(calls.nth(0).locator(".mm-token-call-code")).toHaveText("not_found");
+  await expect(calls.nth(0)).toContainText("GET /api/v1/pages/{id}");
+  await expect(calls.nth(0)).toContainText("une page que tu ne vois plus");
+  await expect(calls.nth(1).locator(".mm-token-call-outcome")).toHaveText("Réussi");
+  await expect(calls.nth(1)).toContainText("Projet suivi");
+  const shown = await line.innerHTML();
+  expect(shown).not.toContain(other.id);
+  expect(shown).not.toContain("Page d'un autre");
+  // Les boutons de la ligne restent sur sa première ligne, au-dessus de l'activité.
+  const [button, activity] = await Promise.all([
+    toggle.boundingBox(),
+    line.locator(".mm-token-activity").boundingBox(),
+  ]);
+  expect(button!.y + button!.height).toBeLessThanOrEqual(activity!.y);
+  const name = await line.locator(".mm-token-name").boundingBox();
+  expect(Math.abs(button!.y + button!.height / 2 - (name!.y + name!.height / 2))).toBeLessThan(40);
+
+  // Filtrée sur les refus : le refus seul.
+  await line.getByLabel("Issue").selectOption("refused");
+  await expect(calls).toHaveCount(1);
+  await expect(calls.nth(0).locator(".mm-token-call-outcome")).toHaveText("Refusé");
+  await toggle.click();
+  await expect(line.locator(".mm-token-activity")).toHaveCount(0);
+  await expect(toggle).toBeFocused();
 });

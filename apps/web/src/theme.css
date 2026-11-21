@@ -2152,6 +2152,130 @@ button.tree-toggle:hover {
   overflow-wrap: anywhere;
 }
 
+/* L'activité d'un jeton (lot 5, Task C2), dépliée sous sa ligne, sur toute la largeur. Les boutons
+   de la ligne : « Révoquer », puis « Activité », toujours à la même place. La liste des appels défile
+   en dedans, et son pied (« Afficher plus d'appels ») reste sous elle (R1094). */
+.mm-token {
+  flex-wrap: wrap;
+}
+
+/* Sans base, les noms ne poussent pas les boutons sur une ligne à eux : ils rétrécissent d'abord. */
+.mm-token .mm-person-names {
+  flex-basis: 0;
+}
+
+.mm-token .mm-person-action {
+  width: auto;
+  gap: 4px;
+}
+
+.mm-token-activity-toggle[aria-expanded="true"] {
+  background: var(--mm-surface);
+}
+
+.mm-token-activity {
+  flex: 1 0 100%;
+  min-width: 0;
+  padding: 4px 0 8px;
+  font-size: 13px;
+  color: var(--mm-text-secondary);
+}
+
+.mm-token-activity-lead {
+  margin: 0 0 8px;
+}
+
+.mm-token-activity-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 8px;
+}
+
+.mm-token-calls-zone {
+  max-height: 22rem;
+  overflow-y: auto;
+  border: 1px solid var(--mm-popover-divider);
+  border-radius: 6px;
+}
+
+.mm-token-calls-zone:focus-visible {
+  outline: 2px solid var(--mm-accent);
+  outline-offset: 2px;
+}
+
+.mm-token-calls {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mm-token-call {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--mm-popover-divider);
+}
+
+.mm-token-call:last-child {
+  border-bottom: 0;
+}
+
+.mm-token-call-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.mm-token-call-at {
+  color: var(--mm-text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Un refus : la couleur des avertissements ; une erreur : celle des fautes. */
+.mm-token-call-outcome.is-refused {
+  background: var(--mm-warning-soft);
+  color: var(--mm-warning);
+}
+
+.mm-token-call-outcome.is-error {
+  background: var(--mm-danger-soft);
+  color: var(--mm-danger);
+}
+
+.mm-token-call-code,
+.mm-token-call-tool {
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 12px;
+}
+
+.mm-token-call-what {
+  overflow-wrap: anywhere;
+}
+
+.mm-token-calls-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.mm-token-calls-foot {
+  margin-top: 8px;
+}
+
+/* À la place du bouton, quand tous les appels gardés sont là : sa hauteur exactement
+   (`.mm-button-small`), pour que rien ne bouge sous le pointeur. */
+.mm-token-calls-done {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  min-height: 28px;
+  margin: 0;
+}
+
 /* La fenêtre de création : plus large, pour les lignes de commande ; elle défile en dedans si
    l'écran est bas. */
 .mm-dialog.mm-token-dialog {
