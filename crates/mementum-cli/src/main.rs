@@ -102,8 +102,10 @@ enum Command {
         data_dir: Option<PathBuf>,
         /// Adresse publique du serveur, la même que `serve --public-url` (défaut :
         /// MEMENTUM_PUBLIC_URL) : un lien qui la porte et mène à une page compte comme un
-        /// lien vers elle.
-        #[arg(long, value_name = "URL", conflicts_with = "text_only")]
+        /// lien vers elle. Sans effet, et refusée, avec `--text-only`.
+        // Le refus est écrit par `run`, en français, comme les autres refus de la commande : celui
+        // de clap (`conflicts_with`) est en anglais (recette du lot 4, G3).
+        #[arg(long, value_name = "URL")]
         public_url: Option<String>,
     },
 }
@@ -208,6 +210,13 @@ async fn run(cli: Cli) -> anyhow::Result<()> {
             data_dir,
             public_url,
         } => {
+            if text_only && public_url.is_some() {
+                anyhow::bail!(
+                    "--text-only ne prend pas --public-url : l'adresse publique ne sert qu'à \
+                     relire les documents des pages, ce que --text-only ne fait pas ; retire l'une \
+                     des deux options. Rien n'a été modifié"
+                );
+            }
             let data_dir = config::data_dir(data_dir);
             // Avant de toucher au disque. Sous `--text-only`, aucune page n'est projetée : la
             // variable n'est pas lue.

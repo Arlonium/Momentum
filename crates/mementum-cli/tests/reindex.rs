@@ -601,6 +601,33 @@ fn an_intent_left_posed_is_undone_and_the_command_goes_to_the_end() {
     }
 }
 
+/// `--text-only` avec une adresse publique (recette du lot 4, G3) : refusé en français, avec la
+/// raison, comme les autres refus de la commande (`mementum : …`, code 1), avant de rien toucher.
+/// Le refus de clap disait, en anglais, « the argument '--text-only' cannot be used with … ».
+#[test]
+fn text_only_with_a_public_url_is_refused_in_french() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("donnees");
+    for args in [
+        &["--text-only", "--public-url", ORIGIN][..],
+        &["--public-url", ORIGIN, "--text-only"],
+    ] {
+        let output = reindex(&data, args, &[]);
+        let stderr = failed(&output);
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(stderr.starts_with("mementum : "), "{stderr}");
+        assert!(
+            stderr.contains("--text-only") && stderr.contains("--public-url"),
+            "{stderr}"
+        );
+        // La raison : l'adresse ne sert qu'à relire les documents, ce que `--text-only` ne fait pas.
+        assert!(stderr.contains("relire les documents"), "{stderr}");
+        assert!(!stderr.contains("cannot be used"), "{stderr}");
+        assert!(!stderr.contains("Usage"), "{stderr}");
+    }
+    assert!(!data.exists(), "rien n'est créé");
+}
+
 /// La commande ouvre la base par `Store::open`, donc par `backup.rs` : une base à migrer est
 /// copiée d'abord, et la copie est nommée ; une base refusée reste intacte, sans copie ; pas de
 /// base, rien n'est créé ; une adresse publique invalide est refusée avant tout.
