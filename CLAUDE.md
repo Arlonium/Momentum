@@ -686,6 +686,16 @@ Décisions au registre du lot 5, « Task C1 » (R1445 à R1459).
 - **Un nom venu d'ailleurs dans une chaîne** (titre de `Confirm`, `aria-label`) **s'isole par des constantes écrites par `String.fromCharCode(0x2068)` et `0x2069`** (`quoted`, `AccountTokens.tsx`, R1623), jamais en littéral ni en échappement : l'outil d'écriture changerait l'échappement en caractère réel (piège de la Task C8).
 - **L'outil d'écriture change aussi `\u00a0` en caractère réel** (comme les caractères de direction, piège de la Task C8) : sans danger, mais invisible à la relecture, et un `grep` de l'échappement ne le trouve plus ; remettre l'échappement par un script après coup dans les chaînes du code (le texte JSX prend `&nbsp;`).
 
+### Task C2 : l'activité d'un jeton, et « par un agent » dans l'historique (`apps/web/src/account/TokenActivity.tsx`, `useTokenCalls.ts`, `history/HistoryDialog.tsx`)
+
+Décisions au registre du lot 5, « Task C2 » (R1465 à R1475).
+
+- **L'historique ne nomme jamais un jeton** : `Version.agentAuthors` ne porte que des identifiants de comptes, tirés par la route de `authors` (une part d'eux par construction, R1470) ; l'écran écrit « Alice (par un agent) », la mention hors de l'élément isolé du nom (R1471). Le nom d'un jeton ne se montre qu'à son compte, dans son activité. Un champ neuf de `Version` qui toucherait aux jetons passe par `the_token_name_is_never_in_a_version` (`tests/versions.rs`).
+- **Une version écrite par un agent, dans un test de route** : `t.hub.edit_page(page, Edit { …, writer: Writer { account, token } })` avec un jeton d'`api_token`, puis `t.hub.shutdown()`, qui coupe la `closing` de la première tranche d'une page jamais versionnée (R1601) ; la liste se lit ensuite par la route, **au nom d'un compte qui voit la page** (sinon `404`, la réponse d'une page introuvable). Sur `main` avant S7, aucune route ouverte aux jetons n'écrit un contenu : c'est le seul chemin.
+- **L'activité d'un jeton suit `useTokenCalls`** : lue quand on la déplie, jamais avec la liste, puis page par page (`before`, le rang de la dernière ligne lue) ; la même lecture planifiée sert la première page et la suite (`scheduleRereads`), si bien qu'une session perdue reprend au retour du compte ce qui était demandé. Rien ne la relit d'elle-même (R1466) : une relecture en tête ferait bouger ce qui est sous le pointeur.
+- **Une ligne de `.mm-person` qui passe à la ligne** (`flex-wrap`, pour une zone dépliée dessous, R1472) donne `flex-basis: 0` à ses noms : à leur largeur de contenu, ils poussaient les boutons sur une ligne à eux. La preuve est de la géométrie, dans Chromium (`the_activity_of_a_token_tells_its_calls`, `e2e/tokens.spec.ts`).
+- **Commiter une part d'un fichier sans `git add -p`** (interdit ici) : écrire à part la version voulue du fichier, `git hash-object -w <fichier>`, puis `git update-index --cacheinfo 100644,<empreinte>,<chemin>` ; le reste du changement attend dans l'arbre de travail le commit suivant (vu ici : des champs de fixtures dans le commit du serveur, les tests neufs de la fenêtre dans le suivant).
+
 ## Tester
 
 Structure du dépôt (conception, §8) :
