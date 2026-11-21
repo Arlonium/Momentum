@@ -29,7 +29,7 @@
 | M2 | `/mcp` et `/mcp/readonly`, les six outils branchés sur `agent/` | `6de740c`, `04431cb`, `683b016`, `d4c4d7a`, `2d06a6e`, `276a2d9`, `1e20a99`, `bacfac4`, `df67bad` ; `e9dcd65`, `14bd035` | R1420 à R1444 |
 | X1 | un agent et un humain de bout en bout (Chromium, client MCP de Node), et un vrai Claude Code dans les deux révisions | `2e8a8d7`, `ea1875d`, `65f3067` ; `e04656f`, `44040ff` | R1480 à R1489, R1629 à R1632 |
 | X2 | les budgets : mesures, deux budgets neufs au §5.10, mesures bornées dans la CI ; la voie des jetons dans la file d'écriture ; l'acteur sans connexion arrêté après 3 s | `1d8557a`, `5b6ca33`, `7bf39b8`, `f5e6c65`, `daa5500`, `8cf952f`, `e9a6d4a`, `43baf5b`, `c910443`, `5750260`, `4a318b8`, `50856a8`, `21d714d` ; `40a972e`, `45f6990` | R1640 à R1662 |
-| D | cette documentation, la recette, la spécification MMD, la conception, le README, `docs/REPRISE.md`, `CLAUDE.md` ; puis son tour de correction, après sa relecture | les commits `docs :` et `spec :` qui suivent `aad795e` | R1500 à R1509, R1663 et plus |
+| D | cette documentation, la recette, la spécification MMD, la conception, le README, `docs/REPRISE.md`, `CLAUDE.md` ; puis son tour de correction, après sa relecture | les commits `docs :` et `spec :` qui suivent `aad795e` | R1500 à R1509, R1663 |
 
 Les commits du registre de chaque tâche portent aussi ses pièges dans `CLAUDE.md`. Les tâches de `mementum-server` (S5, S6, S7, M2) ont été menées en file ; C1 et S7, puis C2 et S7, de front. Il n'y a pas de commit de fusion : chaque atelier a été reporté sur `main` sans fusion, rebasé au besoin.
 
