@@ -565,6 +565,77 @@ async fn a_refused_before_agent_version_writes_nothing_through_the_hub() {
     assert_eq!(live_text(&f).await, "Remplacé");
 }
 
+/// Lot 5, correction groupée (D13 de la passe de fin, Ruling R1527) : un bloc `unknown` qu'un
+/// client marque étranger sur une `data` qui n'est pas un nœud fait différer l'arbre que rend une
+/// écriture d'agent de la page relue (limite connue, `known_limits` de `mementum-crdt/tests/diff.rs`).
+/// Un client peut le provoquer : en debug, l'acteur ne panique plus (il fermait toutes les
+/// connexions de la page), il le dit au journal et rend la page relue.
+#[tokio::test]
+async fn a_foreign_mark_set_by_a_client_does_not_bring_the_actor_down() {
+    use yrs::Xml;
+    use yrs::updates::decoder::Decode;
+    let f = Fixture::new(SyncConfig::default()).await;
+    let (alice, bob) = (new_user(&f.db).await, new_user(&f.db).await);
+    f.write_mmd("Un\n\nDeux\n").await;
+    let tab = connect(&f, alice).await;
+    sees(&tab, "Un\nDeux").await;
+    // Le bloc `b_x`, marqué étranger, écrit par un client à la main.
+    let state = tab.page().unwrap().encode_state();
+    let doc = Doc::new();
+    let fragment = doc.get_or_insert_xml_fragment(mementum_crdt::FRAGMENT);
+    doc.transact_mut()
+        .apply_update(yrs::Update::decode_v1(&state).unwrap())
+        .unwrap();
+    let update = {
+        let mut txn = doc.transact_mut();
+        let Some(XmlOut::Element(group)) = fragment.get(&txn, 0) else {
+            panic!("la racine");
+        };
+        let container = group.push_back(&mut txn, yrs::XmlElementPrelim::empty("blockContainer"));
+        container.insert_attribute(&mut txn, "id", "b_x");
+        let unknown = container.push_back(&mut txn, yrs::XmlElementPrelim::empty("unknown"));
+        unknown.insert_attribute(&mut txn, "originalType", "future_widget");
+        unknown.insert_attribute(&mut txn, "data", "eyJ4IjoxfQ==");
+        unknown.insert_attribute(&mut txn, "foreign", true);
+        txn.encode_update_v1()
+    };
+    tab.apply_local(&update);
+    until("le bloc marqué est au serveur", async || {
+        f.hub
+            .read_blocks(f.page)
+            .await
+            .unwrap()
+            .iter()
+            .any(|b| b.id == "b_x")
+    })
+    .await;
+    let read = f.hub.read_page(f.page).await.unwrap();
+    let edited = edits(
+        &f,
+        edit(
+            agent(bob, new_token(&f.db, bob).await),
+            Some(&read),
+            vec![Operation::MoveBlock {
+                anchor: "b_x".into(),
+                to: Place::Start,
+            }],
+        ),
+    )
+    .await;
+    assert_eq!(edited.blocks[0].id, "b_x");
+    assert_eq!(
+        edited.blocks,
+        f.hub.read_blocks(f.page).await.unwrap(),
+        "en debug, la page relue est rendue"
+    );
+    // La connexion de la personne n'a pas été fermée par une panique de l'acteur.
+    tab.type_text(&read.blocks[0].id, " encore");
+    until("la frappe arrive", async || {
+        text(&f.hub.read_blocks(f.page).await.unwrap()).contains("Un encore")
+    })
+    .await;
+}
+
 /// R1234, règle 1 : `str_replace`, `insert` et `move_block` ne coupent pas de version.
 #[tokio::test]
 async fn str_replace_insert_and_move_cut_no_version() {

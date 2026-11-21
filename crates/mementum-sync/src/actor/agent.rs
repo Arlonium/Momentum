@@ -463,10 +463,27 @@ impl Actor {
                 return Ok(Ok(None));
             }
             let blocks = match written.blocks.take() {
+                // Les blocs que l'écriture rend sont la page relue (R1337) ; en debug, ils sont
+                // comparés. Un bloc `unknown` qu'un client marque étranger sur une `data` qui n'est
+                // pas un nœud les fait différer (limite D13, `known_limits` de
+                // `mementum-crdt/tests/diff.rs`) : un client peut le provoquer, si bien qu'un écart
+                // se dit au journal et rend la page relue, sans faire tomber l'acteur (correction
+                // groupée du lot 5, Ruling R1527 ; une assertion y fermait toutes les connexions
+                // de la page sur un serveur compilé en debug).
+                #[cfg(debug_assertions)]
                 Some(blocks) => {
-                    debug_assert_eq!(blocks, self.page.read_blocks(), "l'arbre écrit");
-                    blocks
+                    let read = self.page.read_blocks();
+                    if blocks != read {
+                        tracing::error!(
+                            node_id = %self.id.node_id,
+                            "les blocs rendus par une écriture d'agent ne sont pas la page relue \
+                             (limite D13) : la page relue est rendue"
+                        );
+                    }
+                    read
                 }
+                #[cfg(not(debug_assertions))]
+                Some(blocks) => blocks,
                 None => self.page.read_blocks(),
             };
             Ok(Ok(Some((written, blocks, self.page.revision()))))
