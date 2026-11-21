@@ -85,6 +85,11 @@ export function publishedTitles(): ReadonlyMap<string, string> {
   return directory.titles;
 }
 
+/** L'espace dont l'arbre est publié (celui qu'affiche la barre latérale) ; `null` : aucun. */
+export function publishedSpace(): string | null {
+  return directory.spaceId;
+}
+
 /** Le titre à jour de la page `id` si le compte la voit dans l'espace affiché, sinon `null`. */
 export function pageTitle(id: string): string | null {
   return directory.titles.get(id) ?? null;

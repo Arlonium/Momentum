@@ -2,8 +2,9 @@
 // (Ruling R80) : l'espace ouvert (une tuile à son initiale, et son nom), et au clic un menu.
 // De haut en bas : les espaces du compte, chacun avec le rôle qu'il y a ; « Créer un espace »
 // et « Réglages de l'espace » (pour tout membre, pas pour un invité) ; puis le compte (nom,
-// adresse), « Changer le mot de passe » et « Se déconnecter », qui efface aussi les pages
-// récentes du compte gardées dans le navigateur (R255).
+// adresse), « Jetons d'API » (lot 5 : l'écran du compte, `/account/tokens`), « Changer le mot de
+// passe » et « Se déconnecter », qui efface aussi les pages récentes du compte gardées dans le
+// navigateur (R255).
 //
 // Ouvrir le menu relit le compte (`refresh`) : la liste des espaces est à jour, et c'est
 // aussi ce qui s'aperçoit d'une session fermée ailleurs, et fait demander la connexion.
@@ -14,8 +15,8 @@
 import type { SpaceInfo } from "@mementum/protocol";
 import { useEffect, useId, useRef, useState, type FormEvent } from "react";
 import { answerLost, createSpace, isSessionLost, logOut } from "../api";
-import { CheckIcon, ChevronDownIcon, KeyIcon, LogOutIcon, PlusIcon, SettingsIcon } from "../icons";
-import { navigate, spacePath, spaceSettingsPath } from "../router";
+import { CheckIcon, ChevronDownIcon, KeyIcon, LogOutIcon, PlusIcon, SettingsIcon, TokenIcon } from "../icons";
+import { navigate, parseRoute, spacePath, spaceSettingsPath, tokensPath, usePathname } from "../router";
 import { Field, FormError, messageOf } from "../session/forms";
 import { PasswordDialog } from "../session/PasswordDialog";
 import { useSession } from "../session/session";
@@ -54,6 +55,8 @@ export function SpaceSwitcher({ space, settingsOpen }: Props) {
   /** Le menu vient d'être ouvert au clavier : son premier élément prendra le focus. */
   const focusFirst = useRef(false);
   const menuId = useId();
+  /** L'écran des jetons d'API est à l'écran. */
+  const tokensOpen = parseRoute(usePathname()).name === "tokens";
 
   // Fermé par un clic hors du menu, ou par Échap (le focus revient au bouton).
   useEffect(() => {
@@ -199,6 +202,15 @@ export function SpaceSwitcher({ space, settingsOpen }: Props) {
                 {user.instanceAdmin && <span className="mm-account-role">Admin de l'instance</span>}
               </span>
             </div>
+            <a
+              href={tokensPath()}
+              className="mm-side-action mm-side-link"
+              aria-current={tokensOpen ? "page" : undefined}
+              onClick={() => setOpen(false)}
+            >
+              <TokenIcon />
+              <span>Jetons d'API</span>
+            </a>
             <button type="button" className="mm-side-action" onClick={() => openDialog("password")}>
               <KeyIcon />
               <span>Changer le mot de passe</span>

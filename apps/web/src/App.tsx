@@ -1,7 +1,8 @@
 // L'application : barre latérale (sélecteur d'espace, sections et arbres des pages) et
 // contenu. `/` mène au dernier espace ouvert (gardé dans le navigateur), sinon au premier du
 // compte ; `/s/:spaceId` montre un espace, `/s/:spaceId/trash` sa corbeille,
-// `/s/:spaceId/settings` ses réglages, `/p/:id` une page.
+// `/s/:spaceId/settings` ses réglages, `/account/tokens` les jetons d'API du compte (lot 5,
+// chargés à la demande), `/p/:id` une page.
 //
 // Ce fichier assemble. La logique est dans ses hooks, un sujet chacun :
 // - `useServerSchema` : la version de schéma du serveur (R35), et la lecture seule ;
@@ -17,7 +18,7 @@
 // - `useSearchWindow` : la recherche de l'espace affiché (lot 4), son raccourci et sa fenêtre,
 //   chargée à la demande.
 import type { PageNode } from "@mementum/protocol";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Component, lazy, Suspense, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { ReadOnlyBanner } from "./editor/ReadOnlyBanner";
 import { useServerSchema } from "./editor/useServerSchema";
 import { ancestorsOf } from "./page/ancestors";
@@ -48,6 +49,35 @@ import { Message, Retry } from "./ui/Message";
 
 /** Une page sans page parente visible, ou hors de l'arbre : toujours le même tableau. */
 const NO_ANCESTORS: PageNode[] = [];
+
+/** L'écran des jetons d'API (lot 5) : son code n'est chargé qu'à son ouverture. */
+const AccountTokens = lazy(() => import("./account/AccountTokens"));
+
+/**
+ * Le code d'un écran chargé à la demande n'arrive pas (réseau coupé, une version neuve déployée
+ * entre-temps) : l'écran le dit, et propose de recharger ; le reste de l'application reste en place.
+ */
+class LoadBoundary extends Component<{ children: ReactNode }, { failed: boolean }> {
+  state = { failed: false };
+
+  static getDerivedStateFromError(): { failed: boolean } {
+    return { failed: true };
+  }
+
+  render() {
+    if (!this.state.failed) return this.props.children;
+    return (
+      <Message title="Cet écran n'a pas pu être chargé">
+        Le serveur Mementum ne répond pas, ou une nouvelle version a été installée. Recharge la page.
+        <span className="mm-message-actions">
+          <button type="button" className="mm-button mm-button-primary" onClick={() => location.reload()}>
+            Recharger
+          </button>
+        </span>
+      </Message>
+    );
+  }
+}
 
 export function App() {
   useLinkInterception();
@@ -162,8 +192,8 @@ export function App() {
   const inSpace = route.name === "space" || route.name === "trash";
 
   useEffect(() => {
-    // Les réglages, la corbeille et l'espace introuvable nomment l'onglet eux-mêmes.
-    if (settingsOf !== null || route.name === "trash" || missing) return;
+    // Les réglages, les jetons, la corbeille et l'espace introuvable nomment l'onglet eux-mêmes.
+    if (settingsOf !== null || route.name === "tokens" || route.name === "trash" || missing) return;
     const title = active?.title ?? atSpace?.name;
     document.title = title === undefined ? "Mementum" : `${title} · Mementum`;
   }, [active, atSpace, settingsOf, route.name, missing]);
@@ -182,6 +212,16 @@ export function App() {
     // Un espace où le compte n'a pas de rôle : le même écran pour son accueil, sa corbeille
     // et ses réglages (R96).
     content = <SpaceNotFound first={me.spaces[0] ?? null} />;
+  } else if (route.name === "tokens") {
+    // Les jetons sont au compte : ni l'arbre ni la version du schéma n'y sont attendus. Les pages d'une
+    // portée « pages » sont celles de l'espace affiché dans la barre latérale.
+    content = (
+      <LoadBoundary>
+        <Suspense fallback={<Message title="Chargement…" transient />}>
+          <AccountTokens space={space} />
+        </Suspense>
+      </LoadBoundary>
+    );
   } else if (settingsOf !== null) {
     // Sans attendre l'arbre des pages : les réglages ont leurs propres appels. Un espace que
     // le compte n'a pas (encore) : on attend de savoir s'il vient de le rejoindre.

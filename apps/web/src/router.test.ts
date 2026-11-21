@@ -11,6 +11,7 @@ import {
   parseRoute,
   spacePath,
   spaceSettingsPath,
+  tokensPath,
   trashPath,
   useBlockTarget,
   useLinkInterception,
@@ -32,6 +33,15 @@ test("space_routes_are_parsed", () => {
   expect(parseRoute("/s/abc/autre")).toEqual({ name: "notFound" });
   expect(parseRoute("/s/")).toEqual({ name: "notFound" });
   expect(parseRoute("/s/%E0%A4%A")).toEqual({ name: "notFound" });
+});
+
+test("the_tokens_screen_has_its_address", () => {
+  // Les jetons d'API sont au compte, pas à un espace (lot 5, Task C1).
+  expect(tokensPath()).toBe("/account/tokens");
+  expect(parseRoute("/account/tokens")).toEqual({ name: "tokens" });
+  expect(parseRoute("/account/tokens/")).toEqual({ name: "tokens" });
+  expect(parseRoute("/account")).toEqual({ name: "notFound" });
+  expect(parseRoute("/account/autre")).toEqual({ name: "notFound" });
 });
 
 test("paths_roundtrip_through_the_parser", () => {

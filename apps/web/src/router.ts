@@ -1,7 +1,8 @@
 // Routeur minimal (History API) : `/` (le dernier espace ouvert, sinon le premier),
 // `/s/:spaceId` (un espace), `/s/:spaceId/trash` (sa corbeille), `/s/:spaceId/settings` (ses
-// réglages), `/p/:id` (une page : l'espace affiché est le sien ; `/p/:id#b=<bloc>` : la page, à
-// ce bloc, pour un résultat de recherche ou un rétrolien), `/login` et `/signup`
+// réglages), `/account/tokens` (les jetons d'API du compte, lot 5), `/p/:id` (une page :
+// l'espace affiché est le sien ; `/p/:id#b=<bloc>` : la page, à ce bloc, pour un résultat de
+// recherche ou un rétrolien), `/login` et `/signup`
 // (connexion et inscription, montrées par `SessionGate` sans session), `/invite` (un lien
 // d'invitation, `/invite#<jeton>`, avec ou sans session). Les liens internes restent de vrais
 // `<a href>` (nouvel onglet, copie du lien) ; un clic simple est intercepté pour changer de
@@ -18,6 +19,7 @@ export type Route =
   | { name: "space"; spaceId: string }
   | { name: "trash"; spaceId: string }
   | { name: "spaceSettings"; spaceId: string }
+  | { name: "tokens" }
   | { name: "notFound" };
 
 const CHANGE = "mementum:navigate";
@@ -36,6 +38,7 @@ export function parseRoute(pathname: string): Route {
   if (/^\/login\/?$/.test(pathname)) return { name: "login" };
   if (/^\/signup\/?$/.test(pathname)) return { name: "signup" };
   if (/^\/invite\/?$/.test(pathname)) return { name: "invite" };
+  if (/^\/account\/tokens\/?$/.test(pathname)) return { name: "tokens" };
   const page = /^\/p\/([^/]+)\/?$/.exec(pathname);
   if (page) {
     const id = segment(page[1]);
@@ -65,6 +68,11 @@ export function trashPath(spaceId: string): string {
 
 export function spaceSettingsPath(spaceId: string): string {
   return `/s/${encodeURIComponent(spaceId)}/settings`;
+}
+
+/** Les jetons d'API du compte : ils ne sont à aucun espace. */
+export function tokensPath(): string {
+  return "/account/tokens";
 }
 
 /** Ce qui précède, dans le fragment d'une adresse de page, l'identifiant du bloc visé. */

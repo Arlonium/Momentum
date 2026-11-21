@@ -95,6 +95,15 @@ export const KeyIcon = () => (
   </Icon>
 );
 
+/** Jetons d'API : l'invite d'un terminal, d'où un agent se branche. */
+export const TokenIcon = () => (
+  <Icon>
+    <rect x="3" y="4" width="18" height="16" rx="2" />
+    <path d="M7 10l3 2.5L7 15" />
+    <path d="M12.5 15H17" />
+  </Icon>
+);
+
 export const LogOutIcon = () => (
   <Icon>
     <path d="M9 4H5v16h4" />
