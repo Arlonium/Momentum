@@ -576,7 +576,7 @@ Décisions au registre du lot 4, « Recette jouée par le coordinateur (2026-11-
 
 ## Pièges rencontrés au lot 5
 
-Plan : [`docs/superpowers/plans/2026-11-20-p1-lot5-agents.md`](docs/superpowers/plans/2026-11-20-p1-lot5-agents.md) ; registre : [`docs/superpowers/logs/2026-11-20-p1-lot5-ledger.md`](docs/superpowers/logs/2026-11-20-p1-lot5-ledger.md), à partir de R1250. Chaque tâche ajoute ses pièges dans un sous-titre à elle.
+Plan : [`docs/superpowers/plans/2026-11-20-p1-lot5-agents.md`](docs/superpowers/plans/2026-11-20-p1-lot5-agents.md) ; registre : [`docs/superpowers/logs/2026-11-20-p1-lot5-ledger.md`](docs/superpowers/logs/2026-11-20-p1-lot5-ledger.md), à partir de R1250 ; avancement : [`docs/superpowers/logs/2026-11-20-p1-lot5-avancement.md`](docs/superpowers/logs/2026-11-20-p1-lot5-avancement.md) ; la recette du propriétaire se déroule avec [`docs/recette/2026-11-20-p1-lot5-recette.md`](docs/recette/2026-11-20-p1-lot5-recette.md) ; pour s'en servir, le README, « Brancher un agent ». Chaque tâche ajoute ses pièges dans un sous-titre à elle.
 
 ### Task M1 : le protocole MCP, sans réseau (`crates/mementum-mcp`)
 
@@ -759,6 +759,15 @@ Décisions au registre du lot 5, « Task X2 » (R1640 à R1656) et son tour de c
 - **Comparer une heure de Node à une heure de la page** : `Date.now()` des deux côtés (la même horloge du système), jamais `performance.now()` de la page contre une heure de Node (`agentCallsSeen`, `e2e/budgets.spec.ts`).
 - **Le serveur des budgets du navigateur se recompile en release même si les tests du CLI viennent de le construire** (`cargo run --release -p mementum-cli`, environ une minute et demie avec quatre tâches) : un binaire de test porte les fonctions `test-hooks`, que les dev-dépendances unifient, pas celui de `cargo run`.
 - **Un test qui crée plus de vingt jetons les répartit sur plusieurs comptes** : `MAX_LIVE_TOKENS` (20 jetons vivants par compte), `StoreError::TokenLimit` au-delà, même par `common::api_token`.
+
+### Task D : la documentation et la recette (`spec/mmd/SPEC.md`, `README.md`, la conception, `docs/REPRISE.md`, la recette)
+
+Décisions au registre du lot 5, « Task D » (R1500 à R1504).
+
+- **`spec/mmd/SPEC.md` est embarqué dans le binaire** (`include_str!`, `crates/mementum-mcp/src/spec.rs`) et servi tel quel aux agents comme ressource `mementum://spec/mmd` : le changer change ce que lit chaque agent, et le binaire. Trois tests le tiennent (`crates/mementum-mcp/tests/protocol.rs`) : `the_spec_resource_is_the_committed_text` ; `the_spec_resource_carries_the_base_rules_and_the_alias_rule`, qui exige ses marques (`&#32;`, `&lt;`, `&amp;`, `` `\#` ``, `` `1\.` ``, `<strong>`, `backticks`, `ambiguous_anchor`, `s'allonge`) : une récriture les garde ; et `no_tool_description_carries_the_mmd_spec`, qui interdit d'en recopier les balises dans une description d'outil. Le lancer après toute récriture : `cargo test -p mementum-mcp --test protocol spec`. Le texte tient sous 20 Ko (une lecture d'outil est bornée à 56 Kio, et Claude Code range dans un fichier une sortie qu'il juge longue, R1662) : un ajout s'y mesure.
+- **Une documentation du lot se vérifie contre le code, pas contre le plan** : le plan dit ce qu'on voulait, et plusieurs tâches ont fait autrement, pour une raison écrite au registre (l'écran des jetons, R1450 et R1500 ; `replace_block`, R1629 ; `set_properties`, R1502). Sources de vérité : le tableau des routes en tête de `crates/mementum-server/src/lib.rs` et sa liste `auth::TOKEN_ROUTES` ; les outils dans `spec/mcp/tools.json` (généré) et `crates/mementum-mcp/src/tools.rs` ; les messages dans `crates/mementum-server/src/error.rs`, `access.rs` (`barred`) et `routes/auth.rs` (`wrong_current_password`) ; les textes de l'écran dans `apps/web/src/account/` (un refus du serveur s'y affiche tel quel : puce « Messages du serveur, affichés tels quels » du lot 2) ; les réglages dans l'en-tête de `crates/mementum-server/src/config.rs`.
+- **Sur ce poste, `python3` et `python` n'existent pas** (le raccourci du Microsoft Store répond) : une récriture de documentation passe par l'outil d'édition, ou par `sed -i` pour une ligne (Git Bash le garde en LF), jamais par un script Python.
+- **La recette d'un lot à agents a une section que seul le propriétaire joue** : `claude mcp add` écrit dans la configuration de Claude Code de qui le lance (R1258) ; un agent ne la joue pas, même pour la recette, et la note comme telle. Ce que la recette demande de renvoyer (ce que la configuration garde de l'en-tête, shell par shell) se dit sans recopier un jeton.
 
 ## Tester
 
