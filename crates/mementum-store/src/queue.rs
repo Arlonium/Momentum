@@ -19,11 +19,16 @@
 //! - les tours sont donnés **voie par voie, tour à tour** ([`Lane`]) : un tour rendu va à la voie
 //!   suivante de la ronde de celles qui attendent, et, dans cette voie, à sa plus ancienne
 //!   écriture. Une voie, c'est l'acteur d'une page (son journal, ses instantanés, ses versions),
-//!   ou le compte que le serveur a nommé pour la tâche qui écrit ([`writes_by`],
-//!   [`attribute_writes_to`]), ou, quand personne n'est nommé, une voie commune. Une écriture
-//!   attend donc au plus l'écriture en cours et une écriture de chaque autre voie qui attend,
-//!   jamais toute la rafale d'un compte ; et les écritures d'un même compte gardent leur ordre
-//!   d'arrivée.
+//!   ou la part que le serveur a nommée pour la tâche qui écrit ([`writes_by`],
+//!   [`attribute_writes_to`]), ou, quand personne n'est nommé, une voie commune. Une part, c'est
+//!   la session d'un compte, ou tous les jetons d'API de ce compte, à part de sa session (lot 5,
+//!   Ruling R1640) : un compte qui a un agent a deux voies. Une écriture attend donc au plus
+//!   l'écriture en cours et une écriture de chaque autre voie qui attend, jamais toute la rafale
+//!   d'un compte ou de ses jetons ; et les écritures d'une même part gardent leur ordre d'arrivée,
+//!   pas celles d'un même compte : une écriture de la session peut passer devant une écriture
+//!   d'un jeton du compte mise en file avant elle. Ce qui doit passer après les écritures déjà en
+//!   file des jetons d'un compte (leur révocation, le changement de mot de passe) écrit dans la
+//!   voie de leur part (Ruling R1658).
 //!
 //! Un tour tenu à tort gèlerait toutes les écritures, sans erreur : une écriture qui attend son
 //! tour plus de [`crate::StoreOptions::slow_write`], ou un tour tenu plus longtemps, se
@@ -57,7 +62,9 @@ pub(crate) enum Lane {
     /// écriture à la fois ; sa voie ne passe donc jamais derrière la rafale d'un compte, même
     /// celle du compte dont il écrit la frappe.
     Page(Uuid),
-    /// Le compte que le serveur a nommé pour la tâche qui écrit.
+    /// La part que le serveur a nommée pour la tâche qui écrit : la session d'un compte (son
+    /// identifiant), ou tous les jetons d'API d'un compte (un identifiant tiré du compte, qu'aucun
+    /// compte ne porte, `auth::tokens_party` du serveur ; Rulings R1640, R1658).
     Account(Uuid),
     /// Le dépôt des fichiers : les écritures faites sous son verrou, commun à toute l'instance
     /// (l'attache d'un envoi, le ménage ; Ruling R522). Sous ce verrou, elles passent une à une :
@@ -88,7 +95,8 @@ pub(crate) enum Lane {
 }
 
 impl Lane {
-    /// La voie de la tâche qui écrit : le compte qu'elle a nommé, sinon la voie commune.
+    /// La voie de la tâche qui écrit : la part (un compte, ou les jetons d'un compte) qu'elle a
+    /// nommée, sinon la voie commune.
     pub(crate) fn caller() -> Lane {
         writer().map_or(Lane::Common, Lane::Account)
     }
