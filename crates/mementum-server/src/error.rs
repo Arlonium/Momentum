@@ -771,6 +771,16 @@ impl ApiError {
         )
     }
 
+    /// `422 invalid_level` : un jeton « Lecture » demandé avec l'option corbeille (Ruling R1520).
+    pub fn read_token_with_trash() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidLevel,
+            "un jeton « Lecture » ne met pas de page à la corbeille et ne l'en sort pas : l'option \
+             « corbeille » ne se donne qu'avec « Modification » ; rien n'a été créé",
+        )
+    }
+
     /// `422 invalid_expiry` : l'échéance d'un jeton n'est pas un nombre de jours permis.
     pub fn invalid_expiry(max_days: i64) -> ApiError {
         ApiError::new(

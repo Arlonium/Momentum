@@ -26,7 +26,8 @@
 //!
 //! **Refus de la création**, dans l'ordre : `401` sans session, `409 account_changed` ; le corps
 //! (`400` ou `422 invalid_json`) ; `422 invalid_name`, `invalid_level` (tout autre niveau que
-//! `read` ou `edit`, `full` compris, Ruling R1218), `invalid_scope` (une portée mal formée),
+//! `read` ou `edit`, `full` compris, Ruling R1218 ; ou `read` avec l'option corbeille, Ruling
+//! R1520), `invalid_scope` (une portée mal formée),
 //! `invalid_expiry` ; `429 too_many_attempts` ; `401 invalid_credentials` (mot de passe faux, ou
 //! remplacé pendant sa vérification) ; `422 invalid_scope` pour un espace où le compte n'a aucun
 //! rôle, une page qu'il ne voit pas ou à la corbeille, un identifiant inconnu ou mal écrit : **une
@@ -124,6 +125,12 @@ pub(crate) async fn create(
     let Json(body) = body?;
     let name = token_name(&body.name)?;
     let level = token_level(&body.level)?;
+    // Mettre à la corbeille et en sortir demandent de modifier : l'option ne ferait rien sur un
+    // jeton « Lecture », et la liste, `/me` et `workspace_info` diraient « corbeille permise »
+    // (correction groupée, défaut I4, Ruling R1520 ; l'écran grise la case, R1665).
+    if level == TokenLevel::Read && body.can_trash {
+        return Err(ApiError::read_token_with_trash());
+    }
     let asked = asked_scope(&body)?;
     let expires_in = expiry(body.expires_in_days)?;
     // Le mot de passe redemandé (décision L2), dans les fenêtres de son frein (Ruling R1366).

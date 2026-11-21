@@ -363,6 +363,10 @@ async fn malformed_bodies_are_refused_before_the_password() {
             }),
             "invalid_scope",
         ),
+        (
+            json!({ "level": "read", "canTrash": true }),
+            "invalid_level",
+        ),
         (json!({ "expiresInDays": 0 }), "invalid_expiry"),
         (json!({ "expiresInDays": 3651 }), "invalid_expiry"),
     ];
