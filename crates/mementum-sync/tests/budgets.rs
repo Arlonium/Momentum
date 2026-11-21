@@ -893,3 +893,201 @@ fn e2e_wait_follows_idle_close() {
         "`SERVER_IDLE_CLOSE_MS` (budgets.spec.ts) doit valoir `idle_close` de `SyncConfig`"
     );
 }
+
+/// Une écriture d'agent (Task S4 du lot 5) sur la lecture `read`.
+fn agent_edit(
+    writer: mementum_store::Writer,
+    read: &mementum_sync::PageRead,
+    ops: Vec<mementum_crdt::ops::Operation>,
+) -> mementum_sync::Edit {
+    mementum_sync::Edit {
+        ops,
+        base: Some((read.revision.clone(), Some(read.hashes.clone()))),
+        writer,
+        ..mementum_sync::Edit::default()
+    }
+}
+
+/// Le remplacement d'un bloc par un paragraphe.
+fn replace_block_op(anchor: &str, mmd: &str) -> mementum_crdt::ops::Operation {
+    mementum_crdt::ops::Operation::ReplaceBlock {
+        anchor: anchor.into(),
+        blocks: parse(mmd).unwrap(),
+        allow_deleting_content: false,
+    }
+}
+
+/// Task S4 du lot 5 : la durée d'une écriture d'agent d'une opération sur une page de 10 000
+/// blocs, appel du hub compris (une commande de l'acteur : lecture des blocs et de la révision,
+/// plan, estimation, écriture par différence, journal, diffusion, relecture des blocs écrits), et
+/// celle de la lecture d'une page (`Hub::read_page`, empreintes comprises). Une mesure, sans
+/// borne : X2 en fait un budget s'il le faut (décision L14).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn measure_agent_edit_on_a_10000_block_page() {
+    let _alone = alone().await;
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd(&page_mmd()).await;
+    let writer = mementum_store::Writer::default();
+    let mut reads = Vec::with_capacity(KEYSTROKES);
+    let mut edits: Vec<(&str, Vec<Duration>)> = vec![
+        ("str_replace dans un bloc", Vec::new()),
+        ("insert d'un bloc", Vec::new()),
+        ("replace_block", Vec::new()),
+    ];
+    for round in 0..KEYSTROKES {
+        let start = Instant::now();
+        let read = f.hub.read_page(f.page).await.unwrap();
+        reads.push(start.elapsed());
+        let middle = read.blocks[BLOCKS / 2].id.clone();
+        let ops = [
+            vec![mementum_crdt::ops::Operation::StrReplace {
+                old: "ordinaire".into(),
+                new: format!("ordinaire {round}"),
+                anchor: Some(middle.clone()),
+                replace_all: false,
+            }],
+            vec![mementum_crdt::ops::Operation::Insert {
+                at: mementum_crdt::ops::Place::After(middle.clone()),
+                blocks: parse(&format!("Inséré {round}\n")).unwrap(),
+            }],
+            vec![replace_block_op(&middle, &format!("Remplacé {round}\n"))],
+        ];
+        for (ops, (_, times)) in ops.into_iter().zip(edits.iter_mut()) {
+            let read = f.hub.read_page(f.page).await.unwrap();
+            let start = Instant::now();
+            f.hub
+                .edit_page(f.page, agent_edit(writer, &read, ops))
+                .await
+                .unwrap();
+            times.push(start.elapsed());
+        }
+    }
+    println!(
+        "MESURE lecture d'une page de {BLOCKS} blocs par un agent (blocs, révision, empreintes) : \
+         p50 {:?}, p95 {:?}, max {:?}",
+        percentile(&reads, 0.5),
+        percentile(&reads, 0.95),
+        reads.iter().max().unwrap()
+    );
+    for (what, times) in &edits {
+        println!(
+            "MESURE écriture d'agent, {what}, page de {BLOCKS} blocs : p50 {:?}, p95 {:?}, max {:?} \
+             ({KEYSTROKES} écritures)",
+            percentile(times, 0.5),
+            percentile(times, 0.95),
+            times.iter().max().unwrap()
+        );
+    }
+}
+
+/// Task S4 du lot 5 : de l'appel d'un agent à l'écriture reçue par un navigateur (un client de
+/// test), sur une page de 10 000 blocs. La cible reste celle de la frappe, 150 ms (« Budgets de
+/// performance » du plan du lot 5) ; une mesure, sans borne.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn measure_agent_edit_seen_by_a_client() {
+    let _alone = alone().await;
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd(&page_mmd()).await;
+    let other = f.client().await;
+    let mut times = Vec::with_capacity(KEYSTROKES);
+    for round in 0..KEYSTROKES {
+        let read = f.hub.read_page(f.page).await.unwrap();
+        let middle = read.blocks[BLOCKS / 2].id.clone();
+        let ops = vec![mementum_crdt::ops::Operation::StrReplace {
+            old: "ordinaire".into(),
+            new: format!("ordinaire {round}"),
+            anchor: Some(middle),
+            replace_all: false,
+        }];
+        let before = other.updates_received();
+        let start = Instant::now();
+        f.hub
+            .edit_page(
+                f.page,
+                agent_edit(mementum_store::Writer::default(), &read, ops),
+            )
+            .await
+            .unwrap();
+        assert!(
+            other
+                .wait_until(Duration::from_secs(60), |c| c.updates_received() > before)
+                .await,
+            "l'écriture de l'agent n'est pas arrivée"
+        );
+        times.push(start.elapsed());
+    }
+    println!(
+        "MESURE écriture d'agent vue par un client, page de {BLOCKS} blocs : p50 {:?}, p95 {:?}, \
+         max {:?} ({KEYSTROKES} écritures)",
+        percentile(&times, 0.5),
+        percentile(&times, 0.95),
+        times.iter().max().unwrap()
+    );
+}
+
+/// Task S4 du lot 5 (R1234, R1257, R1572) : une opération destructrice d'un jeton qui coupe une
+/// version `before_agent` sur une page de 10 000 blocs : la durée de l'appel (deux commandes et la
+/// version entre elles), et les frappes d'un autre pendant ce temps, vues par un troisième. La
+/// version est retenue par la garde du hub jusqu'à ce que la première commande soit finie, puis
+/// lâchée ; les frappes partent aussitôt, une à une, jusqu'à la fin de l'appel. Une mesure, sans
+/// borne.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
+async fn measure_before_agent_version_of_a_10000_block_page() {
+    let _alone = alone().await;
+    let f = Fixture::new(SyncConfig::default()).await;
+    f.write_mmd(&page_mmd()).await;
+    let id = f.ids().await[0].clone();
+    let (author, other) = (f.client().await, f.client().await);
+    let mut calls = Vec::new();
+    let mut keystrokes = Vec::new();
+    for round in 0..5 {
+        // Une frappe d'une personne : la tranche est écrite par un autre que le jeton.
+        keystroke_seen(&author, &other, &id).await;
+        let read = f.hub.read_page(f.page).await.unwrap();
+        let target = read.blocks[BLOCKS / 2].id.clone();
+        let edit = agent_edit(
+            mementum_store::Writer {
+                account: None,
+                token: Some(uuid::Uuid::now_v7()),
+            },
+            &read,
+            vec![replace_block_op(&target, &format!("Remplacé {round}\n"))],
+        );
+        let held = f.hub.hold_agent_versions();
+        let (hub, page) = (f.hub.clone(), f.page);
+        let start = Instant::now();
+        let task = tokio::spawn(async move { hub.edit_page(page, edit).await });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while f.hub.agent_versions_waiting() == 0 {
+            assert!(Instant::now() < deadline, "aucune version retenue");
+            tokio::task::yield_now().await;
+        }
+        let first = start.elapsed();
+        drop(held);
+        while !task.is_finished() {
+            keystrokes.push(keystroke_seen(&author, &other, &id).await);
+        }
+        let edited = task.await.unwrap().unwrap();
+        assert!(edited.version.is_some(), "aucune version coupée");
+        calls.push((first, start.elapsed()));
+    }
+    let versions = f.store.list_versions(f.page).await.unwrap();
+    println!(
+        "MESURE opération destructrice d'un agent avec version, page de {BLOCKS} blocs \
+         (première commande, appel entier) : {calls:?} ; {} versions",
+        versions.len()
+    );
+    if !keystrokes.is_empty() {
+        println!(
+            "MESURE frappes d'un autre pendant la version et la seconde commande : p50 {:?}, \
+             p95 {:?}, max {:?} ({} frappes)",
+            percentile(&keystrokes, 0.5),
+            percentile(&keystrokes, 0.95),
+            keystrokes.iter().max().unwrap(),
+            keystrokes.len()
+        );
+    }
+}
