@@ -210,18 +210,22 @@ test("versions_are_listed_most_recent_first_with_their_authors", async () => {
 });
 
 test("a_before_agent_version_says_what_it_keeps", async () => {
-  // Lot 5 : ce qu'une écriture d'agent a remplacé, comme ce qu'une restauration a remplacé.
+  // Lot 5 : ce qu'une écriture d'agent a remplacé, comme ce qu'une restauration a remplacé. Son
+  // étiquette ne dit pas « par un agent », que dit déjà la mention d'un auteur qui a écrit par un
+  // jeton (recette du lot 5, E4, R1552) : sur une même ligne, les deux se confondaient.
   const replaced: Version = {
     id: "v3",
     createdAt: NOW - MINUTE,
     reason: "before_agent",
     authors: [author("bruno", "Bruno")],
-    agentAuthors: [],
+    agentAuthors: ["bruno"],
   };
   await opened({ versions: [replaced, v2, v1] });
   const [, agent, restore, ordinary] = items();
   const tags = (item: Element) => [...item.querySelectorAll(".mm-history-tag")].map((tag) => tag.textContent);
-  expect(tags(agent)).toEqual(["avant une modification par un agent"]);
+  expect(tags(agent)).toEqual(["gardée avant qu'un agent la modifie"]);
+  expect(agent.querySelector(".mm-history-names")!.textContent).toBe("Bruno (par un agent)");
+  expect(tags(agent).join(" ")).not.toContain("par un agent");
   expect(tags(restore)).toEqual(["avant une restauration"]);
   expect(tags(ordinary)).toEqual([]);
 });

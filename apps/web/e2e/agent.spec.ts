@@ -710,8 +710,8 @@ test("an_agent_write_shows_in_the_history_as_an_agent", async ({ browser }) => {
 });
 
 test("what_an_agent_replaced_is_restored_from_its_before_agent_version", async ({ browser }) => {
-  // Alice tape un paragraphe ; l'agent le remplace par `replace_block`. Une version « avant une
-  // modification par un agent » le garde (R1234), et Alice le restaure depuis l'historique.
+  // Alice tape un paragraphe ; l'agent le remplace par `replace_block`. Une version « gardée avant
+  // qu'un agent la modifie » le garde (R1234, R1552), et Alice le restaure depuis l'historique.
   const alice = await signUpAccount(`Alice ${unique()}`);
   const api = await apiAs(alice);
   const space = await firstSpace(api);
@@ -739,7 +739,7 @@ test("what_an_agent_replaced_is_restored_from_its_before_agent_version", async (
   await expect(editorOf(p)).not.toContainText("Le paragraphe qu'Alice a tapé.");
 
   const dialog = await openHistory(p);
-  const kept = versionItems(dialog).filter({ hasText: "avant une modification par un agent" });
+  const kept = versionItems(dialog).filter({ hasText: "gardée avant qu'un agent la modifie" });
   await expect(kept).toHaveCount(1);
   await kept.getByRole("button").click();
   await expect(dialog.locator(".mm-preview-editor .bn-editor")).toContainText("Le paragraphe qu'Alice a tapé.");
