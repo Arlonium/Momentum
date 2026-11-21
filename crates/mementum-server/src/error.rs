@@ -650,6 +650,73 @@ impl ApiError {
         error
     }
 
+    /// `409 token_limit` : le compte a déjà vingt jetons vivants (Ruling R1220). Rien n'est créé.
+    pub fn token_limit() -> ApiError {
+        ApiError::new(
+            StatusCode::CONFLICT,
+            ErrorCode::TokenLimit,
+            format!(
+                "tu as déjà {} jetons d'API vivants : révoque-en un avant d'en créer un autre ; \
+                 rien n'a été créé",
+                mementum_store::MAX_LIVE_TOKENS
+            ),
+        )
+    }
+
+    /// `422 invalid_scope` d'une portée que la personne ne voit pas : un espace où elle n'a aucun
+    /// rôle, une page qu'elle ne voit pas ou à la corbeille, un identifiant inconnu ou mal écrit.
+    /// La même réponse pour tous : elle ne dit pas si l'espace ou la page existe.
+    pub fn unseen_scope() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidScope,
+            "l'espace ou une des pages de la portée n'est pas un espace ou une page que tu vois \
+             (hors corbeille) : choisis-les dans ta barre latérale ; rien n'a été créé",
+        )
+    }
+
+    /// `422 invalid_scope` d'une portée mal formée (`message` dit ce qui manque) : rien n'y est
+    /// lu de la base.
+    pub fn invalid_scope(message: impl Into<String>) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidScope,
+            message,
+        )
+    }
+
+    /// `422 invalid_level` : le niveau d'un jeton n'est ni `read` ni `edit` (Ruling R1218).
+    pub fn invalid_level() -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidLevel,
+            "un jeton d'API se donne au niveau « read » (lire) ou « edit » (modifier), jamais \
+             plus ; rien n'a été créé",
+        )
+    }
+
+    /// `422 invalid_expiry` : l'échéance d'un jeton n'est pas un nombre de jours permis.
+    pub fn invalid_expiry(max_days: i64) -> ApiError {
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            ErrorCode::InvalidExpiry,
+            format!(
+                "l'échéance d'un jeton se donne en jours, de 1 à {max_days}, ou pas du tout ; \
+                 rien n'a été créé"
+            ),
+        )
+    }
+
+    /// `404 not_found` d'un jeton d'API : inconnu, d'un autre compte, mal nommé, ou mort depuis
+    /// trop longtemps pour être encore lu (Ruling R1270). La même réponse dans tous les cas.
+    pub fn token_not_found() -> ApiError {
+        ApiError::new(
+            StatusCode::NOT_FOUND,
+            ErrorCode::NotFound,
+            "jeton d'API introuvable",
+        )
+    }
+
     /// `400 invalid_request` : le corps d'un envoi s'est interrompu avant sa fin.
     pub fn interrupted_upload() -> ApiError {
         ApiError::new(

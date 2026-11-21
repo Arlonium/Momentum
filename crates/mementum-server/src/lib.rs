@@ -11,6 +11,10 @@
 //! | `POST /api/v1/auth/logout` | non | `204`, session supprimée, cookie effacé, connexions de synchro du compte fermées (Ruling R73) ; sans session : `204` aussi |
 //! | `POST /api/v1/auth/password` | oui | `200`, `PasswordChanged` (`tokensRevoked` : les jetons d'API vivants que le changement a révoqués, Ruling R1221) : toutes les sessions du compte sont supprimées, tous ses jetons d'API révoqués, et ses connexions de synchro fermées ; la demande repart avec une session neuve (cookie de la réponse) ; `401 invalid_credentials` (mot de passe actuel faux, ou remplacé pendant sa vérification : rien n'est changé, Ruling R120) ; `422 invalid_password` ; `429 too_many_attempts` (avec `Retry-After` ; frein à part de celui de la connexion, Ruling R76) |
 //! | `GET /api/v1/me` | oui | [`Me`] : le compte et ses espaces |
+//! | `GET /api/v1/tokens` | oui, jamais par jeton | `TokenInfo[]` : les jetons d'API du compte qui se lisent encore (vivants, ou morts depuis moins de quatre-vingt-dix jours, Ruling R1270), les vivants d'abord ; ni leur texte ni leur hachage, leurs quatre derniers caractères ; le titre d'une page de leur portée seulement si le compte la voit encore, le nom de leur espace seulement s'il y a un rôle (Ruling R1368) |
+//! | `POST /api/v1/tokens`, corps `CreateToken` | oui, jamais par jeton, et le mot de passe du compte (décision L2) | `201`, `TokenCreated` : le jeton (`mmt_…`), montré cette fois seulement, et sa ligne de la liste ; refus dans l'ordre : `422 invalid_name`, `invalid_level` (ni `read` ni `edit`, Ruling R1218), `invalid_scope` (une portée mal formée), `invalid_expiry` ; `429 too_many_attempts` (dix mots de passe faux en quinze minutes, fenêtres à part de la connexion et du changement de mot de passe, Ruling R1366) ; `401 invalid_credentials` (mot de passe faux, ou remplacé pendant sa vérification : rien n'est créé, Ruling R120) ; `422 invalid_scope` (un espace sans rôle, une page qu'on ne voit pas ou à la corbeille, un identifiant inconnu ou mal écrit : une seule réponse, Ruling R1367) ; `409 token_limit` (vingt jetons vivants, Ruling R1220) |
+//! | `DELETE /api/v1/tokens/{id}` | oui, jamais par jeton ; le jeton est le sien | `204` : le jeton ne vaut plus dès l'appel suivant ; déjà révoqué : `204`, rien n'est écrit ; un jeton d'un autre compte, inconnu, mal nommé, ou mort depuis quatre-vingt-dix jours : `404`, la même réponse |
+//! | `GET /api/v1/tokens/{id}/calls?before=&outcome=` | oui, jamais par jeton ; le jeton est le sien (mort compris, tant qu'il est gardé) | `TokenCalls` : son journal d'activité, cinquante lignes au plus, de la plus récente à la plus ancienne (`before` : le rang de la dernière lue ; `outcome` : `ok`, `refused` ou `error`), avec les refus du débit comptés et les lignes purgées ; le titre d'une page seulement si le compte la voit encore ; `404` comme la révocation ; `400 invalid_request` pour une adresse qui ne se lit pas |
 //! | `POST /api/v1/spaces` | oui | `201`, `SpaceInfo` : l'espace créé, dont le compte est `owner` ; `422 invalid_name` |
 //! | `PATCH /api/v1/spaces/{id}` | `admin` | `SpaceInfo` ; `422 invalid_name` |
 //! | `GET /api/v1/spaces/{id}/members` | `member` | `Member[]` : invités compris, dans l'ordre d'arrivée ; un invité : `403` |
@@ -99,7 +103,8 @@
 //! hors des routes ouvertes (`auth::TOKEN_ROUTES` : l'arbre, la recherche, la création d'une page,
 //! la lecture, le renommage et la place d'une page parmi ses sœurs, la corbeille et la
 //! restauration, la duplication, le MMD en lecture, les rétroliens, la lecture d'un fichier ; toute
-//! autre route est dans `auth::SESSION_ONLY_ROUTES`, `PUT …/mmd`, `/sync` et `/events` compris),
+//! autre route est dans `auth::SESSION_ONLY_ROUTES`, `PUT …/mmd`, les jetons eux-mêmes, `/sync` et
+//! `/events` compris),
 //! rien de lu ni d'écrit ; `429 token_busy` (avec `Retry-After`) au-delà de 120 appels par minute
 //! glissante pour le jeton, ou de 240 pour tous les jetons de son compte, ou de 16 et 32 Mio de
 //! corps (`MEMENTUM_TOKEN_CALLS_PER_MIN`, `MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN`) ; puis le compte
@@ -296,6 +301,7 @@ mod routes {
     pub(crate) mod sharing;
     pub(crate) mod spaces;
     pub(crate) mod sync;
+    pub(crate) mod tokens;
     pub(crate) mod versions;
 }
 
@@ -715,6 +721,12 @@ fn router(state: AppState) -> Router {
         .route("/api/v1/auth/logout", post(routes::auth::logout))
         .route("/api/v1/auth/password", post(routes::auth::change_password))
         .route("/api/v1/me", get(routes::auth::me))
+        .route(
+            "/api/v1/tokens",
+            get(routes::tokens::list).post(routes::tokens::create),
+        )
+        .route("/api/v1/tokens/{id}", delete(routes::tokens::revoke))
+        .route("/api/v1/tokens/{id}/calls", get(routes::tokens::calls))
         .route("/api/v1/spaces", post(spaces::create))
         .route("/api/v1/spaces/{id}", patch(spaces::update))
         .route("/api/v1/spaces/{id}/members", get(spaces::members))

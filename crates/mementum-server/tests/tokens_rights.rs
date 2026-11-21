@@ -133,6 +133,11 @@ fn only_listed_routes_accept_a_token() {
         ("PUT", "/api/v1/pages/{id}/access/general"),
         ("POST", "/api/v1/pages/{id}/files"),
         ("POST", "/api/v1/auth/password"),
+        // Un jeton ne crée, ne liste ni ne révoque un jeton (Task S6).
+        ("GET", "/api/v1/tokens"),
+        ("POST", "/api/v1/tokens"),
+        ("DELETE", "/api/v1/tokens/{id}"),
+        ("GET", "/api/v1/tokens/{id}/calls"),
         ("GET", "/sync/{id}"),
         ("GET", "/events/{id}"),
     ] {

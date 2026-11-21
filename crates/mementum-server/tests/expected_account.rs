@@ -14,10 +14,11 @@ use axum::body::Body;
 use axum::http::{HeaderValue, Method, Request, StatusCode, header};
 use common::sync::{members, open_app, user};
 use common::{
-    Account, Browser, PASSWORD, Reply, Team, handshake, json_request, outcome, page_routes,
-    sync_url,
+    Account, Browser, PASSWORD, Reply, Team, api_token, handshake, json_request, outcome,
+    page_routes, sync_url,
 };
 use mementum_acl::Level;
+use mementum_store::{TokenLevel, TokenScope};
 use serde_json::json;
 use sqlx::Row;
 use uuid::Uuid;
@@ -33,6 +34,37 @@ fn naming(mut request: Request<Body>, values: &[String]) -> Request<Body> {
             .append(ACCOUNT, HeaderValue::from_str(value).unwrap());
     }
     request
+}
+
+/// Une requête sur chaque route des jetons d'API (Task S6), le jeton `token` nommé dans le chemin
+/// et un corps de création juste, mot de passe compris : `(nom, requête)`.
+fn token_routes(token: &str) -> Vec<(&'static str, Request<Body>)> {
+    vec![
+        (
+            "lister les jetons",
+            Request::get("/api/v1/tokens").body(Body::empty()).unwrap(),
+        ),
+        (
+            "créer un jeton",
+            json_request(
+                Method::POST,
+                "/api/v1/tokens",
+                &json!({ "name": "agent", "level": "read", "scope": "all", "password": PASSWORD }),
+            ),
+        ),
+        (
+            "révoquer un jeton",
+            Request::delete(format!("/api/v1/tokens/{token}"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+        (
+            "l'activité d'un jeton",
+            Request::get(format!("/api/v1/tokens/{token}/calls"))
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    ]
 }
 
 /// Ce que la vérification doit répondre.
@@ -338,6 +370,15 @@ async fn the_account_refusal_comes_right_after_the_401_and_writes_nothing() {
     team.trash(trashed).await;
     let unknown = Uuid::now_v7().to_string();
     let olga = [team.olga.id.to_string()];
+    let (_, token) = api_token(
+        &t.store,
+        team.mona.id,
+        TokenLevel::Read,
+        TokenScope::All,
+        false,
+    )
+    .await;
+    let token = token.to_string();
 
     // `401` d'abord.
     let nobody = t.browser();
@@ -354,7 +395,11 @@ async fn the_account_refusal_comes_right_after_the_401_and_writes_nothing() {
         .assert_status(StatusCode::NO_CONTENT);
     for (who, by) in [("sans session", &nobody), ("session fermée", &closed)] {
         let me = Request::get("/api/v1/me").body(Body::empty()).unwrap();
-        for (route, request) in page_routes(&open).into_iter().chain([("GET me", me)]) {
+        for (route, request) in page_routes(&open)
+            .into_iter()
+            .chain([("GET me", me)])
+            .chain(token_routes(&token))
+        {
             let reply = by.send(naming(request, &olga)).await;
             assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{who}, {route}");
             reply.assert_error(StatusCode::UNAUTHORIZED, "unauthenticated");
@@ -460,7 +505,7 @@ async fn the_account_refusal_comes_right_after_the_401_and_writes_nothing() {
             ),
         ),
     ];
-    for (route, request) in space_routes {
+    for (route, request) in space_routes.into_iter().chain(token_routes(&token)) {
         let reply = mona.send(naming(request, &olga)).await;
         assert_eq!(outcome(&reply), outcome(&first), "{route}");
     }

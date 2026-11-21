@@ -838,6 +838,184 @@ pub struct PasswordChanged {
     pub tokens_revoked: u64,
 }
 
+/// Le niveau d'un jeton d'API (lot 5, Ruling R1218) : lire, ou modifier ; jamais l'accès
+/// complet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenLevel {
+    Read,
+    Edit,
+}
+
+/// Ce qu'un jeton d'API ouvre (Ruling R1219) : tous les espaces de son compte, un seul, ou des
+/// pages d'un seul espace avec leurs sous-pages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenScope {
+    All,
+    Space,
+    Pages,
+}
+
+/// Corps de `POST /api/v1/tokens` (une session seulement). `level` et `scope` sont lus comme du
+/// texte, pour qu'une autre valeur reçoive `422 invalid_level` ou `invalid_scope`, et non le
+/// refus d'un corps illisible.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, TS)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CreateToken {
+    /// 1 à 60 caractères, sans caractère de contrôle ; espaces de bord retirées.
+    pub name: String,
+    /// `read` ou `edit`.
+    #[ts(as = "TokenLevel")]
+    pub level: String,
+    /// `all`, `space` ou `pages`.
+    #[ts(as = "TokenScope")]
+    pub scope: String,
+    /// L'espace, pour `space` et `pages` ; absent ou `null` pour `all`.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub space_id: Option<String>,
+    /// Les pages, pour `pages` seulement : 1 à 50, de l'espace nommé, chacune avec ses
+    /// sous-pages.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub page_ids: Option<Vec<String>>,
+    /// La corbeille permise au jeton (mettre à la corbeille et restaurer) ; absent : non.
+    #[serde(default)]
+    pub can_trash: bool,
+    /// L'échéance, en jours depuis la création (1 à 3 650) ; absent ou `null` : aucune.
+    #[serde(default)]
+    #[ts(optional = nullable, type = "number | null")]
+    pub expires_in_days: Option<i64>,
+    /// Le mot de passe actuel du compte, redemandé (décision L2).
+    pub password: String,
+}
+
+/// L'espace d'un jeton, tel que son compte le voit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenSpace {
+    pub id: String,
+    /// Son nom, si le compte y a encore un rôle ; sinon `null`.
+    pub name: Option<String>,
+}
+
+/// Une page de la portée d'un jeton.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenPage {
+    pub id: String,
+    /// Son titre, si le compte la voit encore (corbeille comprise) ; sinon `null`.
+    pub title: Option<String>,
+}
+
+/// Un jeton d'API, tel que son compte le voit (`GET /api/v1/tokens`) : jamais son texte ni son
+/// hachage, seulement ses quatre derniers caractères.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenInfo {
+    pub id: String,
+    pub name: String,
+    /// Les quatre derniers caractères du jeton, pour le reconnaître.
+    pub hint: String,
+    pub level: TokenLevel,
+    pub scope: TokenScope,
+    /// L'espace d'une portée `space` ou `pages` ; `null` pour `all`.
+    pub space: Option<TokenSpace>,
+    /// Les pages d'une portée `pages`, celles qui restent (une page supprimée part de la
+    /// portée) ; vide pour les autres portées.
+    pub pages: Vec<TokenPage>,
+    pub can_trash: bool,
+    /// Millisecondes Unix, comme les dates qui suivent.
+    #[ts(type = "number")]
+    pub created_at: i64,
+    #[ts(type = "number | null")]
+    pub expires_at: Option<i64>,
+    /// Le plus récent des appels écrits à son journal (un refus du débit n'y compte pas).
+    #[ts(type = "number | null")]
+    pub last_used_at: Option<i64>,
+    #[ts(type = "number | null")]
+    pub revoked_at: Option<i64>,
+    /// Le jeton vaut encore à la lecture, d'après l'horloge du serveur : ni révoqué, ni échu.
+    pub live: bool,
+    /// Ses appels refusés par le débit (`429 token_busy`), comptés sans ligne au journal.
+    #[ts(type = "number")]
+    pub busy_count: i64,
+    /// Les lignes de son journal que la purge a retirées (les mille derniers appels réussis et
+    /// les deux cents derniers autres restent).
+    #[ts(type = "number")]
+    pub calls_purged: i64,
+}
+
+/// Réponse de `POST /api/v1/tokens` : le jeton, **montré cette fois seulement** (`mmt_` et 43
+/// caractères), et ce que la liste en montrera.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenCreated {
+    pub token: String,
+    pub info: TokenInfo,
+}
+
+/// Par où un appel par jeton est venu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenCallSurface {
+    Mcp,
+    Rest,
+}
+
+/// L'issue d'un appel par jeton.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum TokenCallOutcome {
+    Ok,
+    Refused,
+    Error,
+}
+
+/// Une ligne du journal d'activité d'un jeton (Ruling R1245) : ni texte cherché, ni MMD, ni
+/// texte remplacé.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenCall {
+    /// Son rang dans le journal : `before` de la page suivante.
+    #[ts(type = "number")]
+    pub id: i64,
+    /// Millisecondes Unix.
+    #[ts(type = "number")]
+    pub at: i64,
+    pub surface: TokenCallSurface,
+    /// L'outil MCP, ou la route (« MÉTHODE chemin déclaré »).
+    pub tool: String,
+    pub space_id: Option<String>,
+    pub page_id: Option<String>,
+    /// Le titre de la page, si le compte la voit encore (corbeille comprise) ; sinon `null`.
+    pub page_title: Option<String>,
+    pub outcome: TokenCallOutcome,
+    /// Le code du refus ou de l'erreur.
+    pub code: Option<String>,
+    pub revision_before: Option<String>,
+    pub revision_after: Option<String>,
+    #[ts(type = "number | null")]
+    pub blocks_touched: Option<i64>,
+}
+
+/// Réponse de `GET /api/v1/tokens/{id}/calls` : cinquante lignes au plus, de la plus récente à la
+/// plus ancienne.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[serde(rename_all = "camelCase")]
+pub struct TokenCalls {
+    pub calls: Vec<TokenCall>,
+    /// Des lignes plus anciennes restent : les demander avec `before`, l'`id` de la dernière.
+    pub more: bool,
+    /// Ses appels refusés par le débit, comptés sans ligne.
+    #[ts(type = "number")]
+    pub busy_count: i64,
+    /// Les lignes que la purge a retirées.
+    #[ts(type = "number")]
+    pub purged: i64,
+}
+
 /// Code d'une erreur de l'API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -1005,6 +1183,17 @@ pub enum ErrorCode {
     /// d'octets, dans la dernière minute (lot 5, Ruling R1241) : l'en-tête `Retry-After` dit quand
     /// réessayer ; rien n'est fait. Statut 429.
     TokenBusy,
+    /// Le compte a déjà vingt jetons d'API vivants (lot 5, Ruling R1220) : en révoquer un avant
+    /// d'en créer un autre. Rien n'est créé. Statut 409.
+    TokenLimit,
+    /// La portée d'un jeton à créer ne se lit pas, ou nomme un espace où l'on n'a aucun rôle, ou
+    /// une page qu'on ne voit pas (ou à la corbeille) : la même réponse qu'un espace ou une page
+    /// inconnus. Statut 422.
+    InvalidScope,
+    /// Le niveau d'un jeton à créer n'est ni `read` ni `edit` (Ruling R1218). Statut 422.
+    InvalidLevel,
+    /// L'échéance d'un jeton à créer n'est pas un nombre de jours de 1 à 3 650. Statut 422.
+    InvalidExpiry,
 }
 
 /// Corps de toute réponse d'erreur.
@@ -1061,6 +1250,7 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<CopyFile>(&cfg),
         file::<CreatePage>(&cfg),
         file::<CreateSpace>(&cfg),
+        file::<CreateToken>(&cfg),
         file::<ErrorBody>(&cfg),
         file::<ErrorCode>(&cfg),
         file::<Favorites>(&cfg),
@@ -1098,6 +1288,16 @@ pub fn bindings() -> Vec<(String, String)> {
         file::<SignupMode>(&cfg),
         file::<SpaceInfo>(&cfg),
         file::<Thread>(&cfg),
+        file::<TokenCall>(&cfg),
+        file::<TokenCallOutcome>(&cfg),
+        file::<TokenCallSurface>(&cfg),
+        file::<TokenCalls>(&cfg),
+        file::<TokenCreated>(&cfg),
+        file::<TokenInfo>(&cfg),
+        file::<TokenLevel>(&cfg),
+        file::<TokenPage>(&cfg),
+        file::<TokenScope>(&cfg),
+        file::<TokenSpace>(&cfg),
         file::<Tree>(&cfg),
         file::<UpdateMember>(&cfg),
         file::<UpdatePage>(&cfg),

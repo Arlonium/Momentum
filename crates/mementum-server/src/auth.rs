@@ -349,7 +349,8 @@ pub const TOKEN_ROUTES: &[(&str, &str)] = &[
 
 /// Les routes qui ne s'ouvrent jamais à un jeton (Ruling R1222) : les comptes et les sessions, les
 /// espaces et leurs membres, les invitations, le partage, la suppression définitive, les favoris,
-/// les commentaires, l'historique, les fichiers envoyés, `PUT …/mmd`, `/sync` et `/events`.
+/// les commentaires, l'historique, les fichiers envoyés, `PUT …/mmd`, les jetons eux-mêmes (un
+/// jeton ne crée, ne liste ni ne révoque un jeton, Task S6), `/sync` et `/events`.
 pub const SESSION_ONLY_ROUTES: &[(&str, &str)] = &[
     ("GET", "/health"),
     ("GET", "/api/v1/info"),
@@ -406,6 +407,10 @@ pub const SESSION_ONLY_ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/v1/pages/{id}/versions"),
     ("GET", "/api/v1/pages/{id}/versions/{version_id}/state"),
     ("POST", "/api/v1/pages/{id}/versions/{version_id}/restore"),
+    ("GET", "/api/v1/tokens"),
+    ("POST", "/api/v1/tokens"),
+    ("DELETE", "/api/v1/tokens/{id}"),
+    ("GET", "/api/v1/tokens/{id}/calls"),
     ("GET", "/sync/{id}"),
     ("GET", "/events/{id}"),
 ];
@@ -880,6 +885,10 @@ pub(crate) enum Guarded {
     Login,
     /// `POST /api/v1/auth/password` : la vérification du mot de passe actuel.
     PasswordChange,
+    /// `POST /api/v1/tokens` : le mot de passe redemandé à la création d'un jeton d'API (lot 5,
+    /// décision L2). Ses propres fenêtres : une session volée qui l'essaie ne bloque pas le
+    /// titulaire qui change son mot de passe pour la chasser (la règle de R76).
+    TokenCreation,
 }
 
 /// La fenêtre d'une adresse.
@@ -933,7 +942,7 @@ impl Window {
 /// la fenêtre qu'on attaque) ou se sature (on ferme la porte à tout le
 /// monde) :
 /// - celles des adresses **qui ont un compte** ne sont jamais évincées, et ne
-///   comptent dans aucune borne. Il y en a au plus deux par compte, une par
+///   comptent dans aucune borne. Il y en a au plus trois par compte, une par
 ///   [`Guarded`] : leur mémoire est bornée par le nombre de comptes. Elles
 ///   partent sur une réussite, ou quand le compte revient après leur fin ;
 /// - celles des adresses **sans compte** vivent dans un réservoir de
@@ -1022,6 +1031,7 @@ fn throttle_key(what: Guarded, email: &str) -> [u8; 32] {
     let tag: &[u8] = match what {
         Guarded::Login => b"login:",
         Guarded::PasswordChange => b"password:",
+        Guarded::TokenCreation => b"token:",
     };
     let mut hasher = Sha256::new();
     hasher.update(tag);

@@ -201,6 +201,30 @@ fn cli_set_password_recovers_account() {
     let server = Server::start_with_env(&data, &[("RUST_LOG", "trace")]);
     let cookie = sign_up_alice(&server);
     assert_eq!(me(&server, &cookie), 200);
+    // Un jeton d'API, créé par la route (lot 5, Task S6) : la commande le révoque, et le dit.
+    let created = server.request(
+        "POST",
+        "/api/v1/tokens",
+        Some(
+            &json!({ "name": "agent", "level": "read", "scope": "all", "password": PASSWORD })
+                .to_string(),
+        ),
+        &[("Cookie", &cookie)],
+    );
+    assert_eq!(created.status, 201, "{}", created.body);
+    let api_token = serde_json::from_str::<serde_json::Value>(&created.body).unwrap()["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let bearer = format!("Bearer {api_token}");
+    let me_by_token = |server: &Server| {
+        server
+            .request("GET", "/api/v1/me", None, &[("Authorization", &bearer)])
+            .status
+    };
+    // `GET /me` n'est pas ouvert aux jetons (Ruling R1342) : `403`, et non `401`, dit que le
+    // jeton vit.
+    assert_eq!(me_by_token(&server), 403);
 
     // Pendant que le serveur tourne. Le mot de passe est la première ligne
     // de l'entrée standard, sans sa fin de ligne ; la suite ne compte pas.
@@ -224,6 +248,9 @@ fn cli_set_password_recovers_account() {
         stdout.contains("mot de passe de 28 caractères enregistré"),
         "{stdout}"
     );
+    // Les jetons d'API révoqués, comptés (Ruling R1221) : le jeton ne vaut plus.
+    assert!(stdout.contains("1 jeton d'API révoqué"), "{stdout}");
+    assert_eq!(me_by_token(&server), 401);
     // Jamais affiché, même avec les journaux au plus bavard ; pas plus que
     // son hachage.
     for secret in [NEW_PASSWORD, PASSWORD, "$argon2", "une seconde ligne"] {
@@ -250,7 +277,7 @@ fn cli_set_password_recovers_account() {
         .strip_prefix("mementum_session=")
         .expect("le jeton du cookie");
     assert_eq!(token.len(), 43, "{token}");
-    for secret in [NEW_PASSWORD, PASSWORD, "$argon2", token] {
+    for secret in [NEW_PASSWORD, PASSWORD, "$argon2", token, api_token.as_str()] {
         assert!(
             !log.contains(secret),
             "« {secret} » dans le journal du serveur"
