@@ -26,6 +26,9 @@ const proxy = {
   "/sync/": { target: API, ws: true },
   // Le canal de l'espace (R133), une WebSocket par espace affiché.
   "/events/": { target: API, ws: true },
+  // Le serveur MCP (`/mcp`, `/mcp/readonly`, lot 5) : l'écran des jetons donne la commande qui y
+  // branche Claude Code à l'adresse que le navigateur connaît, celle de Vite en développement.
+  "/mcp": { target: API },
 };
 
 export default defineConfig({
