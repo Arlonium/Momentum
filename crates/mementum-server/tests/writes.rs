@@ -702,3 +702,190 @@ async fn a_revocation_waits_behind_the_writes_its_token_queued() {
 async fn a_password_change_waits_behind_the_writes_its_tokens_queued() {
     a_revocation_waits_behind_the_writes_its_tokens_queued(Revocation::PasswordChange).await;
 }
+
+/// Ce qu'un jeton écrit pendant que sa révocation attend son tour.
+#[derive(Clone, Copy, Debug)]
+enum TokenWrite {
+    Rename,
+    Reorder,
+    Trash,
+    Restore,
+    Duplicate,
+    Create,
+    /// Le lot de pages, qui relisait déjà son jeton dans sa transaction (Ruling R1356) : le
+    /// témoin.
+    Batch,
+}
+
+/// Lot 5, correction groupée (Ruling R1516, défaut S1 de la relecture finale) : une écriture par
+/// jeton admise par la porte pendant que la révocation attend son tour n'est pas validée après
+/// elle. Le tour d'écriture tenu, la session d'Olga révoque le jeton (en file), puis le jeton
+/// écrit (en file derrière) ; le tour rendu, la révocation est validée, et l'écriture du jeton
+/// répond `401 invalid_token` sans rien écrire : un déclencheur témoin numérote toute écriture
+/// d'un nœud, et aucune ne suit la révocation. Avant la correction, le renommage, la corbeille et
+/// la copie étaient validés après elle (`200`, `200`, `201`).
+async fn a_token_write_queued_behind_its_revocation_writes_nothing(what: TokenWrite) {
+    use tower::ServiceExt;
+    let t = common::sync::open_app().await;
+    let olga = t.account("Olga").await;
+    olga.create(serde_json::json!({ "title": "Sœur" })).await;
+    let target = olga
+        .create(serde_json::json!({ "title": "Cible" }))
+        .await
+        .id;
+    if matches!(what, TokenWrite::Restore) {
+        olga.browser
+            .post(
+                &format!("/api/v1/pages/{target}/trash"),
+                serde_json::json!({}),
+            )
+            .await
+            .assert_status(StatusCode::OK);
+    }
+    let (token, token_id) = common::api_token(
+        &t.store,
+        olga.id,
+        mementum_store::TokenLevel::Edit,
+        mementum_store::TokenScope::All,
+        true,
+    )
+    .await;
+    exec_sql(
+        &t.db_path(),
+        "CREATE TABLE witness (n INTEGER PRIMARY KEY AUTOINCREMENT, what TEXT NOT NULL); \
+         CREATE TRIGGER witness_node_in AFTER INSERT ON nodes \
+         BEGIN INSERT INTO witness (what) VALUES ('nœud'); END; \
+         CREATE TRIGGER witness_node_up AFTER UPDATE ON nodes \
+         BEGIN INSERT INTO witness (what) VALUES ('nœud'); END; \
+         CREATE TRIGGER witness_revoked AFTER UPDATE OF revoked_at ON api_tokens \
+         WHEN NEW.revoked_at IS NOT NULL \
+         BEGIN INSERT INTO witness (what) VALUES ('révocation'); END;",
+    )
+    .await;
+    t.indexer.settled().await;
+    let queued = async |at_least: usize| {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while t.store.queued_writes() < at_least {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "{what:?}, file : {at_least}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    };
+    let host = |mut request: Request<Body>| {
+        request
+            .headers_mut()
+            .insert(header::HOST, "localhost".parse().unwrap());
+        request
+    };
+    let held = t.store.hold_writes().await;
+    let mut revocation = host(
+        Request::delete(format!("/api/v1/tokens/{token_id}"))
+            .body(Body::empty())
+            .unwrap(),
+    );
+    revocation.headers_mut().insert(
+        header::COOKIE,
+        olga.browser.cookie().unwrap().parse().unwrap(),
+    );
+    let router = t.router.clone();
+    let revoking = tokio::spawn(async move { router.oneshot(revocation).await.unwrap().status() });
+    queued(1).await;
+    let empty = |path: String| Request::post(path).body(Body::empty()).unwrap();
+    let request = match what {
+        TokenWrite::Rename => json_request(
+            Method::PATCH,
+            &format!("/api/v1/pages/{target}"),
+            &serde_json::json!({ "title": "Par le jeton" }),
+        ),
+        TokenWrite::Reorder => json_request(
+            Method::PATCH,
+            &format!("/api/v1/pages/{target}"),
+            &serde_json::json!({ "afterId": null }),
+        ),
+        TokenWrite::Trash => empty(format!("/api/v1/pages/{target}/trash")),
+        TokenWrite::Restore => empty(format!("/api/v1/pages/{target}/restore")),
+        TokenWrite::Duplicate => empty(format!("/api/v1/pages/{target}/duplicate")),
+        TokenWrite::Create => json_request(
+            Method::POST,
+            "/api/v1/pages",
+            &serde_json::json!({ "spaceId": olga.space.to_string(), "title": "Par le jeton" }),
+        ),
+        TokenWrite::Batch => json_request(
+            Method::POST,
+            &format!("/api/v1/spaces/{}/pages/batch", olga.space),
+            &serde_json::json!({ "pages": [{ "title": "Par le jeton" }] }),
+        ),
+    };
+    let request = host(common::with_bearer(request, &token));
+    let router = t.router.clone();
+    let writing = tokio::spawn(async move { router.oneshot(request).await.unwrap() });
+    queued(2).await;
+    drop(held);
+    let revoked = revoking.await.unwrap();
+    assert!(revoked.is_success(), "{what:?} : révocation {revoked}");
+    let response = writing.await.unwrap();
+    let status = response.status();
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let after = query_i64(
+        &t.db_path(),
+        "SELECT COUNT(*) FROM witness WHERE what = 'nœud' \
+         AND n > (SELECT n FROM witness WHERE what = 'révocation')",
+    )
+    .await;
+    assert_eq!(
+        (status, after),
+        (StatusCode::UNAUTHORIZED, 0),
+        "{what:?} : l'écriture du jeton après sa révocation ({})",
+        String::from_utf8_lossy(&body)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"], "invalid_token", "{what:?}");
+    assert_eq!(
+        query_i64(
+            &t.db_path(),
+            &format!("SELECT COUNT(*) FROM nodes WHERE id = '{target}' AND title = 'Cible'"),
+        )
+        .await,
+        1,
+        "{what:?} : la page garde son titre"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_rename_queued_behind_the_revocation_of_its_token_writes_nothing() {
+    a_token_write_queued_behind_its_revocation_writes_nothing(TokenWrite::Rename).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_reorder_queued_behind_the_revocation_of_its_token_writes_nothing() {
+    a_token_write_queued_behind_its_revocation_writes_nothing(TokenWrite::Reorder).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_trash_queued_behind_the_revocation_of_its_token_writes_nothing() {
+    a_token_write_queued_behind_its_revocation_writes_nothing(TokenWrite::Trash).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_restore_queued_behind_the_revocation_of_its_token_writes_nothing() {
+    a_token_write_queued_behind_its_revocation_writes_nothing(TokenWrite::Restore).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_copy_queued_behind_the_revocation_of_its_token_writes_nothing() {
+    a_token_write_queued_behind_its_revocation_writes_nothing(TokenWrite::Duplicate).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_creation_queued_behind_the_revocation_of_its_token_writes_nothing() {
+    a_token_write_queued_behind_its_revocation_writes_nothing(TokenWrite::Create).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_batch_queued_behind_the_revocation_of_its_token_writes_nothing() {
+    a_token_write_queued_behind_its_revocation_writes_nothing(TokenWrite::Batch).await;
+}

@@ -760,8 +760,16 @@ impl FromRequestParts<AppState> for AuthUser {
             )?;
             // Les écritures d'un jeton attendent dans la voie de la part des jetons du compte,
             // distincte de celle de sa session (lot 5, Task X2, Ruling R1640, qui tranche R1359) :
-            // une rafale d'un agent ne passe pas devant ce que tape la personne.
-            mementum_store::attribute_writes_to(user.party());
+            // une rafale d'un agent ne passe pas devant ce que tape la personne. Et chacune de
+            // leurs transactions relit le jeton, son tour venu (correction groupée, Ruling R1516) :
+            // une écriture admise pendant que la révocation attend son tour n'est pas validée
+            // après elle.
+            match user.token() {
+                Some(grant) => {
+                    mementum_store::attribute_writes_to_token(user.party(), grant.token_id);
+                }
+                None => mementum_store::attribute_writes_to(user.party()),
+            }
             return Ok(user);
         }
         // Un jeton qui n'est pas passé par la porte ne retombe jamais sur la session.

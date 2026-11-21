@@ -100,32 +100,113 @@ impl Lane {
     pub(crate) fn caller() -> Lane {
         writer().map_or(Lane::Common, Lane::Account)
     }
+
+    /// Une transaction de cette voie, ouverte par une tâche qui écrit au nom d'un jeton d'API,
+    /// relit ce jeton (lot 5, correction groupée, Ruling R1516) : la voie d'un compte, celle des
+    /// copies, la voie commune. Pas le journal d'une page (l'acteur relit le jeton nommé dans son
+    /// écriture, Ruling R1607), ni le dépôt, l'index ou le journal d'activité, qu'aucune tâche
+    /// d'un jeton n'écrit pour lui.
+    fn relies_on_the_token(self) -> bool {
+        matches!(self, Lane::Account(_) | Lane::Copies | Lane::Common)
+    }
+}
+
+/// À qui la tâche attribue ses écritures : la part de la file (un compte, ou les jetons d'un
+/// compte) et, pour un appel venu par un jeton d'API, ce jeton.
+#[derive(Debug, Clone, Copy, Default)]
+struct Attribution {
+    account: Option<Uuid>,
+    token: Option<Uuid>,
 }
 
 tokio::task_local! {
-    /// Le compte auquel la tâche attribue ses écritures, dans une portée de [`writes_by`].
-    static WRITER: Cell<Option<Uuid>>;
+    /// À qui la tâche attribue ses écritures, dans une portée de [`writes_by`].
+    static WRITER: Cell<Attribution>;
+}
+
+fn attribution() -> Attribution {
+    WRITER.try_with(Cell::get).unwrap_or_default()
 }
 
 /// Mène `work` en attribuant ses écritures dans le store au compte `account` (`None` : à
 /// personne, jusqu'à ce que [`attribute_writes_to`] en nomme un). C'est la voie de la file où
 /// elles attendent leur tour. Une tâche lancée depuis `work` n'en hérite pas : la lancer dans sa
-/// propre portée, avec [`writer`].
+/// propre portée, avec [`writes_as_caller`].
 pub fn writes_by<F: Future>(account: Option<Uuid>, work: F) -> impl Future<Output = F::Output> {
-    WRITER.scope(Cell::new(account), work)
+    WRITER.scope(
+        Cell::new(Attribution {
+            account,
+            token: None,
+        }),
+        work,
+    )
+}
+
+/// Mène `work` en lui attribuant les écritures comme la tâche qui l'appelle : son compte, et son
+/// jeton d'API s'il en a un (Ruling R1516). Pour une tâche lancée depuis une requête, qui écrit
+/// en son nom (`to_completion` du serveur) : `writes_by(writer(), …)` perdrait le jeton, et une
+/// écriture du jeton passerait après sa révocation.
+pub fn writes_as_caller<F: Future>(work: F) -> impl Future<Output = F::Output> {
+    WRITER.scope(Cell::new(attribution()), work)
 }
 
 /// Le compte auquel la tâche attribue ses écritures ; `None` hors d'une portée de [`writes_by`],
 /// ou si personne n'y est encore nommé.
 pub fn writer() -> Option<Uuid> {
-    WRITER.try_with(Cell::get).ok().flatten()
+    attribution().account
+}
+
+/// Le jeton d'API au nom duquel la tâche écrit ; `None` pour une session, ou hors d'une portée.
+pub(crate) fn writing_token() -> Option<Uuid> {
+    attribution().token
 }
 
 /// Attribue désormais au compte `account` les écritures de la tâche, si elle est dans une portée
 /// de [`writes_by`] ; hors d'une portée, rien. Le serveur l'appelle une fois la session d'une
 /// requête lue.
 pub fn attribute_writes_to(account: Uuid) {
-    let _ = WRITER.try_with(|writer| writer.set(Some(account)));
+    let _ = WRITER.try_with(|writer| {
+        writer.set(Attribution {
+            account: Some(account),
+            token: None,
+        })
+    });
+}
+
+/// Attribue désormais les écritures de la tâche à la part `party` (les jetons d'un compte), au
+/// nom du jeton d'API `token` : chaque transaction qu'elle ouvre dans la voie de son compte, des
+/// copies ou commune relit ce jeton une fois son tour venu, et rend `StoreError::TokenRevoked`
+/// sans rien écrire s'il n'est plus vivant (lot 5, correction groupée, Ruling R1516). Le serveur
+/// l'appelle une fois le jeton d'une requête admis par la porte. Hors d'une portée, rien.
+pub fn attribute_writes_to_token(party: Uuid, token: Uuid) {
+    let _ = WRITER.try_with(|writer| {
+        writer.set(Attribution {
+            account: Some(party),
+            token: Some(token),
+        })
+    });
+}
+
+/// Le jeton `token` est-il encore vivant, lu par `conn` (la connexion qui écrit, au tour de la
+/// tâche) ?
+pub(crate) async fn token_lives(
+    conn: &mut SqliteConnection,
+    token: Uuid,
+) -> Result<bool, StoreError> {
+    Ok(sqlx::query(concat!(
+        "SELECT 1 FROM api_tokens WHERE id = ?1 AND ",
+        crate::tokens::live_token!()
+    ))
+    .bind(token.to_string())
+    .bind(crate::now_ms())
+    .fetch_optional(conn)
+    .await?
+    .is_some())
+}
+
+/// Le jeton que doit relire une écriture de la voie `lane` faite par la tâche, s'il y en a un.
+pub(crate) fn token_to_check(lane: Lane) -> Option<Uuid> {
+    writing_token().filter(|_| lane.relies_on_the_token())
 }
 
 /// L'écrivain du store : la seule connexion qui écrit, et la file de ceux qui attendent leur tour.
@@ -220,7 +301,15 @@ impl Writer {
         lane: Lane,
     ) -> Result<(Transaction<'static, Sqlite>, Turn), StoreError> {
         let turn = self.turn(lane).await;
-        let tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        // Dans la transaction, verrou d'écriture pris : la révocation, par une écriture du store
+        // comme par un autre processus, est validée avant elle, ou après (Ruling R1516). Le
+        // refus annule la transaction (elle tombe sans validation) et rend le tour.
+        if let Some(token) = token_to_check(lane)
+            && !token_lives(&mut tx, token).await?
+        {
+            return Err(StoreError::TokenRevoked);
+        }
         Ok((tx, turn))
     }
 
@@ -228,7 +317,15 @@ impl Writer {
     /// est sa propre transaction.
     pub(crate) async fn connection(&self, lane: Lane) -> Result<WriteConn, StoreError> {
         let turn = self.turn(lane).await;
-        let conn = self.pool.acquire().await?;
+        let mut conn = self.pool.acquire().await?;
+        // Une seule instruction, sans transaction : relu au tour de la tâche, le jeton ne peut
+        // être révoqué par une écriture du store avant elle (la révocation attend son tour) ;
+        // seul un autre processus sur la base le pourrait (Ruling R1516).
+        if let Some(token) = token_to_check(lane)
+            && !token_lives(&mut conn, token).await?
+        {
+            return Err(StoreError::TokenRevoked);
+        }
         Ok(WriteConn { conn, _turn: turn })
     }
 

@@ -431,11 +431,12 @@ pub(crate) fn now_ms() -> i64 {
 /// abandonnée en route (client parti) : pour une suite d'écritures qui ne doit
 /// pas s'arrêter au milieu, ou une écriture de droits suivie de la fermeture
 /// des connexions qui les avaient lus. Ses écritures restent dans la voie du
-/// compte de la requête, dans la file d'écriture du store (Ruling R512).
+/// compte de la requête, dans la file d'écriture du store (Ruling R512), au nom
+/// de son jeton d'API s'il en a un (Ruling R1516 : chaque transaction le relit).
 pub(crate) async fn to_completion<T: Send + 'static>(
     work: impl Future<Output = Result<T, ApiError>> + Send + 'static,
 ) -> Result<T, ApiError> {
-    tokio::spawn(mementum_store::writes_by(mementum_store::writer(), work))
+    tokio::spawn(mementum_store::writes_as_caller(work))
         .await
         .map_err(|e| ApiError::internal(&e))?
 }
