@@ -700,3 +700,71 @@ async fn two_pages_never_wait_for_each_other() {
     drop(held);
     assert_eq!(status(waiting).await, StatusCode::NO_CONTENT);
 }
+
+/// Lot 5, correction groupée (mutation S7-04 de la relecture finale, Ruling R1387) : `If-Match`
+/// se juge dans la commande qui écrit, verrou de la page tenu, jamais avant. Le verrou de la page
+/// tenu, Tom envoie un `PUT /mmd` qui nomme la révision courante, et attend le verrou ; une
+/// écriture passe alors à côté du verrou (par le hub) ; le verrou rendu, le `PUT /mmd` répond
+/// `409 revision_conflict` et l'écriture d'entre-temps reste. Jugée avant le verrou, la
+/// révision valait encore : le `PUT /mmd` écrasait l'écriture d'entre-temps, en `204`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn if_match_is_judged_once_the_lock_of_the_page_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(&dir).await;
+    let (page, _, users) = team(&state, &["tom"]).await;
+    let tom = &users[0];
+    assert_eq!(
+        status(put(&state, tom, page, "Un\n".into())).await,
+        StatusCode::NO_CONTENT
+    );
+    let read = state.hub.read_page(page).await.unwrap();
+    let held = state
+        .page_writes
+        .reserve(page, Uuid::now_v7())
+        .unwrap()
+        .lock()
+        .await;
+    let mut headers = axum::http::HeaderMap::new();
+    headers.insert(
+        axum::http::header::IF_MATCH,
+        format!("\"{}\"", read.revision).parse().unwrap(),
+    );
+    let waiting = {
+        let (state, who) = (
+            state.clone(),
+            SessionUser {
+                user: tom.user.clone(),
+                session: tom.session,
+            },
+        );
+        tokio::spawn(async move {
+            put_mmd(
+                State(state),
+                who,
+                Ok(Path(page.to_string())),
+                headers,
+                Ok(Bytes::from("Écrasé\n")),
+            )
+            .await
+            .map(|response| response.status())
+        })
+    };
+    until("le PUT /mmd attend le verrou de la page", async || {
+        state.page_writes.places(page) == 2
+    })
+    .await;
+    let between = mementum_md::parse("Entre-temps\n").unwrap();
+    state
+        .hub
+        .write_blocks_at(page, between, Some(tom.user.id), None)
+        .await
+        .unwrap();
+    drop(held);
+    assert_eq!(status(waiting).await, StatusCode::CONFLICT);
+    let blocks = state.hub.read_blocks(page).await.unwrap();
+    let shown = format!("{blocks:?}");
+    assert!(
+        shown.contains("Entre-temps") && !shown.contains("Écrasé"),
+        "l'écriture d'entre-temps reste : {shown}"
+    );
+}
