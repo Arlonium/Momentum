@@ -679,6 +679,64 @@ async fn a_batch_is_written_whole_or_not_at_all() {
     none.assert_error(StatusCode::UNPROCESSABLE_ENTITY, "too_many_pages");
 }
 
+/// Lot 5, correction groupée (mutation S7-23 de la relecture finale, Ruling R1243) : le poids des
+/// documents d'un lot (16 Mio, `max_duplicated_bytes`) se compte pour tout le lot, pas page par
+/// page. Sur une instance ordinaire, une page de cinquante paragraphes pèse `one` octets ; sur une
+/// instance bornée à une fois et demie ce poids, un lot d'une telle page passe, un lot de deux est
+/// refusé (`422 subtree_too_large`), et rien n'en est créé. Compté par page, il passait.
+#[tokio::test]
+async fn the_weight_of_a_batch_is_counted_for_the_whole_batch() {
+    let markdown: String = (0..50)
+        .map(|i| format!("Paragraphe {i} d'une page assez longue pour peser.\n"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let page = json!({ "title": "Lourde", "markdown": markdown });
+    let weight_of = async |t: &TestApp, id: &str| {
+        query_i64(
+            &t.db_path(),
+            &format!("SELECT LENGTH(state_blob) FROM doc_snapshots WHERE node_id = '{id}'"),
+        )
+        .await
+    };
+
+    // Témoin : sur une instance ordinaire, la page pèse `one` octets.
+    let t = open_app().await;
+    let team = Team::new(&t).await;
+    let uri = format!("/api/v1/spaces/{}/pages/batch", team.space);
+    let created = team
+        .olga
+        .browser
+        .post(&uri, json!({ "pages": [page.clone()] }))
+        .await;
+    created.assert_status(StatusCode::CREATED);
+    let one = weight_of(&t, created.json()[0]["id"].as_str().unwrap()).await;
+    assert!(one > 2_000, "cinquante paragraphes : {one}");
+
+    let t = TestApp::with_config(|cfg| {
+        cfg.signup = SignupMode::Open;
+        cfg.max_duplicated_bytes = (one * 3 / 2) as usize;
+    })
+    .await;
+    let team = Team::new(&t).await;
+    let uri = format!("/api/v1/spaces/{}/pages/batch", team.space);
+    team.olga
+        .browser
+        .post(&uri, json!({ "pages": [page.clone()] }))
+        .await
+        .assert_status(StatusCode::CREATED);
+    let before = tree_nodes(&team.olga.browser, team.space).await.len();
+    team.olga
+        .browser
+        .post(&uri, json!({ "pages": [page.clone(), page] }))
+        .await
+        .assert_error(StatusCode::UNPROCESSABLE_ENTITY, "subtree_too_large");
+    assert_eq!(
+        tree_nodes(&team.olga.browser, team.space).await.len(),
+        before,
+        "rien n'est créé"
+    );
+}
+
 /// Les pages nées d'un lot, avec leur contenu, sont indexées comme toute page neuve (`mark_born`) :
 /// la recherche les trouve.
 #[tokio::test]
