@@ -490,11 +490,13 @@ test("escape_in_the_confirmation_leaves_the_window_open", async () => {
 });
 
 test("names_from_elsewhere_are_isolated_and_an_absurd_date_breaks_nothing", async () => {
+  // Les caractères de direction, écrits par leur code : jamais en clair dans le source.
+  const [RLO, FSI, PDI] = [0x202e, 0x2068, 0x2069].map((code) => String.fromCharCode(code));
   const strange: Version = {
     id: "v9",
     createdAt: 9e15,
     reason: "closing",
-    authors: [author("eve", "‮evE"), author("zoe", "Zoé")],
+    authors: [author("eve", `${RLO}evE`), author("zoe", "Zoé")],
     agentAuthors: [],
   };
   await opened({ versions: [strange] });
@@ -507,7 +509,7 @@ test("names_from_elsewhere_are_isolated_and_an_absurd_date_breaks_nothing", asyn
   }
   // Dans un attribut, chaque nom est entouré de U+2068 et U+2069.
   expect(item.querySelector(".mm-history-authors")?.getAttribute("title")).toBe(
-    "⁨‮evE⁩, ⁨Zoé⁩",
+    `${FSI}${RLO}evE${PDI}, ${FSI}Zoé${PDI}`,
   );
 });
 
