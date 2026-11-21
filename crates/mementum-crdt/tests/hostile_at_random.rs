@@ -20,6 +20,11 @@
 //! la même chose (`common/twins.rs`, Ruling R875). Dans le passage ordinaire de la suite, pour un
 //! cas sur quatre ; dans un essai élargi, pour tous.
 //!
+//! Les écritures du serveur s'y mêlent : par différence, un pas sur quatre (R1299) ; d'agent (une
+//! liste d'opérations de la Task S3, passe de fin du lot 5), un pas sur deux, dans un cas sur cinq
+//! du passage ordinaire, et dans tous ceux d'un essai élargi ou avec `MEMENTUM_FUZZ_AGENTS`
+//! (Ruling R1528).
+//!
 //! Déterministe par graine. `MEMENTUM_FUZZ_SEEDS` règle le nombre de cas de chaque voie,
 //! `MEMENTUM_FUZZ_FROM` le premier. Les cas tournent dans un **processus fils** (ce binaire,
 //! relancé sur `child_cases`) : une violation d'accès arrête le fils, pas le rapport ; le parent
@@ -1060,6 +1065,14 @@ fn case(seed: u64, stored: bool, tally: &mut Tally) {
     // Comparer les deux yrs coûte quatre fois le cas lui-même : dans le passage ordinaire de la
     // suite, un cas sur quatre ; dans un essai élargi (`MEMENTUM_FUZZ_SEEDS`), tous.
     served.watched = std::env::var_os("MEMENTUM_FUZZ_SEEDS").is_some() || seed.is_multiple_of(4);
+    // Les écritures d'agent portaient le passage ordinaire de 322 à 494 s en debug (passe de fin
+    // du lot 5) : dans ce passage, un cas sur cinq en a ; dans un essai élargi
+    // (`MEMENTUM_FUZZ_SEEDS`), ou avec `MEMENTUM_FUZZ_AGENTS`, tous (correction groupée, Ruling
+    // R1528). Le cas qui n'en a pas ne tire rien de leur générateur : ses autres pas restent ceux
+    // d'un essai élargi.
+    let with_agents = std::env::var_os("MEMENTUM_FUZZ_SEEDS").is_some()
+        || std::env::var_os("MEMENTUM_FUZZ_AGENTS").is_some()
+        || seed.is_multiple_of(5);
     let mut stages: Vec<Vec<u8>> = vec![served.page.state_vector()];
     // Un peu de page : des blocs, du texte, des attributs.
     for _ in 0..(3 + rng.below(5)) {
@@ -1115,7 +1128,7 @@ fn case(seed: u64, stored: bool, tally: &mut Tally) {
         }
         // Une écriture d'agent, un pas sur deux : un plan refusé est une réponse ordinaire, une
         // écriture qui échoue après un plan vérifié est un échec.
-        if agents.chance(50) {
+        if with_agents && agents.chance(50) {
             let key = match served.agent_write(&mut agents) {
                 Ok(true) => "écrite".to_string(),
                 Ok(false) => "sans effet".to_string(),
