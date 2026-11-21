@@ -517,6 +517,38 @@ test("a_result_of_the_open_page_goes_to_its_block", async ({ browser }) => {
   await expect(p.locator('[role="alert"]')).toHaveCount(0);
 });
 
+test("the_found_block_is_lit_on_arrival_then_let_go", async ({ browser }) => {
+  // Correction 11 de la recette du lot 4 : le contenu propre du bloc atteint porte un fond d'accent
+  // qui s'efface en deux secondes ; rien ne bouge, rien n'est écrit. Sans mouvement, le fond reste
+  // fixe, puis part. Une seconde arrivée le relance.
+  const { p, api, secret, recipes } = await opened(browser);
+  const before = await getMmd(api, recipes.id);
+  await searchAndEnter(p, secret, recipes.id);
+  const blockId = await blockOfUrl(p, recipes.id);
+  await waitSynced(p);
+  const own = p.locator(
+    `.mm-editor [data-node-type="blockOuter"][data-id="${blockId}"] > .bn-block > .bn-block-content`,
+  );
+  await expect(own).toHaveClass(/\bmm-arrived\b/);
+  expect(await own.evaluate((e) => getComputedStyle(e).animationName)).toMatch(/^mm-arrived-[01]$/);
+  const lit = await own.boundingBox();
+  await expect(own).not.toHaveClass(/\bmm-arrived\b/, { timeout: 5_000 });
+  expect(await own.boundingBox()).toEqual(lit);
+
+  await p.emulateMedia({ reducedMotion: "reduce" });
+  await searchAndEnter(p, secret, recipes.id);
+  await expect(own).toHaveClass(/\bmm-arrived\b/);
+  const still = await own.evaluate((e) => {
+    const style = getComputedStyle(e);
+    return { animation: style.animationName, shadow: style.boxShadow };
+  });
+  expect(still.animation).toBe("none");
+  expect(still.shadow).toContain("inset");
+  await expect(own).not.toHaveClass(/\bmm-arrived\b/, { timeout: 5_000 });
+  expect(await own.evaluate((e) => getComputedStyle(e).boxShadow)).toBe("none");
+  expect(await getMmd(api, recipes.id)).toBe(before);
+});
+
 /** Cherche `query` par Ctrl+K, et ouvre par Entrée la page `id`, trouvée par son titre dans l'arbre. */
 async function titleAndEnter(p: Page, query: string, id: string) {
   await p.keyboard.press("Control+k");

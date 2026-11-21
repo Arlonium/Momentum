@@ -7,8 +7,10 @@ import { act, type ReactElement } from "react";
 import { afterEach, beforeEach, expect, test, vi } from "vitest";
 import type { MementumEditor } from "./debug";
 import { EditorView } from "./Editor";
+import * as Y from "yjs";
+import { ARRIVAL_MS } from "./arrival";
 import { goToBlock, useArrival, type Arrival, type Synced } from "./goToBlock";
-import { stored, type Seed } from "../test/editors";
+import { drag, elementIds, exchange, peer, REMOTE, seedState, stored, type Seed } from "../test/editors";
 import { blockOf, flush, mountEditor, renewSession, type Mounted } from "../test/richEditor";
 
 /** Un identifiant comme un client peut en écrire : ni UUID, ni sûr dans un sélecteur ou du HTML. */
@@ -402,4 +404,69 @@ test("a_late_arrival_leaves_the_focus_to_a_select_and_to_an_open_menu", async ()
   button.focus();
   await act(async () => session.sync());
   expect(inEditor(m)).toBe(true);
+});
+
+// Le bloc atteint est surligné (correction 11 de la recette du lot 4) : son contenu propre reçoit,
+// par une décoration de ProseMirror (`arrival.ts`), une classe qui porte un fond d'accent qui
+// s'efface, retirée au bout de `ARRIVAL_MS`. Rien n'est écrit dans le document.
+
+/** Les classes du surlignage que porte le contenu propre du bloc `id`. */
+const lit = (m: Mounted, id: string) => [...contentOf(m, id).classList].filter((c) => c.startsWith("mm-arrived"));
+
+test("the_reached_block_is_lit_by_its_own_content_then_let_go_and_nothing_is_written", async () => {
+  const m = await mountEditor({ blocks: PAGE });
+  const ids = elementIds(m.doc);
+  const page = stored(m.doc);
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  try {
+    expect(go(m.editor, "mid")).toBe(true);
+    const first = lit(m, "mid");
+    expect(first).toContain("mm-arrived");
+    expect(first).toHaveLength(2);
+    // Le contenu propre, pas le bloc entier : ses sous-blocs ne sont pas surlignés.
+    expect(lit(m, "deep")).toEqual([]);
+    expect(blockOf(m, "mid").classList.contains("mm-arrived")).toBe(false);
+    // Une seconde arrivée relance le surlignage : une autre classe, donc une autre animation.
+    expect(go(m.editor, "mid")).toBe(true);
+    const second = lit(m, "mid");
+    expect(second).toContain("mm-arrived");
+    expect(second).not.toEqual(first);
+    // Une arrivée ailleurs : le bloc d'avant n'est plus surligné.
+    expect(go(m.editor, "end")).toBe(true);
+    expect(lit(m, "mid")).toEqual([]);
+    expect(lit(m, "end")).toContain("mm-arrived");
+    // Le temps passé, la classe part.
+    act(() => {
+      vi.advanceTimersByTime(ARRIVAL_MS - 1);
+    });
+    expect(lit(m, "end")).toContain("mm-arrived");
+    act(() => {
+      vi.advanceTimersByTime(1);
+    });
+    expect(lit(m, "end")).toEqual([]);
+  } finally {
+    vi.useRealTimers();
+  }
+  // Rien n'a été écrit dans le document : ni élément, ni texte.
+  expect(m.writes).toEqual([]);
+  expect(elementIds(m.doc)).toEqual(ids);
+  expect(stored(m.doc)).toEqual(page);
+  expect(m.errors).toEqual([]);
+});
+
+test("a_lit_block_moved_by_another_does_not_keep_its_light_and_nothing_breaks", async () => {
+  const base = await seedState(PAGE);
+  const m = await mountEditor({ base, clientID: 2 });
+  const tom = await peer("Tom", 3, base);
+  const server = new Y.Doc();
+  Y.applyUpdate(server, base, REMOTE);
+  expect(go(m.editor, "end")).toBe(true);
+  expect(lit(m, "end")).toContain("mm-arrived");
+  // Tom déplace le bloc en haut de la page : il est supprimé puis recréé au même `id` (R220).
+  drag(tom, "end", { above: "top" });
+  await exchange(server, [tom, m]);
+  await flush();
+  expect(lit(m, "end")).toEqual([]);
+  expect(stored(m.doc).map((b) => b.id)).toEqual(["end", "top", "mid", ODD, "pic"]);
+  expect(m.errors).toEqual([]);
 });

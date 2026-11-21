@@ -2,13 +2,15 @@
 // bloc amené à l'écran. Pour un lien de la table des matières (`blocks/Toc.tsx`, d'où vient ce code)
 // et pour une adresse qui vise un bloc (`/p/<page>#b=<bloc>`, lot 4 : un résultat de recherche, un
 // rétrolien ; `useArrival`). C'est une navigation : rien n'est écrit dans le document, et la même
-// chose vaut pour qui lit et pour qui modifie.
+// chose vaut pour qui lit et pour qui modifie. Le bloc atteint est surligné un instant (recette du
+// lot 4, correction 11).
 //
 // L'identifiant d'un bloc vient d'ailleurs (une adresse, un serveur, un autre client) : un texte
 // quelconque. Il n'est comparé qu'à l'attribut `data-id` des blocs affichés (`blockElement`, qui
 // l'échappe), et un bloc introuvable ne fait rien : ni erreur, ni message, ni défilement.
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { blockElement, OWN_CONTENT } from "../comments/dom";
+import { lightBlock } from "./arrival";
 import { focusEditor } from "./blocks/BlockWindowHost";
 import type { MementumEditor } from "./debug";
 
@@ -21,7 +23,8 @@ type How = {
 
 /**
  * Va au bloc `id` de `editor`. Rend faux, sans rien faire, si la vue n'est pas montée ou si le bloc
- * n'y est pas (parti, d'une autre page, jamais écrit).
+ * n'y est pas (parti, d'une autre page, jamais écrit). Le bloc atteint est surligné un instant
+ * (`arrival.ts`).
  */
 export function goToBlock(editor: MementumEditor, id: string, { block = "center", focus = true }: How = {}): boolean {
   const root = editor.domElement;
@@ -45,6 +48,7 @@ export function goToBlock(editor: MementumEditor, id: string, { block = "center"
   // Le contenu propre du bloc, pas le bloc entier, qui porte aussi ses sous-blocs : centré sur son
   // sous-arbre, un bloc dont les sous-blocs dépassent la fenêtre n'y aurait pas son texte.
   (element.querySelector(OWN_CONTENT) ?? element).scrollIntoView({ block });
+  lightBlock(editor, id);
   return true;
 }
 

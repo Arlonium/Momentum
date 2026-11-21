@@ -72,6 +72,7 @@ import { COPY_REFUSED, duplicateFromGesture, handleBlockIds, isDuplicateShortcut
 import { dismissNotice } from "./editorNotice";
 import { shownUrl } from "./files";
 import { fixtureInput, replaceNewPage } from "./fixtures";
+import { arrival } from "./arrival";
 import { followBlock } from "./followBlock";
 import { useArrival } from "./goToBlock";
 import type { BlockTarget } from "../router";
@@ -119,6 +120,7 @@ type Props = {
  * `followBlock` : le curseur de l'onglet suit son bloc quand quelqu'un d'autre le déplace.
  * `linkBound` : un lien de plus de 16 Kio, que le serveur refuserait, n'est pas posé (R495).
  * `redoKeys` : « rétablir » sans rien à rétablir ne retombe pas sur l'annulation (R731, R732).
+ * `arrival` : le bloc où l'on arrive (`goToBlock`) est surligné un instant, sans rien écrire.
  * `resolveFileUrl` : une image, une vidéo ou un son ne sont chargés que d'une adresse permise
  * (`shownUrl`, `files.ts`), jamais de l'adresse du document telle quelle ; un bloc sans adresse ne
  * charge rien (`about:blank` y écrivait une erreur de console par bloc vide). Rien pour envoyer : seul
@@ -129,7 +131,7 @@ export const EDITOR_OPTIONS = {
   resolveFileUrl: async (url: string) => (url === "" ? "" : shownUrl(url)),
   dictionary: DICTIONARY,
   dropCursor: multiColumnDropCursor,
-  extensions: [syntaxHighlighter, followBlock, linkBound, redoKeys],
+  extensions: [syntaxHighlighter, followBlock, linkBound, redoKeys, arrival],
 };
 
 export function Editor({

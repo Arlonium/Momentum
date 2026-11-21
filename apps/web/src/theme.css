@@ -10,6 +10,8 @@
   --mm-accent: #23704f;
   --mm-accent-hover: #174d36;
   --mm-accent-soft: #23704f22;
+  /* Le fond du bloc où l'on arrive, au début de son effacement (`editor/arrival.ts`). */
+  --mm-arrival: #23704f2e;
   --mm-danger: #b4462b;
   --mm-danger-hover: #923820;
   --mm-danger-soft: #fbefeb;
@@ -2924,6 +2926,47 @@ button.mm-reaction:hover {
 @media (prefers-reduced-motion: reduce) {
   .mm-block-glow {
     animation: none;
+  }
+}
+
+/* Le bloc où l'on arrive (`editor/arrival.ts`, recette du lot 4, correction 11) : son contenu propre
+   reçoit un fond d'accent qui s'efface en deux secondes (`ARRIVAL_MS`). Une ombre portée en dedans,
+   qui couvre la boîte : elle se peint par-dessus le fond du bloc (sa couleur, s'il en a une, reste
+   dessous) et sous son texte, sans taille, marge ni bordure : rien ne bouge. Deux classes de même
+   dessin, deux noms d'animation : une seconde arrivée sur le même bloc relance l'animation. Le texte
+   sur le fond le plus fort (`--mm-text` sur `--mm-arrival` posé sur le blanc) : 10,5:1. Trois
+   classes, comme toute règle à nous sur un élément de BlockNote (R763). */
+.mm-editor .bn-block-content.mm-arrived-0 {
+  animation: mm-arrived-0 2s ease-out;
+}
+
+.mm-editor .bn-block-content.mm-arrived-1 {
+  animation: mm-arrived-1 2s ease-out;
+}
+
+@keyframes mm-arrived-0 {
+  from {
+    box-shadow: inset 0 0 0 100vmax var(--mm-arrival);
+  }
+  to {
+    box-shadow: inset 0 0 0 100vmax transparent;
+  }
+}
+
+@keyframes mm-arrived-1 {
+  from {
+    box-shadow: inset 0 0 0 100vmax var(--mm-arrival);
+  }
+  to {
+    box-shadow: inset 0 0 0 100vmax transparent;
+  }
+}
+
+/* Sans mouvement : le fond reste fixe, puis part avec la classe. */
+@media (prefers-reduced-motion: reduce) {
+  .mm-editor .bn-block-content.mm-arrived {
+    animation: none;
+    box-shadow: inset 0 0 0 100vmax var(--mm-arrival);
   }
 }
 
