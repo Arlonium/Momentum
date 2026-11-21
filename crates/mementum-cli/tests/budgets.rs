@@ -407,7 +407,8 @@ fn cold_start_and_memory_with_an_index_of_10000_pages() {
 /// CI ne l'a pas vue sous Linux, R1659), et sa mémoire de travail ; et, sans budget, 2 s après la
 /// dernière lecture, quand vivent encore les acteurs des pages lues depuis moins de 3 s (R1645 :
 /// environ 4,5 Ko par bloc d'une page ouverte ; R1657 : un acteur qu'aucune connexion n'a ouvert
-/// s'arrête 3 s après son dernier appel).
+/// s'arrête 3 s après son dernier appel). Sous Linux (glibc), le serveur fixe lui-même son seuil de
+/// `mmap` (Ruling R1556), ce que la scène vérifie à son journal.
 #[test]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
 fn memory_after_500_agent_reads() {
@@ -424,7 +425,7 @@ fn memory_after_500_agent_reads() {
         unopened_actors,
         used,
         used_actors,
-    } = agent_reads(&[]);
+    } = agent_reads();
     println!(
         "MESURE après {READS} lectures d'agent de pages de {BLOCKS} blocs ({read_in:?}, une \
          écriture d'agent avant chaque relecture, {PAGES} pages) : 2 s après, les acteurs vivants, \
@@ -450,9 +451,10 @@ fn memory_after_500_agent_reads() {
         used_actors.1,
     );
     // Ruling R1659 : la borne n'est affirmée que là où un passage l'a vue tenir (sous Windows, 117
-    // Mo). Sous Linux (glibc, `RssAnon`), la mesure écrit sa ligne `MESURE` sans rien affirmer tant
-    // qu'un passage de la CI ne l'a pas lue : la passe de fin du lot la lit et tranche (la borne,
-    // `malloc_trim` après l'arrêt des acteurs, ou une mesure sans borne).
+    // Mo). Sous Linux (glibc, `RssAnon`), la mesure écrit sa ligne `MESURE` sans rien affirmer : le
+    // seuil de `mmap` que fixe le binaire (Ruling R1556) a donné 108,4 Mo dans le passage des sondes
+    // (R1547) ; la borne y sera affirmée si ce passage-ci et ses deux reprises
+    // ([`memory_after_500_agent_reads_again`]) tiennent sous 150 Mo avec une marge.
     #[cfg(windows)]
     {
         if let Some(own) = used.own {
@@ -472,43 +474,27 @@ fn memory_after_500_agent_reads() {
     );
 }
 
-/// Défaut D1 (Ruling R1547) : la scène de [`memory_after_500_agent_reads`], rejouée sous Linux, le
-/// serveur lancé sous des réglages de la glibc passés par son environnement (la glibc les lit
-/// d'elle-même à son lancement : aucun code du serveur ne change). Après le `malloc_trim` de
-/// R1526, la mémoire en propre au repos vaut 185 Mo sur la CI (R1546), pour un budget de 150 Mo ;
-/// ces sondes disent si moins d'arènes (`MALLOC_ARENA_MAX`), ou un seuil de `mmap` fixe
-/// (`MALLOC_MMAP_THRESHOLD_`, qui éteint le seuil dynamique : les grands blocs vont et viennent
-/// par `mmap` et `munmap`), ramènent le reste sous le budget. Une ligne `MESURE` par réglage,
-/// **sans borne** : la scène de référence reste celle de `memory_after_500_agent_reads`, lancée
-/// au même passage. Quatre scènes, environ six minutes de plus au job `budgets`.
-#[cfg(target_os = "linux")]
+/// Défaut D1 (Ruling R1556) : la scène de [`memory_after_500_agent_reads`], rejouée deux fois de
+/// plus sous Linux (glibc), sans aucun réglage d'environnement (c'est le binaire qui fixe son seuil
+/// de `mmap` désormais) : avec la ligne de la mesure de référence, trois valeurs d'un même passage
+/// de la CI, qui disent la variance avant que la borne de 150 Mo soit affirmée sous Linux (R1659
+/// tient jusque-là). Une ligne `MESURE` par reprise, **sans borne**. Environ trois minutes de plus
+/// au job `budgets`.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[test]
 #[ignore = "mesure de performance, à lancer en --release (job `budgets` de la CI)"]
-fn memory_after_500_agent_reads_under_glibc_settings() {
+fn memory_after_500_agent_reads_again() {
     release_only();
     let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
-    const SETTINGS: [&[(&str, &str)]; 4] = [
-        &[("MALLOC_ARENA_MAX", "2")],
-        &[("MALLOC_ARENA_MAX", "1")],
-        &[("MALLOC_MMAP_THRESHOLD_", "131072")],
-        &[
-            ("MALLOC_ARENA_MAX", "2"),
-            ("MALLOC_MMAP_THRESHOLD_", "131072"),
-        ],
-    ];
-    for settings in SETTINGS {
-        let scene = agent_reads(settings);
-        let named = settings
-            .iter()
-            .map(|(name, value)| format!("{name}={value}"))
-            .collect::<Vec<_>>()
-            .join(" ");
+    for pass in 2..=3 {
+        let scene = agent_reads();
         println!(
-            "MESURE réglages de la glibc {named} (défaut D1, R1547), {AGENT_READS} lectures \
-             d'agent ({:?}) : 2 s après, {} acteurs, en propre {} Mo, mémoire de travail {:.1} Mo \
-             ; 4 s après, {} acteurs, en propre {} Mo, mémoire de travail {:.1} Mo ; au repos \
-             ({IDLE_CLOSE:?} après), {} acteurs, {} malloc_trim, en propre {} Mo, mémoire de \
-             travail {:.1} Mo (budget {:.0} Mo, non affirmé)",
+            "MESURE scène de référence rejouée, passage {pass} sur 3 (défaut D1, R1556 : seuil de \
+             mmap fixé par le binaire), {AGENT_READS} lectures d'agent ({:?}) : 2 s après, {} \
+             acteurs, en propre {} Mo, mémoire de travail {:.1} Mo ; 4 s après, {} acteurs, en \
+             propre {} Mo, mémoire de travail {:.1} Mo ; au repos ({IDLE_CLOSE:?} après), {} \
+             acteurs, {} malloc_trim, en propre {} Mo, mémoire de travail {:.1} Mo (budget {:.0} \
+             Mo, non affirmé)",
             scene.read_in,
             scene.working_actors.0,
             own_mb(scene.working),
@@ -543,36 +529,26 @@ struct AgentReads {
     used_actors: (usize, usize),
 }
 
-/// La scène de [`memory_after_500_agent_reads`] (voir sa documentation), le serveur lancé avec
-/// `vars` en plus des variables de la scène ; sous Linux, la scène vérifie qu'elles sont dans
-/// l'environnement du serveur. Le serveur est tué avant le retour.
-fn agent_reads(vars: &[(&str, &str)]) -> AgentReads {
+/// La scène de [`memory_after_500_agent_reads`] (voir sa documentation). Sous Linux (glibc), elle
+/// vérifie au journal du serveur qu'il a fixé lui-même son seuil de `mmap` (Ruling R1556) : sans
+/// cela, la mesure ne dirait rien du réglage. Le serveur est tué avant le retour.
+fn agent_reads() -> AgentReads {
     const PAGES: usize = AGENT_PAGES;
     const BLOCKS: usize = AGENT_BLOCKS;
     const READS: usize = AGENT_READS;
     let dir = tempfile::tempdir().unwrap();
-    let mut env = vec![
+    let env = [
         ("MEMENTUM_TOKEN_CALLS_PER_MIN", "100000"),
         ("MEMENTUM_ACCOUNT_TOKEN_CALLS_PER_MIN", "100000"),
         // Les lignes du lancement et de l'arrêt de chaque acteur, et de `malloc_trim` sous
-        // Linux : la mesure dit combien d'acteurs vivent quand elle lit (défaut D1, R1526).
-        ("RUST_LOG", "info,mementum_sync::actor=debug"),
+        // Linux : la mesure dit combien d'acteurs vivent quand elle lit (défaut D1, R1526) ; et,
+        // sous Linux, la ligne du seuil de `mmap` fixé au démarrage (R1556).
+        (
+            "RUST_LOG",
+            "info,mementum_sync::actor=debug,mementum::glibc=debug",
+        ),
     ];
-    env.extend_from_slice(vars);
     let server = Server::start_with_env(&dir.path().join("donnees"), &env);
-    if cfg!(target_os = "linux") {
-        let environ = std::fs::read(format!("/proc/{}/environ", server.pid()))
-            .expect("l'environnement du serveur");
-        for (name, value) in vars {
-            let entry = format!("{name}={value}");
-            assert!(
-                environ
-                    .split(|byte| *byte == 0)
-                    .any(|line| line == entry.as_bytes()),
-                "{entry} absent de l'environnement du serveur"
-            );
-        }
-    }
     let password = "un mot de passe assez long";
     let account =
         serde_json::json!({ "email": "alice@exemple.fr", "name": "Alice", "password": password });
@@ -685,6 +661,14 @@ fn agent_reads(vars: &[(&str, &str)]) -> AgentReads {
     thread::sleep(IDLE_CLOSE + Duration::from_secs(3) - after_reads.elapsed());
     let used = memory_of(server.pid());
     let used_actors = actors_alive(&server);
+    if cfg!(all(target_os = "linux", target_env = "gnu")) {
+        let log = server.stderr();
+        assert!(
+            log.contains("seuil de mmap de la glibc fixé par le binaire"),
+            "le serveur n'a pas fixé son seuil de mmap (Ruling R1556) ; début de son journal :\n{}",
+            log.lines().take(20).collect::<Vec<_>>().join("\n")
+        );
+    }
     server.kill();
     AgentReads {
         read_in,
