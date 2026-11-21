@@ -508,7 +508,11 @@ fn page_drawn(page: &PageText, draw: &mut dyn FnMut() -> String) -> ToolOutput {
                 "Page coupée : lis la suite par fetch avec from={} et since={since}.",
                 id(next)
             )),
-            None => head.cut_line("Page coupée : lis la suite par fetch."),
+            // Des blocs sans alias à eux, que `fetch` saute sous `<unloaded blocks=N/>` (R1402).
+            None => head.cut_line(
+                "Page coupée, et la suite ne se lit pas par fetch (des blocs sans alias à eux, \
+                 marqués <unloaded blocks=N/>) : travaille sur les blocs lus, par update_page.",
+            ),
         }
     }
     let (mmd, cut) = cut_lines(&page.mmd, MAX_CONTENT_BYTES);

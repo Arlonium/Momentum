@@ -82,14 +82,14 @@
     {
       "name": "fetch",
       "title": "Lire une page",
-      "description": "Lit une page en MMD, avec sa révision, ou le plan d'un espace. Le format est décrit par la ressource mementum://spec/mmd. Une page longue est rendue par tranches : reprends avec `from` (l'alias `next`) et `since` (la révision de la première tranche) ; une tranche dit alors quels blocs déjà lus ont changé depuis (relis-les avant de les modifier). Donne la révision de la dernière tranche à update_page. `anchors: true` écrit l'alias de chaque bloc (`^bk7qa`), pour viser un bloc.",
+      "description": "Lit une page en MMD, avec sa révision, ou le plan d'un espace. Le format est décrit par la ressource mementum://spec/mmd. Une page longue est rendue par tranches : reprends avec `from` (l'alias `next`) et `since` (la révision de la première tranche) ; une tranche dit alors quels blocs déjà lus ont changé depuis (relis-les avant de les modifier). Donne la révision de la dernière tranche à update_page. `anchors: true` écrit l'alias de chaque bloc (`^bk7qa`), pour viser un bloc. Les tranches mises bout à bout ne sont pas le MMD de la page (sous-blocs remontés, marques <unloaded>) : pour changer une longue page, vise ses blocs (str_replace, insert…), jamais replace_page. `id` prend aussi l'adresse d'une page, ou le nom d'un espace.",
       "inputSchema": {
         "type": "object",
         "additionalProperties": false,
         "properties": {
           "id": {
             "type": "string",
-            "description": "Ce qu'on lit : l'identifiant ou l'adresse d'une page, ou le nom ou l'identifiant d'un espace (son plan).",
+            "description": "Ce qu'on lit : l'identifiant ou l'adresse d'une page (son `#b=<bloc>` fait commencer la lecture à ce bloc), ou le nom ou l'identifiant d'un espace (son plan).",
             "minLength": 1,
             "maxLength": 2048
           },
@@ -125,7 +125,7 @@
             ],
             "format": "uint32",
             "minimum": 1,
-            "description": "Octets de MMD rendus au plus : 24 576 par défaut, 49 152 au plus.",
+            "description": "Octets de MMD rendus au plus : 24 576 par défaut, de 1 024 à 49 152 (moins de 1 024 vaut 1 024).",
             "maximum": 49152
           }
         },

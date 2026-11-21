@@ -73,8 +73,8 @@ pub struct SearchInput {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FetchInput {
-    /// Ce qu'on lit : l'identifiant ou l'adresse d'une page, ou le nom ou l'identifiant d'un
-    /// espace (son plan).
+    /// Ce qu'on lit : l'identifiant ou l'adresse d'une page (son `#b=<bloc>` fait commencer la
+    /// lecture à ce bloc), ou le nom ou l'identifiant d'un espace (son plan).
     #[schemars(length(min = 1, max = MAX_PAGE_REF_CHARS))]
     pub id: String,
     /// Écrire l'alias de chaque bloc en ancre (`^bk7qa`), pour viser un bloc dans `update_page`.
@@ -88,7 +88,8 @@ pub struct FetchInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(length(min = 1, max = MAX_TOKEN_CHARS))]
     pub since: Option<String>,
-    /// Octets de MMD rendus au plus : 24 576 par défaut, 49 152 au plus.
+    /// Octets de MMD rendus au plus : 24 576 par défaut, de 1 024 à 49 152 (moins de 1 024 vaut
+    /// 1 024).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(range(min = 1, max = MAX_LIMIT))]
     pub limit: Option<u32>,
@@ -434,7 +435,11 @@ const SPECS: [Spec; 6] = [
                       la première tranche) ; une tranche dit alors quels blocs déjà lus ont changé \
                       depuis (relis-les avant de les modifier). Donne la révision de la dernière \
                       tranche à update_page. `anchors: true` écrit l'alias de chaque bloc \
-                      (`^bk7qa`), pour viser un bloc.",
+                      (`^bk7qa`), pour viser un bloc. Les tranches mises bout à bout ne sont pas \
+                      le MMD de la page (sous-blocs remontés, marques <unloaded>) : pour changer \
+                      une longue page, vise ses blocs (str_replace, insert…), jamais \
+                      replace_page. `id` prend aussi l'adresse d'une page, ou le nom d'un \
+                      espace.",
         read_only: true,
         destructive: false,
         schema: schema::<FetchInput>,

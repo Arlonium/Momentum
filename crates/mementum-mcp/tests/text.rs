@@ -553,3 +553,28 @@ fn a_search_while_indexing_says_a_page_may_be_missing() {
     assert!(results(true).text().contains("L'index n'est pas à jour"));
     assert!(!results(false).text().contains("index"));
 }
+
+/// Une page coupée dit comment lire la suite : par `from` et `since` quand `next` la nomme ; sans
+/// `next`, que `fetch` ne la lit pas (des blocs sans alias à eux, Ruling R1402, « Pour M2 » de S7).
+#[test]
+fn a_page_cut_without_next_says_fetch_does_not_read_the_rest() {
+    let mut page = page_with("Un.\n", "Notes");
+    page.truncated = true;
+    page.next = Some("bk7qa".into());
+    let resumed = text::page(&page);
+    assert!(
+        resumed
+            .text()
+            .contains("lis la suite par fetch avec from=bk7qa et since=r_0123456789abcdef"),
+        "{}",
+        resumed.text()
+    );
+    page.next = None;
+    let stuck = text::page(&page);
+    assert!(
+        stuck.text().contains("la suite ne se lit pas par fetch"),
+        "{}",
+        stuck.text()
+    );
+    assert!(!stuck.text().contains("lis la suite par fetch"));
+}
