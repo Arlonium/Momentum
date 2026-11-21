@@ -735,8 +735,8 @@ for (const [name, typed, menu] of [
 // Échap dans le texte de l'éditeur, sans menu ouvert, ne fait rien (question 37 de la recette du lot
 // 4, choix (a), R1143) : le curseur reste où il est, et la frappe suivante s'y écrit. BlockNote 0.57
 // retirait le focus de l'éditeur (son extension `OverrideEscape`), et le laissait sur `body`. Avec du
-// texte sélectionné, Échap ferme la barre de mise en forme, comme avant, sans perdre le focus : la
-// sélection se réduit à sa fin.
+// texte sélectionné, la barre de mise en forme se ferme (par `useDismiss` de floating-ui), et Échap
+// réduit la sélection à sa tête, sans perdre le focus (R1593).
 test("escape_in_the_text_of_the_editor_keeps_the_focus_off_body", async ({ browser }) => {
   const account = await signUpAccount();
   const api = await apiAs(account);
@@ -751,8 +751,8 @@ test("escape_in_the_text_of_the_editor_keeps_the_focus_off_body", async ({ brows
   await p.keyboard.type("!");
   await expect(block).toHaveText("Début!");
 
-  // « but » sélectionné : la barre de mise en forme paraît ; Échap la ferme, le curseur à la fin de
-  // la sélection, et rien n'est remplacé.
+  // « but » sélectionné de gauche à droite : la barre de mise en forme paraît ; Échap la ferme, le
+  // curseur à la tête de la sélection (ici sa fin), et rien n'est remplacé.
   await expect(async () => {
     await p.evaluate(() => {
       const selection = document.getSelection()!;

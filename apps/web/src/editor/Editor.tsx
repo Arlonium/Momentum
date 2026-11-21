@@ -123,8 +123,8 @@ type Props = {
  * `redoKeys` : « rétablir » sans rien à rétablir ne retombe pas sur l'annulation (R731, R732).
  * `arrival` : le bloc où l'on arrive (`goToBlock`) est surligné un instant, sans rien écrire.
  * `escapeKeys`, et `OverrideEscape` de BlockNote retirée : Échap dans le texte, sans menu ouvert, ne
- * fait rien (le focus ne tombe plus sur `body`) ; sur du texte sélectionné, il ferme la barre de mise
- * en forme sans perdre le focus (question 37 de la recette du lot 4).
+ * fait rien (le focus ne tombe plus sur `body`) ; sur une sélection de texte, la barre de mise en forme
+ * montrée, il réduit la sélection à sa tête (question 37 de la recette du lot 4).
  * `resolveFileUrl` : une image, une vidéo ou un son ne sont chargés que d'une adresse permise
  * (`shownUrl`, `files.ts`), jamais de l'adresse du document telle quelle ; un bloc sans adresse ne
  * charge rien (`about:blank` y écrivait une erreur de console par bloc vide). Rien pour envoyer : seul

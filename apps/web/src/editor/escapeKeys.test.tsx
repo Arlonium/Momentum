@@ -1,6 +1,6 @@
 // Échap dans le texte d'une page (question 37 de la recette du lot 4, choix (a)) : sans menu ouvert, il
 // ne fait rien, le focus reste au texte ; sur du texte sélectionné, la barre de mise en forme
-// montrée, il réduit la sélection à sa fin, sans perdre le focus. Rien n'est écrit dans le document.
+// montrée, il réduit la sélection à sa tête, sans perdre le focus. Rien n'est écrit dans le document.
 // La preuve dans un navigateur : `e2e/search-rights.spec.ts`, `escape_in_the_text_of_the_editor_…`.
 import { FormattingToolbarExtension } from "@blocknote/core/extensions";
 import { TextSelection } from "prosemirror-state";
@@ -33,7 +33,7 @@ test("escape_in_the_text_keeps_the_focus_and_writes_nothing", async () => {
   expect(m.errors).toEqual([]);
 });
 
-test("escape_on_a_selection_closes_the_formatting_toolbar_and_keeps_the_focus", async () => {
+test("escape_on_a_selection_shrinks_it_to_its_head_and_keeps_the_focus", async () => {
   const m = await mountEditor({ blocks: PAGE });
   const view = m.editor.prosemirrorView;
   const text = view.dom as HTMLElement;

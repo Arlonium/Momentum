@@ -5,18 +5,20 @@
 // d'`EDITOR_OPTIONS`) : sans menu ouvert, Échap ne fait rien, le curseur reste où il est, comme dans
 // Notion.
 //
-// Ce qu'Échap fait ailleurs ne change pas : les menus « / », `@`, `[[` et le sélecteur d'emoji le
-// prennent eux-mêmes (ils sont ouverts, et `OverrideEscape` leur laissait déjà la touche) ; le menu
-// de la poignée, la fenêtre d'un bloc, le panneau des commentaires, la fenêtre de recherche et la
-// fenêtre de l'historique ont le focus quand on l'y tape. Une fenêtre (`dialog`) qui contient un
-// éditeur, l'aperçu d'une version, se fermait déjà par Échap tapé dans cet éditeur (sonde dans
-// Chromium), et se ferme toujours : la touche n'y est plus retenue (`preventDefault`).
+// Ce qu'Échap fait ailleurs ne change pas. La barre de mise en forme, celle des liens et les menus
+// « / », `@`, `[[` et d'emoji se ferment par `useDismiss` de floating-ui, pas par `OverrideEscape`
+// (qui laissait déjà la touche aux menus de suggestion ouverts) ; le menu de la poignée, la fenêtre
+// d'un bloc, le panneau des commentaires et la fenêtre de recherche ont le focus quand on l'y tape.
 //
-// Le seul geste que `OverrideEscape` rendait et qu'il faut garder : la barre de mise en forme, qui
-// paraît sur du texte sélectionné, se fermait (le focus parti, la barre partait). Ici, Échap réduit la
-// sélection à sa fin : la barre part, le focus reste, et la frappe suivante s'écrit là, sans rien
-// remplacer. À relire à chaque montée de BlockNote (le nom `OverrideEscape`, la clé de
-// `FormattingToolbarExtension`).
+// `escapeKeys` n'ajoute qu'une chose (R1584, récrit par R1593) : sur une sélection de texte, la barre
+// de mise en forme montrée, Échap réduit la sélection à sa tête (là où elle s'arrête, le bout que la
+// personne déplaçait), et prend la touche ; le focus reste au texte, et la frappe suivante s'écrit
+// là, sans rien remplacer. Un bloc sélectionné en entier (une image) reste tel quel.
+//
+// Sortir du texte au clavier sans rien écrire, depuis que Échap ne le fait plus : Ctrl+K (la
+// recherche) et Ctrl+Alt+M (commenter le bloc), qui rendent le focus en se fermant, et Maj+Tab depuis
+// un bloc de premier niveau. À relire à chaque montée de BlockNote (le nom `OverrideEscape`, la clé
+// de `FormattingToolbarExtension`).
 import { createExtension } from "@blocknote/core";
 import { FormattingToolbarExtension } from "@blocknote/core/extensions";
 import { TextSelection } from "prosemirror-state";
