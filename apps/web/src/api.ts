@@ -38,6 +38,7 @@ import type {
   CopyFile,
   CreatePage,
   CreateSpace,
+  CreateToken,
   ErrorBody,
   ErrorCode,
   Favorites,
@@ -67,6 +68,10 @@ import type {
   SignUp,
   SpaceInfo,
   Thread,
+  TokenCallOutcome,
+  TokenCalls,
+  TokenCreated,
+  TokenInfo,
   Tree,
   UpdateMember,
   UpdatePage,
@@ -578,6 +583,53 @@ export function changePassword(body: ChangePassword): Promise<PasswordChanged | 
       }
     }),
   );
+}
+
+// Jetons d'API du compte (lot 5, R1213 à R1221) : une session seulement, jamais un jeton. Le texte
+// d'un jeton n'est rendu qu'une fois, par sa création (`TokenCreated.token`) ; la liste n'en porte
+// que les quatre derniers caractères.
+
+const TOKENS = "/api/v1/tokens";
+
+/** `GET /api/v1/tokens` : les jetons du compte, les vivants d'abord (`live`, d'après le serveur). */
+export function listTokens(): Promise<TokenInfo[]> {
+  return call("GET", TOKENS);
+}
+
+/**
+ * `POST /api/v1/tokens` : `201`, le jeton, **cette fois seulement**, et ce que la liste en montrera.
+ * Refus : `422 invalid_name`, `invalid_level`, `invalid_scope`, `invalid_expiry` (jugés avant le mot
+ * de passe) ; `401 invalid_credentials` (mot de passe faux : pas une session perdue) ; `429
+ * too_many_attempts` ; `409 token_limit`. Un corps perdu après le `201` est une réponse perdue
+ * (`answerLost`) : le jeton existe, sans que personne en ait le texte (R1372).
+ */
+export async function createToken(body: CreateToken): Promise<TokenCreated> {
+  const res = await send("POST", TOKENS, body);
+  try {
+    return (await res.json()) as TokenCreated;
+  } catch {
+    throw new ApiError(0, null, MAYBE_DONE);
+  }
+}
+
+/** `DELETE /api/v1/tokens/{id}` : `204`, déjà révoqué compris ; `404` pour un jeton qui n'est pas du compte. */
+export function revokeToken(id: string): Promise<void> {
+  return call("DELETE", `${TOKENS}/${encodeURIComponent(id)}`);
+}
+
+/**
+ * `GET /api/v1/tokens/{id}/calls` : cinquante appels au plus, le plus récent d'abord ; `before`,
+ * l'`id` de la dernière ligne déjà lue ; `outcome`, une issue exacte (R1373).
+ */
+export function tokenCalls(
+  id: string,
+  { before, outcome }: { before?: number; outcome?: TokenCallOutcome } = {},
+): Promise<TokenCalls> {
+  const query = new URLSearchParams();
+  if (before !== undefined) query.set("before", String(before));
+  if (outcome !== undefined) query.set("outcome", outcome);
+  const search = query.toString();
+  return call("GET", `${TOKENS}/${encodeURIComponent(id)}/calls${search === "" ? "" : `?${search}`}`);
 }
 
 // Espaces, membres et invitations. Dans un espace où l'on n'a aucun rôle, toute route répond

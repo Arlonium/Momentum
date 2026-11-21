@@ -419,6 +419,41 @@ test("a_password_change_says_its_revoked_tokens_and_survives_a_lost_body", async
   expect(asked).toBe(0);
 });
 
+test("token_routes_go_through_send_and_a_lost_creation_body_is_a_lost_answer", async () => {
+  // Lot 5, Task C1 : les jetons d'API passent par `send`, qui nomme le compte (R540) ; le corps
+  // d'une création perdu après son `201` est une réponse perdue (R757) : le jeton existe peut-être.
+  await loadedAs("alice");
+  const listed = api.listTokens();
+  const list = await waiting("GET", "/api/v1/tokens");
+  expect(list.account).toBe("alice");
+  list.answer(200, []);
+  await expect(listed).resolves.toEqual([]);
+
+  const body = { name: "Claude Code", level: "read", scope: "all", canTrash: false, password: "x" } as const;
+  const created = api.createToken(body);
+  const create = await waiting("POST", "/api/v1/tokens");
+  expect(create.account).toBe("alice");
+  expect(create.body).toEqual(body);
+  create.answerLostBody(201);
+  const lost = await created.catch((e: unknown) => e);
+  expect(api.answerLost(lost)).toBe(true);
+
+  const revoked = api.revokeToken("t/1");
+  const revoke = await waiting("DELETE", "/api/v1/tokens/t%2F1");
+  expect(revoke.account).toBe("alice");
+  revoke.answer(204);
+  await expect(revoked).resolves.toBeUndefined();
+
+  const calls = api.tokenCalls("t1", { before: 42, outcome: "refused" });
+  (await waiting("GET", "/api/v1/tokens/t1/calls?before=42&outcome=refused")).answer(200, {
+    calls: [],
+    more: false,
+    busyCount: 0,
+    purged: 0,
+  });
+  await expect(calls).resolves.toMatchObject({ more: false });
+});
+
 test("a_401_that_comes_back_during_a_refused_password_change_asks_to_log_in", async () => {
   await loadedAs("alice");
   const read = api.getTree("s1");
